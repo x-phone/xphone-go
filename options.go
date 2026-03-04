@@ -1,0 +1,100 @@
+package xphone
+
+import (
+	"crypto/tls"
+	"log/slog"
+	"time"
+)
+
+// Config holds all configuration for a Phone instance.
+type Config struct {
+	Username  string
+	Password  string
+	Host      string
+	Port      int
+	Transport string
+	TLSConfig *tls.Config
+
+	RegisterExpiry   time.Duration
+	RegisterRetry    time.Duration
+	RegisterMaxRetry int
+
+	NATKeepaliveInterval time.Duration
+
+	RTPPortMin   int
+	RTPPortMax   int
+	CodecPrefs   []Codec
+	JitterBuffer time.Duration
+	MediaTimeout time.Duration
+	PCMFrameSize int
+	PCMRate      int
+
+	Logger *slog.Logger
+}
+
+// Codec represents an audio codec.
+type Codec int
+
+const (
+	CodecPCMU Codec = 0
+	CodecPCMA Codec = 8
+	CodecG722 Codec = 9
+	CodecOpus Codec = 111
+)
+
+// DialOption is a functional option for Dial().
+type DialOption func(*DialOptions)
+
+// DialOptions holds configuration for an outbound call.
+type DialOptions struct {
+	CallerID      string
+	CustomHeaders map[string]string
+	EarlyMedia    bool
+	Timeout       time.Duration
+	CodecOverride []Codec
+}
+
+func applyDialOptions(opts []DialOption) DialOptions {
+	o := DialOptions{
+		Timeout: 30 * time.Second,
+	}
+	for _, fn := range opts {
+		fn(&o)
+	}
+	return o
+}
+
+// WithCallerID sets the caller ID for an outbound call.
+func WithCallerID(id string) DialOption {
+	return func(o *DialOptions) { o.CallerID = id }
+}
+
+// WithHeader adds a custom SIP header to an outbound call.
+func WithHeader(name, value string) DialOption {
+	return func(o *DialOptions) {
+		if o.CustomHeaders == nil {
+			o.CustomHeaders = make(map[string]string)
+		}
+		o.CustomHeaders[name] = value
+	}
+}
+
+// WithEarlyMedia enables early media (183 Session Progress).
+func WithEarlyMedia() DialOption {
+	return func(o *DialOptions) { o.EarlyMedia = true }
+}
+
+// WithDialTimeout sets the dial timeout for an outbound call.
+func WithDialTimeout(d time.Duration) DialOption {
+	return func(o *DialOptions) { o.Timeout = d }
+}
+
+// WithCodecOverride overrides the codec preference for an outbound call.
+func WithCodecOverride(codecs ...Codec) DialOption {
+	return func(o *DialOptions) { o.CodecOverride = codecs }
+}
+
+// AcceptOption is a functional option for Accept().
+type AcceptOption func(*acceptOptions)
+
+type acceptOptions struct{}

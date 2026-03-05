@@ -30,6 +30,12 @@ type phone struct {
 	state    PhoneState
 	incoming func(Call)
 
+	// dialFn establishes an outbound SIP dialog and returns a dialog interface.
+	// Production: set by Connect() to use sipgo's dialog API.
+	// Tests: set by connectWithTransport() to use the mock transport.
+	// The onResponse callback is invoked for each provisional/final SIP response.
+	dialFn func(ctx context.Context, target string, onResponse func(code int, reason string)) (dialog, error)
+
 	// Buffered callbacks set before Connect.
 	onRegisteredFn   func()
 	onUnregisteredFn func()
@@ -44,12 +50,43 @@ func newPhone(cfg Config) *phone {
 	}
 }
 
+// transportDial implements dialFn using the sipTransport interface.
+// Used by connectWithTransport() for test mocks.
+func (p *phone) transportDial(ctx context.Context, target string, onResponse func(code int, reason string)) (dialog, error) {
+	p.mu.Lock()
+	tr := p.tr
+	p.mu.Unlock()
+
+	code, reason, err := tr.SendRequest(ctx, "INVITE", nil)
+	if err != nil {
+		return nil, err
+	}
+	if onResponse != nil {
+		onResponse(code, reason)
+	}
+
+	for code >= 100 && code < 200 {
+		code, reason, err = tr.ReadResponse(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if onResponse != nil {
+			onResponse(code, reason)
+		}
+	}
+
+	return newPhoneDialog(), nil
+}
+
 // connectWithTransport is a test hook that connects with a mock transport.
 // It performs registration (consuming the queued 200 OK) and wires up the
 // incoming INVITE handler on the transport.
 func (p *phone) connectWithTransport(tr sipTransport) {
 	p.mu.Lock()
 	p.tr = tr
+	if p.dialFn == nil {
+		p.dialFn = p.transportDial
+	}
 	p.reg = newRegistry(tr, p.cfg)
 	// Apply buffered callbacks to the registry.
 	if p.onRegisteredFn != nil {
@@ -96,6 +133,11 @@ func (p *phone) Connect(ctx context.Context) error {
 		p.mu.Unlock()
 		return err
 	}
+
+	// Set dialFn to use sipgo's dialog API before connecting.
+	p.mu.Lock()
+	p.dialFn = tr.dial
+	p.mu.Unlock()
 
 	p.connectWithTransport(tr)
 	return nil
@@ -144,7 +186,7 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 		p.mu.Unlock()
 		return nil, ErrNotRegistered
 	}
-	tr := p.tr
+	dialFn := p.dialFn
 	p.mu.Unlock()
 
 	dialOpts := applyDialOptions(opts)
@@ -162,28 +204,29 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 
 	p.logger.Info("dialing", "target", target)
 
-	// Create the outbound call with a minimal dialog.
-	dlg := newPhoneDialog()
-	c := newOutboundCall(dlg, opts...)
-	c.logger = p.logger
+	// Collect provisional responses during dial; replay them on the call
+	// after construction to avoid a race between the response callback
+	// and the dialog field being swapped.
+	type sipResponse struct {
+		code   int
+		reason string
+	}
+	var responses []sipResponse
 
-	// Send the INVITE and get the first response.
-	code, reason, err := tr.SendRequest(dialCtx, "INVITE", nil)
+	// Establish the SIP dialog via dialFn.
+	dlg, err := dialFn(dialCtx, target, func(code int, reason string) {
+		responses = append(responses, sipResponse{code, reason})
+	})
 	if err != nil {
 		return nil, p.classifyDialError(ctx, dialCtx, err)
 	}
 
-	// Process responses until we get a final one (>= 200).
-	for code >= 100 && code < 200 {
-		c.simulateResponse(code, reason)
-		code, reason, err = tr.ReadResponse(dialCtx)
-		if err != nil {
-			return nil, p.classifyDialError(ctx, dialCtx, err)
-		}
+	// Create the call with the real dialog and replay responses.
+	c := newOutboundCall(dlg, opts...)
+	c.logger = p.logger
+	for _, r := range responses {
+		c.simulateResponse(r.code, r.reason)
 	}
-
-	// Process the final response.
-	c.simulateResponse(code, reason)
 
 	return c, nil
 }

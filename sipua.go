@@ -7,15 +7,17 @@ import (
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
+	"github.com/x-phone/xphone-go/internal/sdp"
 )
 
 // sipUA wraps sipgo's UserAgent and Client to implement sipTransport.
-// It provides real SIP signaling for registration and (in later phases) call control.
+// It provides real SIP signaling for registration and call control.
 type sipUA struct {
 	mu     sync.Mutex // protects dropHandler, incomingHandler only; cfg is immutable after construction
 	ua     *sipgo.UserAgent
 	client *sipgo.Client
-	cfg    Config // immutable after newSipUA returns
+	dc     *sipgo.DialogClientCache // outbound dialog management
+	cfg    Config                   // immutable after newSipUA returns
 
 	dropHandler     func()
 	incomingHandler func(from, to string)
@@ -47,10 +49,76 @@ func newSipUA(cfg Config) (*sipUA, error) {
 		return nil, fmt.Errorf("xphone: create client: %w", err)
 	}
 
+	contactHDR := sip.ContactHeader{
+		Address: sip.Uri{Scheme: "sip", User: cfg.Username, Host: "0.0.0.0"},
+	}
+	dc := sipgo.NewDialogClientCache(client, contactHDR)
+
 	return &sipUA{
 		ua:     ua,
 		client: client,
+		dc:     dc,
 		cfg:    cfg,
+	}, nil
+}
+
+// dial establishes an outbound SIP dialog using sipgo's dialog API.
+// It sends INVITE with SDP, waits for the answer (handling provisionals via
+// onResponse), sends ACK, and returns a sipgoDialogUAC.
+func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code int, reason string)) (dialog, error) {
+	recipient := sip.Uri{
+		Scheme: "sip",
+		User:   target,
+		Host:   s.cfg.Host,
+		Port:   s.cfg.Port,
+	}
+
+	// Build SDP offer.
+	sdpOffer := sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), sdp.DirSendRecv)
+
+	// Create the dialog session and send INVITE.
+	sess, err := s.dc.Invite(ctx, recipient, []byte(sdpOffer))
+	if err != nil {
+		return nil, fmt.Errorf("xphone: invite: %w", err)
+	}
+
+	// Ensure cleanup on any error after Invite succeeds.
+	waitCtx, waitCancel := context.WithCancel(ctx)
+	ok := false
+	defer func() {
+		if !ok {
+			waitCancel()
+			sess.Close()
+		}
+	}()
+
+	// WaitAnswer blocks until 200 OK (or failure/cancel).
+	// The OnResponse callback fires for each provisional and final response.
+	err = sess.WaitAnswer(waitCtx, sipgo.AnswerOptions{
+		OnResponse: func(res *sip.Response) error {
+			if onResponse != nil {
+				onResponse(res.StatusCode, res.Reason)
+			}
+			return nil
+		},
+		Username: s.cfg.Username,
+		Password: s.cfg.Password,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// ACK the 200 OK.
+	if err := sess.Ack(ctx); err != nil {
+		return nil, fmt.Errorf("xphone: ack: %w", err)
+	}
+
+	ok = true
+	return &sipgoDialogUAC{
+		sess:     sess,
+		invite:   sess.InviteRequest,
+		response: sess.InviteResponse,
+		cancelFn: waitCancel,
 	}, nil
 }
 

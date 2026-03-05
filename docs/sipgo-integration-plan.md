@@ -23,20 +23,22 @@ Adopt sipgo as the SIP signaling layer. Replace the stub `transport` and `phoneD
 
 ## Phase C: sipgo wiring — outbound calls (Dial)
 
-- [ ] C1. Implement `phone.Dial()` using `dialogClient.Invite()`:
+- [x] C1. Implement `phone.Dial()` using `dialogClient.Invite()`:
   - Build SDP offer via existing `internal/sdp`
   - `sess.WaitAnswer(ctx, AnswerOptions{OnResponse: ...})` for provisional handling
   - `sess.Ack(ctx)` on 200 OK
   - Create `sipgoDialog` wrapping `DialogClientSession`
-  - Wire into `call` struct
-- [ ] C2. Implement `sipgoDialog` for outbound (UAC):
+  - Wire into `call` struct via `dialFn` pattern
+- [x] C2. Implement `sipgoDialog` for outbound (UAC):
   - `SendBye(ctx)` → `sess.Bye(ctx)`
   - `SendCancel(ctx)` → cancel the WaitAnswer context
-  - `SendReInvite(ctx, sdp)` → `sess.TransactionRequest(ctx, reInviteReq)`
-  - `SendRefer(ctx, target)` → build REFER, `sess.WriteRequest(referReq)`
+  - `SendReInvite(ctx, sdp)` → `sess.Do(ctx, reInviteReq)`
+  - `SendRefer(ctx, target)` → build REFER, `sess.Do(ctx, referReq)`
   - Header accessors from `sess.InviteRequest` / `sess.InviteResponse`
-- [ ] C3. Handle dial timeout + context cancellation → CANCEL
-- [ ] C4. Verify: `go test ./... -count=1` + `go test -race ./...` pass
+- [x] C3. Handle dial timeout + context cancellation → CANCEL
+  - sipgo's `WaitAnswer` sends CANCEL when context is cancelled
+  - `dialFn` propagates context from `Dial()` (with timeout) through to `WaitAnswer`
+- [x] C4. Verify: `go test ./... -count=1` + `go test -race ./...` pass
 
 ## Phase D: sipgo wiring — inbound calls
 

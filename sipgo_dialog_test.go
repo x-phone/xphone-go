@@ -153,7 +153,7 @@ func TestSipgoDialogUAC_SendRefer(t *testing.T) {
 	err := d.SendRefer("sip:transfer@example.com")
 	require.NoError(t, err)
 	require.NotNil(t, sess.doReq, "Do should have been called")
-	assert.Equal(t, sip.RequestMethod("REFER"), sess.doReq.Method, "request method should be REFER")
+	assert.Equal(t, sip.REFER, sess.doReq.Method, "request method should be REFER")
 	referTo := sess.doReq.GetHeader("Refer-To")
 	require.NotNil(t, referTo, "Refer-To header should be present")
 	assert.Equal(t, "sip:transfer@example.com", referTo.Value())
@@ -164,7 +164,7 @@ func TestSipgoDialogUAC_Respond_ReturnsError(t *testing.T) {
 	d := testDialogUAC(sess)
 
 	err := d.Respond(200, "OK", nil)
-	assert.Error(t, err, "UAC should not be able to send responses")
+	assert.ErrorIs(t, err, ErrInvalidState)
 }
 
 func TestSipgoDialogUAC_CallID(t *testing.T) {

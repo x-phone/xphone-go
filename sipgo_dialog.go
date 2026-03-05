@@ -2,7 +2,6 @@ package xphone
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"github.com/emiago/sipgo/sip"
@@ -19,33 +18,49 @@ type clientSession interface {
 
 // sipgoDialogUAC implements the dialog interface for outbound (UAC) calls
 // backed by a sipgo DialogClientSession.
+//
+// sess, invite, and response are immutable after construction.
+// mu protects only cancelFn and onNotify.
 type sipgoDialogUAC struct {
 	mu       sync.Mutex
 	sess     clientSession
-	invite   *sip.Request    // the original INVITE request
-	response *sip.Response   // the final INVITE response (200 OK)
+	invite   *sip.Request       // immutable after construction
+	response *sip.Response      // immutable after construction
 	cancelFn context.CancelFunc // cancels the WaitAnswer context
 	onNotify func(int)
 }
 
 func (d *sipgoDialogUAC) Respond(code int, reason string, body []byte) error {
-	return fmt.Errorf("xphone: UAC cannot send responses")
+	return ErrInvalidState
 }
 
 func (d *sipgoDialogUAC) SendBye() error {
-	return fmt.Errorf("xphone: SendBye not yet implemented")
+	return d.sess.Bye(context.Background())
 }
 
 func (d *sipgoDialogUAC) SendCancel() error {
-	return fmt.Errorf("xphone: SendCancel not yet implemented")
+	d.mu.Lock()
+	fn := d.cancelFn
+	d.mu.Unlock()
+	if fn == nil {
+		return ErrInvalidState
+	}
+	fn()
+	return nil
 }
 
-func (d *sipgoDialogUAC) SendReInvite(sdp []byte) error {
-	return fmt.Errorf("xphone: SendReInvite not yet implemented")
+func (d *sipgoDialogUAC) SendReInvite(sdpBody []byte) error {
+	req := sip.NewRequest(sip.INVITE, d.invite.Recipient)
+	req.SetBody(sdpBody)
+	_, err := d.sess.Do(context.Background(), req)
+	return err
 }
 
 func (d *sipgoDialogUAC) SendRefer(target string) error {
-	return fmt.Errorf("xphone: SendRefer not yet implemented")
+	req := sip.NewRequest(sip.REFER, d.invite.Recipient)
+	req.AppendHeader(sip.NewHeader("Refer-To", target))
+	_, err := d.sess.Do(context.Background(), req)
+	return err
 }
 
 func (d *sipgoDialogUAC) OnNotify(fn func(code int)) {
@@ -55,15 +70,51 @@ func (d *sipgoDialogUAC) OnNotify(fn func(code int)) {
 }
 
 func (d *sipgoDialogUAC) CallID() string {
+	if h := d.invite.CallID(); h != nil {
+		return h.Value()
+	}
 	return ""
 }
 
 func (d *sipgoDialogUAC) Header(name string) []string {
-	return nil
+	var vals []string
+	// Check response first (Session-Expires, updated To tag, etc.)
+	if d.response != nil {
+		for _, h := range d.response.GetHeaders(name) {
+			vals = append(vals, h.Value())
+		}
+	}
+	if len(vals) > 0 {
+		return vals
+	}
+	// Fall back to request headers
+	if d.invite != nil {
+		for _, h := range d.invite.GetHeaders(name) {
+			vals = append(vals, h.Value())
+		}
+	}
+	return vals
 }
 
 func (d *sipgoDialogUAC) Headers() map[string][]string {
-	return nil
+	result := make(map[string][]string)
+	// Collect from response first (has updated To tag, Session-Expires, etc.)
+	if d.response != nil {
+		for _, h := range d.response.Headers() {
+			name := h.Name()
+			result[name] = append(result[name], h.Value())
+		}
+	}
+	// Add request-only headers not already present from response
+	if d.invite != nil {
+		for _, h := range d.invite.Headers() {
+			name := h.Name()
+			if _, exists := result[name]; !exists {
+				result[name] = append(result[name], h.Value())
+			}
+		}
+	}
+	return result
 }
 
 // Ensure sipgoDialogUAC satisfies the dialog interface at compile time.

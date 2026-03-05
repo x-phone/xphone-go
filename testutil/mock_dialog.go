@@ -7,15 +7,17 @@ import (
 )
 
 // MockDialog is a mock SIP dialog for testing call behavior.
+// It satisfies the dialog interface and also exposes test inspection methods
+// (ByeSent, LastResponseCode, etc.) on the concrete type.
 type MockDialog struct {
 	mu sync.Mutex
 
-	sdpAnswerSent      bool
 	lastResponseCode   int
 	lastResponseReason string
+	lastResponseBody   []byte
 	cancelSent         bool
 	byeSent            bool
-	lastReInviteSDP    string
+	lastReInviteSDP    []byte
 	referSent          bool
 	lastReferTarget    string
 	callID             string
@@ -45,104 +47,56 @@ func NewMockDialogWithHeaders(headers map[string][]string) *MockDialog {
 	return d
 }
 
-// SDPAnswerSent returns whether an SDP answer was sent.
-func (d *MockDialog) SDPAnswerSent() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.sdpAnswerSent
+// NewMockDialogWithSessionExpires creates a MockDialog with a Session-Expires header.
+func NewMockDialogWithSessionExpires(seconds int) *MockDialog {
+	return NewMockDialogWithHeaders(map[string][]string{
+		"Session-Expires": {fmt.Sprintf("%d", seconds)},
+	})
 }
 
-// SendSDPAnswer marks that an SDP answer was sent.
-func (d *MockDialog) SendSDPAnswer() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.sdpAnswerSent = true
-}
-
-// LastResponseCode returns the last SIP response code sent.
-func (d *MockDialog) LastResponseCode() int {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.lastResponseCode
-}
-
-// LastResponseReason returns the last SIP response reason phrase.
-func (d *MockDialog) LastResponseReason() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.lastResponseReason
-}
+// --- dialog interface methods (return error) ---
 
 // Respond records a SIP response.
-func (d *MockDialog) Respond(code int, reason string) {
+func (d *MockDialog) Respond(code int, reason string, body []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.lastResponseCode = code
 	d.lastResponseReason = reason
-}
-
-// CancelSent returns whether a CANCEL was sent.
-func (d *MockDialog) CancelSent() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.cancelSent
-}
-
-// SendCancel marks that a CANCEL was sent.
-func (d *MockDialog) SendCancel() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.cancelSent = true
-}
-
-// ByeSent returns whether a BYE was sent.
-func (d *MockDialog) ByeSent() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.byeSent
+	d.lastResponseBody = body
+	return nil
 }
 
 // SendBye marks that a BYE was sent.
-func (d *MockDialog) SendBye() {
+func (d *MockDialog) SendBye() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.byeSent = true
+	return nil
 }
 
-// LastReInviteSDP returns the SDP from the last re-INVITE.
-func (d *MockDialog) LastReInviteSDP() string {
+// SendCancel marks that a CANCEL was sent.
+func (d *MockDialog) SendCancel() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.lastReInviteSDP
+	d.cancelSent = true
+	return nil
 }
 
 // SendReInvite records a re-INVITE with the given SDP.
-func (d *MockDialog) SendReInvite(sdp string) {
+func (d *MockDialog) SendReInvite(sdp []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.lastReInviteSDP = sdp
-}
-
-// ReferSent returns whether a REFER was sent.
-func (d *MockDialog) ReferSent() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.referSent
-}
-
-// LastReferTarget returns the target of the last REFER.
-func (d *MockDialog) LastReferTarget() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.lastReferTarget
+	return nil
 }
 
 // SendRefer records a REFER to the given target.
-func (d *MockDialog) SendRefer(target string) {
+func (d *MockDialog) SendRefer(target string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.referSent = true
 	d.lastReferTarget = target
+	return nil
 }
 
 // OnNotify sets the callback for NOTIFY events.
@@ -150,16 +104,6 @@ func (d *MockDialog) OnNotify(fn func(code int)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.onNotify = fn
-}
-
-// SimulateNotify simulates a NOTIFY with the given response code.
-func (d *MockDialog) SimulateNotify(code int) {
-	d.mu.Lock()
-	fn := d.onNotify
-	d.mu.Unlock()
-	if fn != nil {
-		fn(code)
-	}
 }
 
 // CallID returns the SIP Call-ID.
@@ -184,13 +128,6 @@ func (d *MockDialog) Header(name string) []string {
 	return nil
 }
 
-// NewMockDialogWithSessionExpires creates a MockDialog with a Session-Expires header.
-func NewMockDialogWithSessionExpires(seconds int) *MockDialog {
-	return NewMockDialogWithHeaders(map[string][]string{
-		"Session-Expires": {fmt.Sprintf("%d", seconds)},
-	})
-}
-
 // Headers returns a copy of all SIP headers.
 func (d *MockDialog) Headers() map[string][]string {
 	d.mu.Lock()
@@ -202,4 +139,72 @@ func (d *MockDialog) Headers() map[string][]string {
 		cp[k] = vals
 	}
 	return cp
+}
+
+// --- Test inspection methods (concrete type only, not on dialog interface) ---
+
+// LastResponseCode returns the last SIP response code sent.
+func (d *MockDialog) LastResponseCode() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastResponseCode
+}
+
+// LastResponseReason returns the last SIP response reason phrase.
+func (d *MockDialog) LastResponseReason() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastResponseReason
+}
+
+// LastResponseBody returns the body from the last Respond call.
+func (d *MockDialog) LastResponseBody() []byte {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastResponseBody
+}
+
+// ByeSent returns whether a BYE was sent.
+func (d *MockDialog) ByeSent() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.byeSent
+}
+
+// CancelSent returns whether a CANCEL was sent.
+func (d *MockDialog) CancelSent() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cancelSent
+}
+
+// ReferSent returns whether a REFER was sent.
+func (d *MockDialog) ReferSent() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.referSent
+}
+
+// LastReferTarget returns the target of the last REFER.
+func (d *MockDialog) LastReferTarget() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastReferTarget
+}
+
+// LastReInviteSDP returns the SDP from the last re-INVITE.
+func (d *MockDialog) LastReInviteSDP() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return string(d.lastReInviteSDP)
+}
+
+// SimulateNotify simulates a NOTIFY with the given response code.
+func (d *MockDialog) SimulateNotify(code int) {
+	d.mu.Lock()
+	fn := d.onNotify
+	d.mu.Unlock()
+	if fn != nil {
+		fn(code)
+	}
 }

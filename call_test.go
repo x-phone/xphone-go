@@ -29,7 +29,8 @@ func TestCall_AcceptSendsSDPAnswer(t *testing.T) {
 	dialog := testutil.NewMockDialog()
 	call := newInboundCall(dialog)
 	call.Accept()
-	assert.True(t, dialog.SDPAnswerSent())
+	assert.Equal(t, 200, dialog.LastResponseCode())
+	assert.NotEmpty(t, dialog.LastResponseBody())
 }
 
 func TestCall_RejectSendsCorrectSIPCode(t *testing.T) {

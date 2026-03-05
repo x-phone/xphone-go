@@ -28,26 +28,29 @@ func newCallID() string {
 }
 
 // dialog is the internal interface for SIP dialog operations.
-// Satisfied by testutil.MockDialog in tests.
+// Production: backed by sipgo DialogClientSession/DialogServerSession.
+// Tests: satisfied by testutil.MockDialog.
+//
+// Methods that send SIP messages return error (network may fail).
+// call.go logs errors but does not block state transitions on them.
 type dialog interface {
-	SDPAnswerSent() bool
-	SendSDPAnswer()
-	LastResponseCode() int
-	LastResponseReason() string
-	Respond(code int, reason string)
-	CancelSent() bool
-	SendCancel()
-	ByeSent() bool
-	SendBye()
-	LastReInviteSDP() string
-	SendReInvite(sdp string)
-	ReferSent() bool
-	LastReferTarget() string
-	SendRefer(target string)
+	// Respond sends a SIP response (200 OK with SDP for accept, 4xx/6xx for reject).
+	Respond(code int, reason string, body []byte) error
+	// SendBye terminates the dialog.
+	SendBye() error
+	// SendCancel cancels a pending INVITE (pre-active calls).
+	SendCancel() error
+	// SendReInvite sends a re-INVITE with new SDP (hold/resume/refresh).
+	SendReInvite(sdp []byte) error
+	// SendRefer sends a REFER for blind transfer.
+	SendRefer(target string) error
+	// OnNotify registers a callback for NOTIFY events (REFER progress).
 	OnNotify(fn func(code int))
-	SimulateNotify(code int)
+	// CallID returns the SIP Call-ID.
 	CallID() string
+	// Header returns values for a SIP header (case-insensitive).
 	Header(name string) []string
+	// Headers returns a copy of all SIP headers.
 	Headers() map[string][]string
 }
 
@@ -272,14 +275,7 @@ func (c *call) Duration() time.Duration {
 }
 
 func (c *call) Header(name string) []string {
-	headers := c.dlg.Headers()
-	lower := strings.ToLower(name)
-	for k, v := range headers {
-		if strings.ToLower(k) == lower {
-			return v
-		}
-	}
-	return nil
+	return c.dlg.Header(name)
 }
 
 func (c *call) Headers() map[string][]string {
@@ -326,7 +322,7 @@ func (c *call) startSessionTimer() {
 		}
 		c.mu.Unlock()
 		refreshSDP := c.buildLocalSDP(sdp.DirSendRecv)
-		c.dlg.SendReInvite(refreshSDP)
+		c.dlg.SendReInvite([]byte(refreshSDP))
 	})
 }
 
@@ -351,7 +347,7 @@ func (c *call) Accept(opts ...AcceptOption) error {
 			c.negotiateCodec(sess)
 		}
 	}
-	c.dlg.SendSDPAnswer()
+	c.dlg.Respond(200, "OK", []byte(c.localSDP))
 	c.state = StateActive
 	c.startTime = time.Now()
 	c.startSessionTimer()
@@ -370,7 +366,7 @@ func (c *call) Reject(code int, reason string) error {
 	if c.state != StateRinging {
 		return ErrInvalidState
 	}
-	c.dlg.Respond(code, reason)
+	c.dlg.Respond(code, reason, nil)
 	c.state = StateEnded
 	c.fireOnState(StateEnded)
 	c.logger.Info("call rejected", "id", c.id, "code", code, "reason", reason)
@@ -422,7 +418,7 @@ func (c *call) Hold() error {
 		return ErrInvalidState
 	}
 	c.localSDP = c.buildLocalSDP(sdp.DirSendOnly)
-	c.dlg.SendReInvite(c.localSDP)
+	c.dlg.SendReInvite([]byte(c.localSDP))
 	c.state = StateOnHold
 	c.fireOnState(StateOnHold)
 	c.logger.Info("call hold", "id", c.id)
@@ -436,7 +432,7 @@ func (c *call) Resume() error {
 		return ErrInvalidState
 	}
 	c.localSDP = c.buildLocalSDP(sdp.DirSendRecv)
-	c.dlg.SendReInvite(c.localSDP)
+	c.dlg.SendReInvite([]byte(c.localSDP))
 	c.state = StateActive
 	c.fireOnState(StateActive)
 	c.logger.Info("call resumed", "id", c.id)

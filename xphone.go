@@ -89,12 +89,7 @@ func (p *phone) Connect(ctx context.Context) error {
 	p.state = PhoneStateRegistering
 	p.mu.Unlock()
 
-	tr, err := newTransport(TransportConfig{
-		Protocol:  p.cfg.Transport,
-		Host:      p.cfg.Host,
-		Port:      p.cfg.Port,
-		TLSConfig: p.cfg.TLSConfig,
-	})
+	tr, err := newSipUA(p.cfg)
 	if err != nil {
 		p.mu.Lock()
 		p.state = PhoneStateDisconnected
@@ -278,22 +273,24 @@ func (p *phone) State() PhoneState {
 	return p.state
 }
 
-// phoneDialog is a minimal dialog implementation for phone-created calls.
+// phoneDialog is a stub dialog implementation for phone-created calls.
 // It satisfies the dialog interface with basic state tracking.
-// Real SIP dialog operations will be implemented in a later phase.
+// Real SIP dialog operations (backed by sipgo) will replace this in Phase B/C/D.
 type phoneDialog struct {
-	mu              sync.Mutex
-	sdpAnswerSent   bool
-	cancelSent      bool
+	mu       sync.Mutex
+	callID   string
+	headers  map[string][]string
+	onNotify func(int)
+
+	// State tracking (for test inspection via concrete type, not interface).
 	byeSent         bool
+	cancelSent      bool
 	referSent       bool
-	lastReInviteSDP string
-	lastReferTarget string
 	lastRespCode    int
 	lastRespReason  string
-	callID          string
-	headers         map[string][]string
-	onNotify        func(int)
+	lastRespBody    []byte
+	lastReInviteSDP []byte
+	lastReferTarget string
 }
 
 func newPhoneDialog() *phoneDialog {
@@ -303,105 +300,48 @@ func newPhoneDialog() *phoneDialog {
 	}
 }
 
-func (d *phoneDialog) SDPAnswerSent() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.sdpAnswerSent
-}
-
-func (d *phoneDialog) SendSDPAnswer() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.sdpAnswerSent = true
-}
-
-func (d *phoneDialog) LastResponseCode() int {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.lastRespCode
-}
-
-func (d *phoneDialog) LastResponseReason() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.lastRespReason
-}
-
-func (d *phoneDialog) Respond(code int, reason string) {
+func (d *phoneDialog) Respond(code int, reason string, body []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.lastRespCode = code
 	d.lastRespReason = reason
+	d.lastRespBody = body
+	return nil
 }
 
-func (d *phoneDialog) CancelSent() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.cancelSent
-}
-
-func (d *phoneDialog) SendCancel() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.cancelSent = true
-}
-
-func (d *phoneDialog) ByeSent() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.byeSent
-}
-
-func (d *phoneDialog) SendBye() {
+func (d *phoneDialog) SendBye() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.byeSent = true
+	return nil
 }
 
-func (d *phoneDialog) LastReInviteSDP() string {
+func (d *phoneDialog) SendCancel() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.lastReInviteSDP
+	d.cancelSent = true
+	return nil
 }
 
-func (d *phoneDialog) SendReInvite(sdp string) {
+func (d *phoneDialog) SendReInvite(sdp []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.lastReInviteSDP = sdp
+	return nil
 }
 
-func (d *phoneDialog) ReferSent() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.referSent
-}
-
-func (d *phoneDialog) LastReferTarget() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.lastReferTarget
-}
-
-func (d *phoneDialog) SendRefer(target string) {
+func (d *phoneDialog) SendRefer(target string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.referSent = true
 	d.lastReferTarget = target
+	return nil
 }
 
 func (d *phoneDialog) OnNotify(fn func(code int)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.onNotify = fn
-}
-
-func (d *phoneDialog) SimulateNotify(code int) {
-	d.mu.Lock()
-	fn := d.onNotify
-	d.mu.Unlock()
-	if fn != nil {
-		fn(code)
-	}
 }
 
 func (d *phoneDialog) CallID() string {

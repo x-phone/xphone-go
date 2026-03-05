@@ -16,7 +16,7 @@ Status after cleanup — all phases complete, cleanup issues resolved.
 
 | Issue | File | Status |
 |-------|------|--------|
-| `DialogID()`/`CallID()` redundancy | `Issues/005-dialog-id-callid-redundancy.md` | Deferred — will diverge when real SIP dialog tracking is implemented |
+| `DialogID()`/`CallID()` redundancy | `Issues/001-dialog-id-callid-redundancy.md` | Deferred — will diverge when real SIP dialog tracking is implemented |
 
 ## Remaining
 

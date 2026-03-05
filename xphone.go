@@ -2,7 +2,6 @@ package xphone
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync"
 )
@@ -28,6 +27,11 @@ type phone struct {
 	reg      *registry
 	state    PhoneState
 	incoming func(Call)
+
+	// Buffered callbacks set before Connect.
+	onRegisteredFn   func()
+	onUnregisteredFn func()
+	onErrorFn        func(error)
 }
 
 func newPhone(cfg Config) *phone {
@@ -44,8 +48,16 @@ func (p *phone) connectWithTransport(tr sipTransport) {
 	p.mu.Lock()
 	p.tr = tr
 	p.reg = newRegistry(tr, p.cfg)
-	// Apply any callbacks that were set before connectWithTransport was called.
-	incomingFn := p.incoming
+	// Apply buffered callbacks to the registry.
+	if p.onRegisteredFn != nil {
+		p.reg.OnRegistered(p.onRegisteredFn)
+	}
+	if p.onUnregisteredFn != nil {
+		p.reg.OnUnregistered(p.onUnregisteredFn)
+	}
+	if p.onErrorFn != nil {
+		p.reg.OnError(p.onErrorFn)
+	}
 	p.mu.Unlock()
 
 	// Perform registration (consumes the pre-queued 200 OK in tests).
@@ -60,16 +72,65 @@ func (p *phone) connectWithTransport(tr sipTransport) {
 	} else {
 		p.state = PhoneStateRegistrationFailed
 	}
-	_ = incomingFn // stored for future use by handleIncoming
 	p.mu.Unlock()
 }
 
 func (p *phone) Connect(ctx context.Context) error {
-	return errors.New("not implemented")
+	p.mu.Lock()
+	if p.state != PhoneStateDisconnected {
+		p.mu.Unlock()
+		return ErrAlreadyConnected
+	}
+	p.state = PhoneStateRegistering
+	p.mu.Unlock()
+
+	tr, err := newTransport(TransportConfig{
+		Protocol:  p.cfg.Transport,
+		Host:      p.cfg.Host,
+		Port:      p.cfg.Port,
+		TLSConfig: p.cfg.TLSConfig,
+	})
+	if err != nil {
+		p.mu.Lock()
+		p.state = PhoneStateDisconnected
+		p.mu.Unlock()
+		return err
+	}
+
+	p.connectWithTransport(tr)
+	return nil
 }
 
 func (p *phone) Disconnect() error {
-	return errors.New("not implemented")
+	p.mu.Lock()
+	if p.state == PhoneStateDisconnected {
+		p.mu.Unlock()
+		return ErrNotConnected
+	}
+	reg := p.reg
+	tr := p.tr
+	p.state = PhoneStateDisconnected
+	p.reg = nil
+	p.tr = nil
+	fn := p.onUnregisteredFn
+	p.mu.Unlock()
+
+	// Stop the registry (cancels refresh loop and re-registration goroutines).
+	if reg != nil {
+		reg.Stop()
+	}
+
+	// Close the transport.
+	if tr != nil {
+		tr.Close()
+	}
+
+	// Fire OnUnregistered callback.
+	if fn != nil {
+		go fn()
+	}
+
+	return nil
 }
 
 // Dial initiates an outbound call to the given SIP target.
@@ -169,20 +230,32 @@ func (p *phone) OnIncoming(fn func(Call)) {
 }
 
 func (p *phone) OnRegistered(fn func()) {
-	if p.reg != nil {
-		p.reg.OnRegistered(fn)
+	p.mu.Lock()
+	p.onRegisteredFn = fn
+	reg := p.reg
+	p.mu.Unlock()
+	if reg != nil {
+		reg.OnRegistered(fn)
 	}
 }
 
 func (p *phone) OnUnregistered(fn func()) {
-	if p.reg != nil {
-		p.reg.OnUnregistered(fn)
+	p.mu.Lock()
+	p.onUnregisteredFn = fn
+	reg := p.reg
+	p.mu.Unlock()
+	if reg != nil {
+		reg.OnUnregistered(fn)
 	}
 }
 
 func (p *phone) OnError(fn func(error)) {
-	if p.reg != nil {
-		p.reg.OnError(fn)
+	p.mu.Lock()
+	p.onErrorFn = fn
+	reg := p.reg
+	p.mu.Unlock()
+	if reg != nil {
+		reg.OnError(fn)
 	}
 }
 

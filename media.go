@@ -186,6 +186,7 @@ func (c *call) startMedia() {
 				c.mediaActive = false
 				fn := c.onEndedFn
 				c.mu.Unlock()
+				c.logger.Warn("media timeout", "id", c.id)
 				if fn != nil {
 					go fn(EndedByTimeout)
 				}

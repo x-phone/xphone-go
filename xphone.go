@@ -2,6 +2,7 @@ package xphone
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"sync"
 )
@@ -23,6 +24,7 @@ type phone struct {
 	mu sync.Mutex
 
 	cfg      Config
+	logger   *slog.Logger
 	tr       sipTransport
 	reg      *registry
 	state    PhoneState
@@ -36,8 +38,9 @@ type phone struct {
 
 func newPhone(cfg Config) *phone {
 	return &phone{
-		cfg:   cfg,
-		state: PhoneStateDisconnected,
+		cfg:    cfg,
+		logger: resolveLogger(cfg.Logger),
+		state:  PhoneStateDisconnected,
 	}
 }
 
@@ -73,6 +76,8 @@ func (p *phone) connectWithTransport(tr sipTransport) {
 		p.state = PhoneStateRegistrationFailed
 	}
 	p.mu.Unlock()
+
+	p.logger.Info("phone connected")
 }
 
 func (p *phone) Connect(ctx context.Context) error {
@@ -125,6 +130,8 @@ func (p *phone) Disconnect() error {
 		tr.Close()
 	}
 
+	p.logger.Info("phone disconnected")
+
 	// Fire OnUnregistered callback.
 	if fn != nil {
 		go fn()
@@ -158,9 +165,12 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 	}
 	defer dialCancel()
 
+	p.logger.Info("dialing", "target", target)
+
 	// Create the outbound call with a minimal dialog.
 	dlg := newPhoneDialog()
 	c := newOutboundCall(dlg, opts...)
+	c.logger = p.logger
 
 	// Send the INVITE and get the first response.
 	code, reason, err := tr.SendRequest(dialCtx, "INVITE", nil)
@@ -210,6 +220,9 @@ func (p *phone) handleIncoming(from, to string) {
 	// Create an inbound call with a phone dialog.
 	dlg := newPhoneDialog()
 	c := newInboundCall(dlg)
+	c.logger = p.logger
+
+	p.logger.Info("incoming call", "from", from, "to", to)
 
 	// Fire the OnIncoming callback if set.
 	p.mu.Lock()

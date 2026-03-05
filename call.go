@@ -3,6 +3,7 @@ package xphone
 import (
 	"crypto/rand"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,6 +12,14 @@ import (
 	"github.com/pion/rtp"
 	"github.com/x-phone/xphone-go/internal/sdp"
 )
+
+// resolveLogger returns l if non-nil, otherwise slog.Default().
+func resolveLogger(l *slog.Logger) *slog.Logger {
+	if l != nil {
+		return l
+	}
+	return slog.Default()
+}
 
 func newCallID() string {
 	b := make([]byte, 16)
@@ -93,6 +102,7 @@ type call struct {
 	direction Direction
 	opts      DialOptions
 	startTime time.Time
+	logger    *slog.Logger
 
 	onEndedFn   func(EndReason)
 	onMediaFn   func()
@@ -128,6 +138,7 @@ func newInboundCall(d dialog) *call {
 		dlg:          d,
 		state:        StateRinging,
 		direction:    DirectionInbound,
+		logger:       resolveLogger(nil),
 		rtpInbound:   make(chan *rtp.Packet, 256),
 		rtpReader:    make(chan *rtp.Packet, 256),
 		rtpRawReader: make(chan *rtp.Packet, 256),
@@ -145,6 +156,7 @@ func newOutboundCall(d dialog, dialOpts ...DialOption) *call {
 		state:        StateDialing,
 		direction:    DirectionOutbound,
 		opts:         opts,
+		logger:       resolveLogger(nil),
 		rtpInbound:   make(chan *rtp.Packet, 256),
 		rtpReader:    make(chan *rtp.Packet, 256),
 		rtpRawReader: make(chan *rtp.Packet, 256),
@@ -344,6 +356,7 @@ func (c *call) Accept(opts ...AcceptOption) error {
 	c.startTime = time.Now()
 	c.startSessionTimer()
 	c.fireOnState(StateActive)
+	c.logger.Info("call accepted", "id", c.id)
 	if c.onMediaFn != nil {
 		fn := c.onMediaFn
 		go fn()
@@ -360,6 +373,7 @@ func (c *call) Reject(code int, reason string) error {
 	c.dlg.Respond(code, reason)
 	c.state = StateEnded
 	c.fireOnState(StateEnded)
+	c.logger.Info("call rejected", "id", c.id, "code", code, "reason", reason)
 	if c.onEndedFn != nil {
 		fn := c.onEndedFn
 		go fn(EndedByRejected)
@@ -378,6 +392,7 @@ func (c *call) End() error {
 		c.dlg.SendCancel()
 		c.state = StateEnded
 		c.fireOnState(StateEnded)
+		c.logger.Info("call ended", "id", c.id, "reason", "cancelled")
 		if c.onEndedFn != nil {
 			fn := c.onEndedFn
 			go fn(EndedByCancelled)
@@ -387,6 +402,7 @@ func (c *call) End() error {
 		c.dlg.SendBye()
 		c.state = StateEnded
 		c.fireOnState(StateEnded)
+		c.logger.Info("call ended", "id", c.id, "reason", "local")
 		if c.onEndedFn != nil {
 			fn := c.onEndedFn
 			go fn(EndedByLocal)
@@ -409,6 +425,7 @@ func (c *call) Hold() error {
 	c.dlg.SendReInvite(c.localSDP)
 	c.state = StateOnHold
 	c.fireOnState(StateOnHold)
+	c.logger.Info("call hold", "id", c.id)
 	return nil
 }
 
@@ -422,6 +439,7 @@ func (c *call) Resume() error {
 	c.dlg.SendReInvite(c.localSDP)
 	c.state = StateActive
 	c.fireOnState(StateActive)
+	c.logger.Info("call resumed", "id", c.id)
 	return nil
 }
 

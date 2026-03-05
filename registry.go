@@ -3,6 +3,7 @@ package xphone
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -13,9 +14,10 @@ import (
 type registry struct {
 	mu sync.Mutex
 
-	tr    sipTransport
-	cfg   Config
-	state PhoneState
+	tr     sipTransport
+	cfg    Config
+	state  PhoneState
+	logger *slog.Logger
 
 	onRegistered   func()
 	onUnregistered func()
@@ -33,9 +35,10 @@ type registry struct {
 
 func newRegistry(tr sipTransport, cfg Config) *registry {
 	return &registry{
-		tr:    tr,
-		cfg:   cfg,
-		state: PhoneStateDisconnected,
+		tr:     tr,
+		cfg:    cfg,
+		state:  PhoneStateDisconnected,
+		logger: resolveLogger(cfg.Logger),
 	}
 }
 
@@ -150,6 +153,7 @@ func (r *registry) register(ctx context.Context) error {
 			r.state = PhoneStateRegistered
 			fn := r.onRegistered
 			r.mu.Unlock()
+			r.logger.Info("registration successful")
 			if fn != nil {
 				go fn()
 			}
@@ -162,6 +166,7 @@ func (r *registry) register(ctx context.Context) error {
 	r.state = PhoneStateRegistrationFailed
 	errFn := r.onError
 	r.mu.Unlock()
+	r.logger.Error("registration failed")
 	if errFn != nil {
 		go errFn(ErrRegistrationFailed)
 	}

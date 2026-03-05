@@ -11,6 +11,7 @@ Status after cleanup — all phases complete, cleanup issues resolved.
 | Phase 6 | Connect/Disconnect, functional options, callback buffering |
 | Phase 7 | MockCall, MockPhone, Call interface cleanup |
 | Cleanup | SDP direction constants, BuildOffer helper, test SDP dedup, defaultCodecPrefs var |
+| Logger | `Config.Logger` wired into registry, phone, call state transitions, media pipeline |
 
 ## Open Issues (filed in `Issues/`)
 
@@ -19,10 +20,6 @@ Status after cleanup — all phases complete, cleanup issues resolved.
 | `DialogID()`/`CallID()` redundancy | `Issues/001-dialog-id-callid-redundancy.md` | Deferred — will diverge when real SIP dialog tracking is implemented |
 
 ## Remaining
-
-### Logger Wiring
-
-`Config.Logger *slog.Logger` is declared but never read or used anywhere. Wire into registry, transport, media pipeline, and call state transitions.
 
 ### Docker/Integration Tests
 
@@ -36,6 +33,6 @@ Per spec: video, SRTP, WebRTC, multi-PBX failover, conference mixing, call recor
 
 | Item | Notes |
 |------|-------|
-| Opus encoder/decoder | `NewCodecProcessor(111, ...)` currently returns nil. Needs CGo or pure-Go Opus binding. |
+| Opus encoder/decoder | `NewCodecProcessor(111, ...)` currently returns nil. Use `pion/opus` (pure Go, no CGo). |
 | Sinc resampler | Required for Opus 48kHz → PCMRate. G.722 also uses naive 2:1 decimation. |
 | Wire PCMRate config | `Config.PCMRate` exists in `options.go` but pipeline hardcodes `defaultPCMRate = 8000`. |

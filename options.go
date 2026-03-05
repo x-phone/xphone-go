@@ -156,3 +156,11 @@ func WithMediaTimeout(d time.Duration) PhoneOption {
 		c.MediaTimeout = d
 	}
 }
+
+// WithLogger sets the structured logger for the phone.
+// If nil or not called, slog.Default() is used.
+func WithLogger(l *slog.Logger) PhoneOption {
+	return func(c *Config) {
+		c.Logger = l
+	}
+}

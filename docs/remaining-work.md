@@ -2,15 +2,7 @@
 
 Status after Phase 4 — 155 tests passing, no races.
 
-## Phase 5 — Opus & Resampler
-
-| Item | File(s) | Notes |
-|------|---------|-------|
-| Opus encoder/decoder | `internal/media/codec.go`, new `opus.go` | `NewCodecProcessor(111, ...)` currently returns nil. Needs CGo or pure-Go Opus binding. |
-| Sinc resampler | new `internal/media/resampler.go` | Required for Opus 48kHz → PCMRate. G.722 also uses naive 2:1 decimation (see `g722.go` line 9 comment). |
-| Wire PCMRate config | `media.go` | `Config.PCMRate` field exists in `options.go` but pipeline hardcodes `defaultPCMRate = 8000`. Thread config through `call` struct. |
-
-## Phase 6 — Mute/Unmute & Missing Call Accessors
+## Phase 5 — Mute/Unmute & Missing Call Accessors
 
 | Item | File(s) | Notes |
 |------|---------|-------|
@@ -21,7 +13,7 @@ Status after Phase 4 — 155 tests passing, no races.
 | `RemotePort()` | `call.go` | Returns `0`. Parse from remote SDP `m=` line. |
 | `OnState` callback | `call.go` | Stored in `onStateFn` but never fired on any state transition. Add `fireOnState()` calls at each transition point. |
 
-## Phase 7 — sipgo Integration (Connect/Disconnect)
+## Phase 6 — sipgo Integration (Connect/Disconnect)
 
 | Item | File(s) | Notes |
 |------|---------|-------|
@@ -31,7 +23,7 @@ Status after Phase 4 — 155 tests passing, no races.
 | Phone-level functional options | `options.go`, `xphone.go` | No `WithCredentials`, `WithTransport`, `WithRTPPorts`, `WithCodecs`, etc. Only raw `Config` struct today. Add `New(opts ...PhoneOption)` constructor. |
 | `OnRegistered`/`OnUnregistered`/`OnError` before Connect | `xphone.go` | Currently silently dropped if `p.reg` is nil. Buffer callbacks and apply after `Connect()`. |
 
-## Phase 8 — Test Infrastructure
+## Phase 7 — Test Infrastructure
 
 | Item | File(s) | Notes |
 |------|---------|-------|
@@ -52,6 +44,14 @@ Status after Phase 4 — 155 tests passing, no races.
 ## Not in Scope (v1)
 
 Per spec: video, SRTP, WebRTC, multi-PBX failover, conference mixing, call recording, SIP INFO DTMF, attended transfer.
+
+## Deferred to v2
+
+| Item | Notes |
+|------|-------|
+| Opus encoder/decoder | `NewCodecProcessor(111, ...)` currently returns nil. Needs CGo or pure-Go Opus binding. |
+| Sinc resampler | Required for Opus 48kHz → PCMRate. G.722 also uses naive 2:1 decimation. |
+| Wire PCMRate config | `Config.PCMRate` exists in `options.go` but pipeline hardcodes `defaultPCMRate = 8000`. |
 
 ## Logger
 

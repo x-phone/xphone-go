@@ -83,6 +83,7 @@ type Call interface {
 	// internal test hooks
 	simulateResponse(code int, reason string)
 	simulateBye()
+	simulateReInvite(sdp string)
 	mediaSessionActive() bool
 	injectRTP(pkt *rtp.Packet)
 }
@@ -98,11 +99,17 @@ type call struct {
 	opts      DialOptions
 	startTime time.Time
 
-	onEndedFn func(EndReason)
-	onMediaFn func()
-	onStateFn func(CallState)
+	onEndedFn  func(EndReason)
+	onMediaFn  func()
+	onStateFn  func(CallState)
+	onDTMFFn   func(string)
+	onHoldFn   func()
+	onResumeFn func()
 
-	codec        Codec // negotiated codec (default CodecPCMU)
+	localSDP  string
+	remoteSDP string
+
+	codec Codec // negotiated codec (default CodecPCMU)
 	mediaActive  bool
 	mediaTimeout time.Duration
 	mediaDone    chan struct{}
@@ -180,8 +187,17 @@ func (c *call) setCodec(codec Codec) {
 	defer c.mu.Unlock()
 	c.codec = codec
 }
-func (c *call) LocalSDP() string  { return "" }
-func (c *call) RemoteSDP() string { return "" }
+func (c *call) LocalSDP() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.localSDP
+}
+
+func (c *call) RemoteSDP() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.remoteSDP
+}
 
 func (c *call) StartTime() time.Time {
 	c.mu.Lock()
@@ -295,7 +311,17 @@ func (c *call) Resume() error {
 
 func (c *call) Mute() error                 { return nil }
 func (c *call) Unmute() error               { return nil }
-func (c *call) SendDTMF(digit string) error { return nil }
+func (c *call) SendDTMF(digit string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state != StateActive {
+		return ErrInvalidState
+	}
+	if DTMFDigitCode(digit) < 0 {
+		return ErrInvalidDTMFDigit
+	}
+	return nil // stub: no RTP packets produced yet
+}
 
 func (c *call) BlindTransfer(target string) error {
 	c.mu.Lock()
@@ -324,9 +350,23 @@ func (c *call) RTPWriter() chan<- *rtp.Packet    { return c.rtpWriter }
 func (c *call) PCMReader() <-chan []int16        { return c.pcmReader }
 func (c *call) PCMWriter() chan<- []int16        { return c.pcmWriter }
 
-func (c *call) OnDTMF(fn func(string)) {}
-func (c *call) OnHold(fn func())       {}
-func (c *call) OnResume(fn func())     {}
+func (c *call) OnDTMF(fn func(string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onDTMFFn = fn
+}
+
+func (c *call) OnHold(fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onHoldFn = fn
+}
+
+func (c *call) OnResume(fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onResumeFn = fn
+}
 func (c *call) OnMute(fn func())       {}
 func (c *call) OnUnmute(fn func())     {}
 
@@ -389,6 +429,10 @@ func (c *call) simulateBye() {
 		fn := c.onEndedFn
 		go fn(EndedByRemote)
 	}
+}
+
+func (c *call) simulateReInvite(sdp string) {
+	// stub: will process inbound re-INVITE SDP in Phase 4 implementation
 }
 
 func (c *call) mediaSessionActive() bool {

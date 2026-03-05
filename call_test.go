@@ -2,11 +2,14 @@ package xphone
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/pion/rtp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/x-phone/xphone-go/internal/sdp"
 	"github.com/x-phone/xphone-go/testutil"
 )
 
@@ -438,4 +441,247 @@ func TestCall_BlindTransferFiresEndedByTransfer(t *testing.T) {
 func TestCall_BlindTransferWhenNotActiveReturnsInvalidState(t *testing.T) {
 	call := newInboundCall(testutil.NewMockDialog())
 	assert.ErrorIs(t, call.BlindTransfer("sip:1003@pbx"), ErrInvalidState)
+}
+
+// --- SDP integration ---
+
+// testSDP generates a minimal valid SDP for call-level tests.
+func testSDP(ip string, port int, dir string, codecs ...int) string {
+	codecNames := map[int]string{
+		0: "PCMU/8000", 8: "PCMA/8000", 9: "G722/8000", 111: "opus/48000/2",
+	}
+	s := "v=0\r\n"
+	s += "o=xphone 0 0 IN IP4 " + ip + "\r\n"
+	s += "s=xphone\r\n"
+	s += "c=IN IP4 " + ip + "\r\n"
+	s += "t=0 0\r\n"
+	s += fmt.Sprintf("m=audio %d RTP/AVP", port)
+	for _, c := range codecs {
+		s += fmt.Sprintf(" %d", c)
+	}
+	s += "\r\n"
+	for _, c := range codecs {
+		if name, ok := codecNames[c]; ok {
+			s += fmt.Sprintf("a=rtpmap:%d %s\r\n", c, name)
+		}
+	}
+	if dir != "" {
+		s += "a=" + dir + "\r\n"
+	}
+	return s
+}
+
+func TestCall_LocalSDPEmptyBeforeActive(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.Equal(t, "", c.LocalSDP())
+}
+
+func TestCall_RemoteSDPEmptyBeforeActive(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.Equal(t, "", c.RemoteSDP())
+}
+
+func TestCall_LocalSDPPopulatedAfterAccept(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	assert.Contains(t, c.LocalSDP(), "v=0")
+}
+
+func TestCall_CodecNegotiatedFromSDP(t *testing.T) {
+	// Remote offers codecs [0,8]. Implementation should negotiate using
+	// local preference order (default or config-driven). With local prefs
+	// favouring PCMA over PCMU, the negotiated codec should be CodecPCMA.
+	remoteSDP := testSDP("192.168.1.200", 5004, "sendrecv", 0, 8)
+	c := newInboundCall(testutil.NewMockDialog())
+	c.remoteSDP = remoteSDP
+	c.Accept()
+	assert.Equal(t, CodecPCMA, c.Codec())
+}
+
+func TestCall_HoldSendsSDPWithSendOnly(t *testing.T) {
+	dialog := testutil.NewMockDialog()
+	c := newInboundCall(dialog)
+	c.Accept()
+	c.Hold()
+
+	raw := dialog.LastReInviteSDP()
+	s, err := sdp.Parse(raw)
+	require.NoError(t, err)
+	assert.Equal(t, "sendonly", s.Dir())
+}
+
+func TestCall_ResumeSendsSDPWithSendRecv(t *testing.T) {
+	dialog := testutil.NewMockDialog()
+	c := newInboundCall(dialog)
+	c.Accept()
+	c.Hold()
+	c.Resume()
+
+	raw := dialog.LastReInviteSDP()
+	s, err := sdp.Parse(raw)
+	require.NoError(t, err)
+	assert.Equal(t, "sendrecv", s.Dir())
+}
+
+// --- Re-INVITE handling ---
+
+func TestCall_InboundReInviteHold(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	holdSDP := testSDP("192.168.1.200", 5004, "sendonly", 0)
+	c.simulateReInvite(holdSDP)
+	assert.Equal(t, StateOnHold, c.State())
+}
+
+func TestCall_InboundReInviteResume(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	c.simulateReInvite(testSDP("192.168.1.200", 5004, "sendonly", 0))
+	c.simulateReInvite(testSDP("192.168.1.200", 5004, "sendrecv", 0))
+	assert.Equal(t, StateActive, c.State())
+}
+
+func TestCall_OnHoldCallbackFires(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	held := make(chan struct{}, 1)
+	c.OnHold(func() { held <- struct{}{} })
+	c.simulateReInvite(testSDP("192.168.1.200", 5004, "sendonly", 0))
+
+	select {
+	case <-held:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnHold callback never fired")
+	}
+}
+
+func TestCall_OnResumeCallbackFires(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	resumed := make(chan struct{}, 1)
+	c.OnResume(func() { resumed <- struct{}{} })
+	c.simulateReInvite(testSDP("192.168.1.200", 5004, "sendonly", 0))
+	c.simulateReInvite(testSDP("192.168.1.200", 5004, "sendrecv", 0))
+
+	select {
+	case <-resumed:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnResume callback never fired")
+	}
+}
+
+func TestCall_ReInviteCodecChange(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	g722SDP := testSDP("192.168.1.200", 5004, "sendrecv", 9)
+	c.simulateReInvite(g722SDP)
+	assert.Equal(t, CodecG722, c.Codec())
+}
+
+func TestCall_ReInviteOnEndedCallIgnored(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	c.End()
+	holdSDP := testSDP("192.168.1.200", 5004, "sendonly", 0)
+	c.simulateReInvite(holdSDP) // should not panic
+	assert.Equal(t, StateEnded, c.State())
+}
+
+// --- DTMF call-level ---
+
+func TestCall_SendDTMF_ProducesRTPPackets(t *testing.T) {
+	c := activeCall()
+	defer c.stopMedia()
+
+	err := c.SendDTMF("5")
+	require.NoError(t, err)
+
+	// Wait for DTMF packets on sentRTP.
+	time.Sleep(50 * time.Millisecond)
+	pkts := drainPackets(c.sentRTP)
+	var dtmfPkts int
+	for _, pkt := range pkts {
+		if pkt.PayloadType == DTMFPayloadType {
+			dtmfPkts++
+		}
+	}
+	assert.Greater(t, dtmfPkts, 0, "expected DTMF RTP packets with PT=101")
+}
+
+func TestCall_SendDTMF_InvalidDigitReturnsError(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	assert.ErrorIs(t, c.SendDTMF("X"), ErrInvalidDTMFDigit)
+}
+
+func TestCall_SendDTMF_WhenNotActiveReturnsError(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.ErrorIs(t, c.SendDTMF("1"), ErrInvalidState)
+}
+
+func TestCall_OnDTMF_FiresOnInboundPacket(t *testing.T) {
+	c := activeCall()
+	defer c.stopMedia()
+
+	got := make(chan string, 1)
+	c.OnDTMF(func(digit string) { got <- digit })
+
+	// Inject a DTMF RTP packet (PT=101, event=5, E bit, volume=10, duration=1000).
+	payload := []byte{5, 0x8A, 0x03, 0xE8}
+	c.injectRTP(&rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 1, PayloadType: DTMFPayloadType},
+		Payload: payload,
+	})
+
+	select {
+	case digit := <-got:
+		assert.Equal(t, "5", digit)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnDTMF callback never fired")
+	}
+}
+
+func TestCall_OnDTMF_NilCallbackNoPanic(t *testing.T) {
+	c := activeCall()
+	defer c.stopMedia()
+
+	// No OnDTMF callback registered — should not panic.
+	payload := []byte{5, 0x8A, 0x03, 0xE8}
+	c.injectRTP(&rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 1, PayloadType: DTMFPayloadType},
+		Payload: payload,
+	})
+
+	time.Sleep(50 * time.Millisecond)
+}
+
+// --- Session timers ---
+
+func TestCall_SessionTimer_SendsRefreshReInvite(t *testing.T) {
+	dialog := testutil.NewMockDialogWithSessionExpires(1)
+	c := newInboundCall(dialog)
+	c.Accept()
+
+	// Session timer should fire around 500ms (half of Session-Expires).
+	time.Sleep(600 * time.Millisecond)
+	assert.NotEmpty(t, dialog.LastReInviteSDP(), "expected session refresh re-INVITE")
+}
+
+func TestCall_SessionTimer_NoHeaderNoTimer(t *testing.T) {
+	dialog := testutil.NewMockDialog()
+	c := newInboundCall(dialog)
+	c.Accept()
+
+	time.Sleep(100 * time.Millisecond)
+	assert.Empty(t, dialog.LastReInviteSDP(), "no session timer should fire without Session-Expires")
+}
+
+func TestCall_SessionTimer_CancelledOnEnd(t *testing.T) {
+	dialog := testutil.NewMockDialogWithSessionExpires(1)
+	c := newInboundCall(dialog)
+	c.Accept()
+	c.End()
+
+	time.Sleep(600 * time.Millisecond)
+	assert.Empty(t, dialog.LastReInviteSDP(), "session timer should be cancelled on End")
 }

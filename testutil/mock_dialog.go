@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 )
@@ -181,6 +182,13 @@ func (d *MockDialog) Header(name string) []string {
 		}
 	}
 	return nil
+}
+
+// NewMockDialogWithSessionExpires creates a MockDialog with a Session-Expires header.
+func NewMockDialogWithSessionExpires(seconds int) *MockDialog {
+	return NewMockDialogWithHeaders(map[string][]string{
+		"Session-Expires": {fmt.Sprintf("%d", seconds)},
+	})
 }
 
 // Headers returns a copy of all SIP headers.

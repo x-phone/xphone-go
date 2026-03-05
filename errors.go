@@ -12,4 +12,5 @@ var (
 	ErrRegistrationFailed = errors.New("xphone: registration failed")
 	ErrTransferFailed     = errors.New("xphone: transfer failed")
 	ErrTLSConfigRequired  = errors.New("xphone: TLS transport requires TLSConfig")
+	ErrInvalidDTMFDigit   = errors.New("xphone: invalid DTMF digit")
 )

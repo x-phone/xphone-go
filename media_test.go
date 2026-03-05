@@ -7,6 +7,7 @@ import (
 	"github.com/pion/rtp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/x-phone/xphone-go/internal/media"
 	"github.com/x-phone/xphone-go/testutil"
 )
 
@@ -15,6 +16,16 @@ import (
 func activeCall() *call {
 	c := newInboundCall(testutil.NewMockDialog())
 	c.sentRTP = make(chan *rtp.Packet, 256)
+	c.Accept()
+	c.startMedia()
+	return c
+}
+
+// activeCallWithCodec creates an active call configured for a specific codec.
+func activeCallWithCodec(codec Codec) *call {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.sentRTP = make(chan *rtp.Packet, 256)
+	c.codec = codec
 	c.Accept()
 	c.startMedia()
 	return c
@@ -98,7 +109,8 @@ func TestMediaPipeline_OutboundMutex(t *testing.T) {
 	c := activeCall()
 	defer c.stopMedia()
 
-	// Write an RTP packet (takes priority over PCM).
+	// Write an RTP packet and wait for it to be forwarded, ensuring
+	// rtpWriterUsed is set before we send the PCM frame.
 	rtpPkt := &rtp.Packet{Header: rtp.Header{SequenceNumber: 1, PayloadType: 0}}
 	select {
 	case c.RTPWriter() <- rtpPkt:
@@ -106,7 +118,10 @@ func TestMediaPipeline_OutboundMutex(t *testing.T) {
 		t.Fatal("RTPWriter blocked")
 	}
 
-	// Also write a PCM frame — should be dropped since RTPWriter is active.
+	sent := readPacket(t, c.sentRTP, 200*time.Millisecond)
+	assert.Equal(t, uint16(1), sent.SequenceNumber, "RTP packet must be forwarded")
+
+	// Now write a PCM frame — should be dropped since RTPWriter was used.
 	frame := make([]int16, 160)
 	frame[0] = 9999
 	select {
@@ -114,11 +129,7 @@ func TestMediaPipeline_OutboundMutex(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	// The pipeline should forward the RTP packet on sentRTP.
-	sent := readPacket(t, c.sentRTP, 200*time.Millisecond)
-	assert.Equal(t, uint16(1), sent.SequenceNumber, "RTP packet must be forwarded")
-
-	// PCM must NOT produce a second outbound packet (mutex: RTPWriter wins).
+	// PCM must NOT produce an outbound packet (mutex: RTPWriter wins).
 	select {
 	case extra := <-c.sentRTP:
 		t.Fatalf("PCMWriter should be suppressed when RTPWriter is active, got seq %d", extra.SequenceNumber)
@@ -157,8 +168,9 @@ func TestMediaPipeline_RTPWriterPassthrough(t *testing.T) {
 }
 
 func TestMediaPipeline_PCMWriterOverflow(t *testing.T) {
-	c := activeCall()
-	defer c.stopMedia()
+	// Test raw channel overflow behavior without the media goroutine racing.
+	c := newInboundCall(testutil.NewMockDialog())
+	// Don't start media — test channel overflow in isolation.
 
 	// Write 300 distinguishable frames into PCMWriter (buffered 256).
 	// Overflow policy: newest dropped, oldest kept.
@@ -168,9 +180,7 @@ func TestMediaPipeline_PCMWriterOverflow(t *testing.T) {
 		select {
 		case c.PCMWriter() <- frame:
 		default:
-			// pipeline should handle overflow internally; if the raw
-			// channel rejects, implementation is responsible for the
-			// drop-newest policy via a goroutine consumer.
+			// channel full — newest frame dropped (expected)
 		}
 	}
 
@@ -223,12 +233,11 @@ func TestMediaPipeline_ChannelOverflow(t *testing.T) {
 func TestMediaPipeline_MediaTimeout(t *testing.T) {
 	c := newInboundCall(testutil.NewMockDialog())
 	c.mediaTimeout = 50 * time.Millisecond // short timeout for test
+	ended := make(chan EndReason, 1)
+	c.OnEnded(func(r EndReason) { ended <- r })
 	c.Accept()
 	c.startMedia()
 	defer c.stopMedia()
-
-	ended := make(chan EndReason, 1)
-	c.OnEnded(func(r EndReason) { ended <- r })
 
 	// Don't send any RTP — timeout should fire.
 	select {
@@ -242,12 +251,11 @@ func TestMediaPipeline_MediaTimeout(t *testing.T) {
 func TestMediaPipeline_MediaTimeoutSuspendedOnHold(t *testing.T) {
 	c := newInboundCall(testutil.NewMockDialog())
 	c.mediaTimeout = 50 * time.Millisecond
+	ended := make(chan EndReason, 1)
+	c.OnEnded(func(r EndReason) { ended <- r })
 	c.Accept()
 	c.startMedia()
 	defer c.stopMedia()
-
-	ended := make(chan EndReason, 1)
-	c.OnEnded(func(r EndReason) { ended <- r })
 
 	// Put call on hold — media timeout must be suspended.
 	c.Hold()
@@ -270,6 +278,135 @@ func TestMediaPipeline_MediaTimeoutSuspendedOnHold(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("media timeout should fire after resume with no RTP")
 	}
+}
+
+// --- Codec dispatch integration tests ---
+
+func TestMediaPipeline_CodecDispatch_PCMU(t *testing.T) {
+	c := activeCall() // default codec is PCMU
+	defer c.stopMedia()
+
+	// Inject mu-law payload (0xFF = silence).
+	payload := make([]byte, 160)
+	for i := range payload {
+		payload[i] = 0xFF
+	}
+	c.injectRTP(&rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 1, PayloadType: 0},
+		Payload: payload,
+	})
+
+	// PCMReader should get real decoded PCM (all ~0 for silence).
+	select {
+	case pcm := <-c.PCMReader():
+		require.Len(t, pcm, 160)
+		// mu-law 0xFF decodes to 0
+		for i, s := range pcm {
+			assert.Equal(t, int16(0), s, "sample %d: expected 0 for mu-law silence", i)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("PCMReader never received decoded audio")
+	}
+}
+
+func TestMediaPipeline_CodecDispatch_PCMA(t *testing.T) {
+	c := activeCallWithCodec(CodecPCMA)
+	defer c.stopMedia()
+
+	// Inject A-law payload (0xD5 = A-law silence).
+	payload := make([]byte, 160)
+	for i := range payload {
+		payload[i] = 0xD5
+	}
+	c.injectRTP(&rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 1, PayloadType: 8},
+		Payload: payload,
+	})
+
+	// PCMReader should get decoded PCM near zero.
+	select {
+	case pcm := <-c.PCMReader():
+		require.Len(t, pcm, 160)
+		for i, s := range pcm {
+			// A-law silence decodes to 8 (min positive magnitude).
+			assert.InDelta(t, 0, int(s), 8,
+				"sample %d: expected near-zero for A-law silence, got %d", i, s)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("PCMReader never received decoded audio")
+	}
+}
+
+func TestMediaPipeline_PCMWriterEncode(t *testing.T) {
+	c := activeCall() // PCMU
+	defer c.stopMedia()
+
+	// Write a PCM frame → should appear on sentRTP as mu-law encoded.
+	frame := make([]int16, 160)
+	select {
+	case c.PCMWriter() <- frame:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("PCMWriter blocked")
+	}
+
+	sent := readPacket(t, c.sentRTP, 200*time.Millisecond)
+	assert.Equal(t, uint8(0), sent.PayloadType, "should be PCMU PT=0")
+	assert.Len(t, sent.Payload, 160, "mu-law frame should be 160 bytes")
+	assert.Equal(t, uint8(2), sent.Version)
+
+	// Verify silence: all samples were 0, should encode to 0xFF.
+	cp := media.NewCodecProcessor(0, 8000)
+	for i, b := range sent.Payload {
+		decoded := cp.Decode([]byte{b})
+		assert.InDelta(t, 0, int(decoded[0]), 8,
+			"byte %d: encoded silence should decode near zero", i)
+	}
+}
+
+func TestMediaPipeline_PCMWriterSeqAndTimestamp(t *testing.T) {
+	c := activeCall() // PCMU
+	defer c.stopMedia()
+
+	// Write two frames.
+	for i := 0; i < 2; i++ {
+		frame := make([]int16, 160)
+		select {
+		case c.PCMWriter() <- frame:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("PCMWriter blocked on frame %d", i)
+		}
+	}
+
+	p0 := readPacket(t, c.sentRTP, 200*time.Millisecond)
+	p1 := readPacket(t, c.sentRTP, 200*time.Millisecond)
+
+	// Sequence numbers: 0, 1
+	assert.Equal(t, uint16(0), p0.SequenceNumber)
+	assert.Equal(t, uint16(1), p1.SequenceNumber)
+
+	// Timestamps: 0, 160
+	assert.Equal(t, uint32(0), p0.Timestamp)
+	assert.Equal(t, uint32(160), p1.Timestamp)
+
+	// Same SSRC
+	assert.Equal(t, p0.SSRC, p1.SSRC, "both packets must share the same SSRC")
+	assert.NotEqual(t, uint32(0), p0.SSRC, "SSRC should be non-zero (random)")
+}
+
+func TestMediaPipeline_PCMWriterPayloadType_PCMA(t *testing.T) {
+	c := activeCallWithCodec(CodecPCMA)
+	defer c.stopMedia()
+
+	frame := make([]int16, 160)
+	select {
+	case c.PCMWriter() <- frame:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("PCMWriter blocked")
+	}
+
+	sent := readPacket(t, c.sentRTP, 200*time.Millisecond)
+	assert.Equal(t, uint8(8), sent.PayloadType, "should be PCMA PT=8")
+	assert.Len(t, sent.Payload, 160, "A-law frame should be 160 bytes")
 }
 
 // readPacket reads a single packet from a channel with a timeout.

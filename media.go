@@ -1,6 +1,8 @@
 package xphone
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"time"
 
 	"github.com/pion/rtp"
@@ -11,6 +13,7 @@ import (
 const (
 	defaultMediaTimeout = 30 * time.Second
 	defaultJitterDepth  = 50 * time.Millisecond
+	defaultPCMRate      = 8000
 )
 
 // clonePacket returns a deep copy of an RTP packet so taps are independent.
@@ -43,45 +46,50 @@ func sendDropOldestPCM(ch chan []int16, samples []int16) {
 	}
 }
 
-// decodePCMU trivially decodes PCMU payload to int16 samples.
-// Real mu-law expansion is Phase 3; here each byte maps to int16.
-func decodePCMU(payload []byte) []int16 {
-	samples := make([]int16, len(payload))
-	for i, b := range payload {
-		samples[i] = int16(b)
-	}
-	return samples
-}
-
 // drainJB pops all depth-expired packets from the jitter buffer and fans
 // them out to rtpReader and pcmReader.
-func (c *call) drainJB(jb *media.JitterBuffer) {
+func (c *call) drainJB(jb *media.JitterBuffer, cp media.CodecProcessor) {
 	for {
 		pkt := jb.Pop()
 		if pkt == nil {
 			return
 		}
 		sendDropOldest(c.rtpReader, clonePacket(pkt))
-		if len(pkt.Payload) > 0 {
-			sendDropOldestPCM(c.pcmReader, decodePCMU(pkt.Payload))
+		if len(pkt.Payload) > 0 && cp != nil {
+			sendDropOldestPCM(c.pcmReader, cp.Decode(pkt.Payload))
 		}
 	}
 }
 
+// randUint32 returns a cryptographically random uint32 for RTP SSRC.
+func randUint32() uint32 {
+	var b [4]byte
+	rand.Read(b[:])
+	return binary.BigEndian.Uint32(b[:])
+}
+
 // startMedia initializes the media pipeline (jitter buffer, RTP demux,
-// media timeout timer).
+// media timeout timer, codec dispatch, outbound encoding).
 func (c *call) startMedia() {
 	c.mu.Lock()
 	timeout := c.mediaTimeout
 	if timeout == 0 {
 		timeout = defaultMediaTimeout
 	}
+	codec := c.codec
 	c.mediaDone = make(chan struct{})
 	c.mediaActive = true
 	done := c.mediaDone
 	c.mu.Unlock()
 
 	jb := media.NewJitterBuffer(defaultJitterDepth)
+	cp := media.NewCodecProcessor(int(codec), defaultPCMRate)
+
+	// Outbound RTP state for PCMWriter encode path.
+	var outSeq uint16
+	var outTimestamp uint32
+	outSSRC := randUint32()
+	var rtpWriterUsed bool
 
 	go func() {
 		mediaTimer := time.NewTimer(timeout)
@@ -105,14 +113,36 @@ func (c *call) startMedia() {
 					}
 				}
 				mediaTimer.Reset(timeout)
-				c.drainJB(jb)
+				c.drainJB(jb, cp)
 
 			case <-jitterTick.C:
-				c.drainJB(jb)
+				c.drainJB(jb, cp)
 
 			case pkt := <-c.rtpWriter:
+				rtpWriterUsed = true
 				if c.sentRTP != nil {
 					sendDropOldest(c.sentRTP, pkt)
+				}
+
+			case pcmFrame := <-c.pcmWriter:
+				if rtpWriterUsed || cp == nil {
+					continue
+				}
+				encoded := cp.Encode(pcmFrame)
+				outPkt := &rtp.Packet{
+					Header: rtp.Header{
+						Version:        2,
+						PayloadType:    cp.PayloadType(),
+						SequenceNumber: outSeq,
+						Timestamp:      outTimestamp,
+						SSRC:           outSSRC,
+					},
+					Payload: encoded,
+				}
+				outSeq++
+				outTimestamp += cp.SamplesPerFrame()
+				if c.sentRTP != nil {
+					sendDropOldest(c.sentRTP, outPkt)
 				}
 
 			case <-mediaTimer.C:

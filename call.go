@@ -102,6 +102,7 @@ type call struct {
 	onMediaFn func()
 	onStateFn func(CallState)
 
+	codec        Codec // negotiated codec (default CodecPCMU)
 	mediaActive  bool
 	mediaTimeout time.Duration
 	mediaDone    chan struct{}
@@ -168,7 +169,17 @@ func (c *call) State() CallState {
 	return c.state
 }
 
-func (c *call) Codec() Codec      { return CodecPCMU }
+func (c *call) Codec() Codec {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.codec
+}
+
+func (c *call) setCodec(codec Codec) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.codec = codec
+}
 func (c *call) LocalSDP() string  { return "" }
 func (c *call) RemoteSDP() string { return "" }
 

@@ -1,6 +1,10 @@
 package xphone
 
-import "github.com/pion/rtp"
+import (
+	"encoding/binary"
+
+	"github.com/pion/rtp"
+)
 
 // DTMFPayloadType is the RTP payload type for DTMF events (RFC 4733).
 const DTMFPayloadType = 101
@@ -45,14 +49,55 @@ func DTMFCodeDigit(code int) string {
 
 // EncodeDTMF encodes a DTMF digit into a sequence of RTP packets (RFC 4733).
 func EncodeDTMF(digit string, ts uint32, seq uint16, ssrc uint32) ([]*rtp.Packet, error) {
-	if DTMFDigitCode(digit) < 0 {
+	code := DTMFDigitCode(digit)
+	if code < 0 {
 		return nil, ErrInvalidDTMFDigit
 	}
-	return nil, nil // stub
+
+	const volume = 10
+	durations := []uint16{160, 320, 320}
+	pkts := make([]*rtp.Packet, 3)
+
+	for i := range pkts {
+		endBit := byte(0)
+		if i == 2 {
+			endBit = 0x80
+		}
+		payload := make([]byte, 4)
+		payload[0] = byte(code)
+		payload[1] = endBit | volume
+		binary.BigEndian.PutUint16(payload[2:4], durations[i])
+
+		pkts[i] = &rtp.Packet{
+			Header: rtp.Header{
+				Version:        2,
+				Marker:         i == 0,
+				PayloadType:    DTMFPayloadType,
+				SequenceNumber: seq + uint16(i),
+				Timestamp:      ts,
+				SSRC:           ssrc,
+			},
+			Payload: payload,
+		}
+	}
+	return pkts, nil
 }
 
 // DecodeDTMF decodes a DTMF event from an RTP payload.
 // Returns nil if the payload is less than 4 bytes.
 func DecodeDTMF(payload []byte) *DTMFEvent {
-	return nil // stub
+	if len(payload) < 4 {
+		return nil
+	}
+	code := int(payload[0])
+	digit := DTMFCodeDigit(code)
+	if digit == "" {
+		return nil
+	}
+	return &DTMFEvent{
+		Digit:    digit,
+		End:      payload[1]&0x80 != 0,
+		Volume:   payload[1] & 0x3F,
+		Duration: binary.BigEndian.Uint16(payload[2:4]),
+	}
 }

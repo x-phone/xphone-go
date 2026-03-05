@@ -3,11 +3,13 @@ package xphone
 import (
 	"crypto/rand"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/pion/rtp"
+	"github.com/x-phone/xphone-go/internal/sdp"
 )
 
 func newCallID() string {
@@ -109,7 +111,8 @@ type call struct {
 	localSDP  string
 	remoteSDP string
 
-	codec Codec // negotiated codec (default CodecPCMU)
+	codec        Codec // negotiated codec (default CodecPCMU)
+	sessionTimer *time.Timer
 	mediaActive  bool
 	mediaTimeout time.Duration
 	mediaDone    chan struct{}
@@ -229,15 +232,60 @@ func (c *call) Headers() map[string][]string {
 	return c.dlg.Headers()
 }
 
+func defaultCodecPrefs() []int {
+	return []int{8, 0, 9, 111}
+}
+
+// negotiateCodec updates c.codec from a parsed remote SDP session.
+// Must be called with c.mu held.
+func (c *call) negotiateCodec(sess *sdp.Session) {
+	var remoteCodecs []int
+	if len(sess.Media) > 0 {
+		remoteCodecs = sess.Media[0].Codecs
+	}
+	if pt := sdp.NegotiateCodec(defaultCodecPrefs(), remoteCodecs); pt >= 0 {
+		c.codec = Codec(pt)
+	}
+}
+
+func (c *call) startSessionTimer() {
+	vals := c.dlg.Header("Session-Expires")
+	if len(vals) == 0 {
+		return
+	}
+	seconds, err := strconv.Atoi(vals[0])
+	if err != nil || seconds <= 0 {
+		return
+	}
+	interval := time.Duration(seconds) * time.Second / 2
+	c.sessionTimer = time.AfterFunc(interval, func() {
+		c.mu.Lock()
+		if c.state == StateEnded {
+			c.mu.Unlock()
+			return
+		}
+		c.mu.Unlock()
+		refreshSDP := sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), "sendrecv")
+		c.dlg.SendReInvite(refreshSDP)
+	})
+}
+
 func (c *call) Accept(opts ...AcceptOption) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state != StateRinging {
 		return ErrInvalidState
 	}
+	c.localSDP = sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), "sendrecv")
+	if c.remoteSDP != "" {
+		if sess, err := sdp.Parse(c.remoteSDP); err == nil {
+			c.negotiateCodec(sess)
+		}
+	}
 	c.dlg.SendSDPAnswer()
 	c.state = StateActive
 	c.startTime = time.Now()
+	c.startSessionTimer()
 	if c.onMediaFn != nil {
 		fn := c.onMediaFn
 		go fn()
@@ -263,6 +311,9 @@ func (c *call) Reject(code int, reason string) error {
 func (c *call) End() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.sessionTimer != nil {
+		c.sessionTimer.Stop()
+	}
 	switch c.state {
 	case StateDialing, StateRemoteRinging, StateEarlyMedia:
 		c.dlg.SendCancel()
@@ -293,7 +344,8 @@ func (c *call) Hold() error {
 	if c.state != StateActive {
 		return ErrInvalidState
 	}
-	c.dlg.SendReInvite("v=0\r\na=sendonly\r\n")
+	c.localSDP = sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), "sendonly")
+	c.dlg.SendReInvite(c.localSDP)
 	c.state = StateOnHold
 	return nil
 }
@@ -304,7 +356,8 @@ func (c *call) Resume() error {
 	if c.state != StateOnHold {
 		return ErrInvalidState
 	}
-	c.dlg.SendReInvite("v=0\r\na=sendrecv\r\n")
+	c.localSDP = sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), "sendrecv")
+	c.dlg.SendReInvite(c.localSDP)
 	c.state = StateActive
 	return nil
 }
@@ -313,14 +366,27 @@ func (c *call) Mute() error                 { return nil }
 func (c *call) Unmute() error               { return nil }
 func (c *call) SendDTMF(digit string) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.state != StateActive {
+		c.mu.Unlock()
 		return ErrInvalidState
 	}
 	if DTMFDigitCode(digit) < 0 {
+		c.mu.Unlock()
 		return ErrInvalidDTMFDigit
 	}
-	return nil // stub: no RTP packets produced yet
+	sentRTP := c.sentRTP
+	c.mu.Unlock()
+
+	pkts, err := EncodeDTMF(digit, 0, 0, 0)
+	if err != nil {
+		return err
+	}
+	if sentRTP != nil {
+		for _, pkt := range pkts {
+			sendDropOldest(sentRTP, pkt)
+		}
+	}
+	return nil
 }
 
 func (c *call) BlindTransfer(target string) error {
@@ -431,8 +497,42 @@ func (c *call) simulateBye() {
 	}
 }
 
-func (c *call) simulateReInvite(sdp string) {
-	// stub: will process inbound re-INVITE SDP in Phase 4 implementation
+func (c *call) simulateReInvite(rawSDP string) {
+	c.mu.Lock()
+	if c.state == StateEnded {
+		c.mu.Unlock()
+		return
+	}
+
+	sess, err := sdp.Parse(rawSDP)
+	if err != nil {
+		c.mu.Unlock()
+		return
+	}
+	c.remoteSDP = rawSDP
+
+	dir := sess.Dir()
+	var holdFn, resumeFn func()
+
+	switch {
+	case dir == "sendonly" && c.state == StateActive:
+		c.state = StateOnHold
+		holdFn = c.onHoldFn
+	case dir == "sendrecv" && c.state == StateOnHold:
+		c.state = StateActive
+		resumeFn = c.onResumeFn
+	}
+
+	c.negotiateCodec(sess)
+
+	c.mu.Unlock()
+
+	if holdFn != nil {
+		go holdFn()
+	}
+	if resumeFn != nil {
+		go resumeFn()
+	}
 }
 
 func (c *call) mediaSessionActive() bool {

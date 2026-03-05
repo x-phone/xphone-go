@@ -97,6 +97,16 @@ func (c *call) startMedia() {
 		jitterTick := time.NewTicker(5 * time.Millisecond)
 		defer jitterTick.Stop()
 
+		resetTimer := func() {
+			if !mediaTimer.Stop() {
+				select {
+				case <-mediaTimer.C:
+				default:
+				}
+			}
+			mediaTimer.Reset(timeout)
+		}
+
 		for {
 			select {
 			case <-done:
@@ -104,15 +114,23 @@ func (c *call) startMedia() {
 
 			case pkt := <-c.rtpInbound:
 				sendDropOldest(c.rtpRawReader, clonePacket(pkt))
-				jb.Push(pkt)
-				// Reset media timer on inbound RTP.
-				if !mediaTimer.Stop() {
-					select {
-					case <-mediaTimer.C:
-					default:
+
+				// DTMF dispatch: intercept PT=101 before jitter buffer.
+				if pkt.PayloadType == DTMFPayloadType {
+					if ev := DecodeDTMF(pkt.Payload); ev != nil && ev.End {
+						c.mu.Lock()
+						fn := c.onDTMFFn
+						c.mu.Unlock()
+						if fn != nil {
+							go fn(ev.Digit)
+						}
 					}
+					resetTimer()
+					continue
 				}
-				mediaTimer.Reset(timeout)
+
+				jb.Push(pkt)
+				resetTimer()
 				c.drainJB(jb, cp)
 
 			case <-jitterTick.C:

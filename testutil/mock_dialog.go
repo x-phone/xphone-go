@@ -9,17 +9,17 @@ import (
 type MockDialog struct {
 	mu sync.Mutex
 
-	sdpAnswerSent     bool
-	lastResponseCode  int
+	sdpAnswerSent      bool
+	lastResponseCode   int
 	lastResponseReason string
-	cancelSent        bool
-	byeSent           bool
-	lastReInviteSDP   string
-	referSent         bool
-	lastReferTarget   string
-	callID            string
-	headers           map[string][]string
-	onNotify          func(code int)
+	cancelSent         bool
+	byeSent            bool
+	lastReInviteSDP    string
+	referSent          bool
+	lastReferTarget    string
+	callID             string
+	headers            map[string][]string
+	onNotify           func(code int)
 }
 
 // NewMockDialog creates a new MockDialog with defaults.

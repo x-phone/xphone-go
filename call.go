@@ -101,12 +101,12 @@ type call struct {
 	onMediaFn func()
 	onStateFn func(CallState)
 
-	mediaActive   bool
-	rtpReader     chan *rtp.Packet
-	rtpRawReader  chan *rtp.Packet
-	rtpWriter     chan *rtp.Packet
-	pcmReader     chan []int16
-	pcmWriter     chan []int16
+	mediaActive  bool
+	rtpReader    chan *rtp.Packet
+	rtpRawReader chan *rtp.Packet
+	rtpWriter    chan *rtp.Packet
+	pcmReader    chan []int16
+	pcmWriter    chan []int16
 }
 
 func newInboundCall(d dialog) *call {
@@ -151,9 +151,9 @@ func (c *call) Direction() Direction {
 	return c.direction
 }
 
-func (c *call) RemoteURI() string  { return "" }
-func (c *call) RemoteIP() string   { return "" }
-func (c *call) RemotePort() int    { return 0 }
+func (c *call) RemoteURI() string { return "" }
+func (c *call) RemoteIP() string  { return "" }
+func (c *call) RemotePort() int   { return 0 }
 
 func (c *call) State() CallState {
 	c.mu.Lock()
@@ -161,7 +161,7 @@ func (c *call) State() CallState {
 	return c.state
 }
 
-func (c *call) Codec() Codec     { return CodecPCMU }
+func (c *call) Codec() Codec      { return CodecPCMU }
 func (c *call) LocalSDP() string  { return "" }
 func (c *call) RemoteSDP() string { return "" }
 
@@ -275,8 +275,8 @@ func (c *call) Resume() error {
 	return nil
 }
 
-func (c *call) Mute() error   { return nil }
-func (c *call) Unmute() error { return nil }
+func (c *call) Mute() error                 { return nil }
+func (c *call) Unmute() error               { return nil }
 func (c *call) SendDTMF(digit string) error { return nil }
 
 func (c *call) BlindTransfer(target string) error {
@@ -306,11 +306,11 @@ func (c *call) RTPWriter() chan<- *rtp.Packet    { return c.rtpWriter }
 func (c *call) PCMReader() <-chan []int16        { return c.pcmReader }
 func (c *call) PCMWriter() chan<- []int16        { return c.pcmWriter }
 
-func (c *call) OnDTMF(fn func(string))          {}
-func (c *call) OnHold(fn func())                {}
-func (c *call) OnResume(fn func())              {}
-func (c *call) OnMute(fn func())                {}
-func (c *call) OnUnmute(fn func())              {}
+func (c *call) OnDTMF(fn func(string)) {}
+func (c *call) OnHold(fn func())       {}
+func (c *call) OnResume(fn func())     {}
+func (c *call) OnMute(fn func())       {}
+func (c *call) OnUnmute(fn func())     {}
 
 func (c *call) OnMedia(fn func()) {
 	c.mu.Lock()

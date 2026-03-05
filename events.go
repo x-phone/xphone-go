@@ -18,7 +18,7 @@ const (
 type PhoneState int
 
 const (
-	PhoneStateDisconnected    PhoneState = iota
+	PhoneStateDisconnected PhoneState = iota
 	PhoneStateRegistering
 	PhoneStateRegistered
 	PhoneStateUnregistering
@@ -42,6 +42,6 @@ const (
 type Direction int
 
 const (
-	DirectionInbound  Direction = iota
+	DirectionInbound Direction = iota
 	DirectionOutbound
 )

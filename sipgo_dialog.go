@@ -119,3 +119,66 @@ func (d *sipgoDialogUAC) Headers() map[string][]string {
 
 // Ensure sipgoDialogUAC satisfies the dialog interface at compile time.
 var _ dialog = (*sipgoDialogUAC)(nil)
+
+// serverSession is a thin interface wrapping the methods xphone needs from
+// sipgo's DialogServerSession. This exists to enable unit testing without
+// a real SIP stack.
+type serverSession interface {
+	Respond(statusCode int, reason string, body []byte, headers ...sip.Header) error
+	Bye(ctx context.Context) error
+	Do(ctx context.Context, req *sip.Request) (*sip.Response, error)
+	WriteRequest(req *sip.Request) error
+	Close() error
+}
+
+// sipgoDialogUAS implements the dialog interface for inbound (UAS) calls
+// backed by a sipgo DialogServerSession.
+//
+// sess, invite, and response are immutable after construction.
+// mu protects only onNotify.
+type sipgoDialogUAS struct {
+	mu       sync.Mutex
+	sess     serverSession
+	invite   *sip.Request  // immutable after construction
+	response *sip.Response // immutable after construction
+	onNotify func(int)
+}
+
+func (d *sipgoDialogUAS) Respond(code int, reason string, body []byte) error {
+	return nil // stub
+}
+
+func (d *sipgoDialogUAS) SendBye() error {
+	return nil // stub
+}
+
+func (d *sipgoDialogUAS) SendCancel() error {
+	return nil // stub
+}
+
+func (d *sipgoDialogUAS) SendReInvite(sdpBody []byte) error {
+	return nil // stub
+}
+
+func (d *sipgoDialogUAS) SendRefer(target string) error {
+	return nil // stub
+}
+
+func (d *sipgoDialogUAS) OnNotify(fn func(code int)) {
+	// stub
+}
+
+func (d *sipgoDialogUAS) CallID() string {
+	return "" // stub
+}
+
+func (d *sipgoDialogUAS) Header(name string) []string {
+	return nil // stub
+}
+
+func (d *sipgoDialogUAS) Headers() map[string][]string {
+	return nil // stub
+}
+
+// Ensure sipgoDialogUAS satisfies the dialog interface at compile time.
+var _ dialog = (*sipgoDialogUAS)(nil)

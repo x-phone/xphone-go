@@ -84,6 +84,7 @@ type Call interface {
 	simulateResponse(code int, reason string)
 	simulateBye()
 	mediaSessionActive() bool
+	injectRTP(pkt *rtp.Packet)
 }
 
 // call is the concrete implementation of Call.
@@ -102,11 +103,14 @@ type call struct {
 	onStateFn func(CallState)
 
 	mediaActive  bool
+	mediaTimeout time.Duration
+	mediaDone    chan struct{}
 	rtpReader    chan *rtp.Packet
 	rtpRawReader chan *rtp.Packet
 	rtpWriter    chan *rtp.Packet
 	pcmReader    chan []int16
 	pcmWriter    chan []int16
+	sentRTP      chan *rtp.Packet // test hook: outbound packets copied here
 }
 
 func newInboundCall(d dialog) *call {
@@ -377,4 +381,9 @@ func (c *call) mediaSessionActive() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.mediaActive
+}
+
+// injectRTP is a test hook that feeds an RTP packet into the call's media
+// pipeline as if it arrived from the network.
+func (c *call) injectRTP(pkt *rtp.Packet) {
 }

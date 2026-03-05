@@ -81,13 +81,6 @@ type Call interface {
 	OnMedia(func())
 	OnState(func(state CallState))
 	OnEnded(func(reason EndReason))
-
-	// internal test hooks
-	simulateResponse(code int, reason string)
-	simulateBye()
-	simulateReInvite(sdp string)
-	mediaSessionActive() bool
-	injectRTP(pkt *rtp.Packet)
 }
 
 // call is the concrete implementation of Call.

@@ -42,20 +42,20 @@ Adopt sipgo as the SIP signaling layer. Replace the stub `transport` and `phoneD
 
 ## Phase D: sipgo wiring — inbound calls
 
-- [ ] D1. Implement `server.OnInvite` handler:
+- [x] D1. Implement `server.OnInvite` handler:
   - `dialogServer.ReadInvite(req, tx)` → creates `DialogServerSession`
   - Extract From/To, parse SDP offer
   - Create `sipgoDialog` wrapping `DialogServerSession`
   - Wire into `newInboundCall()`, fire `phone.OnIncoming`
-- [ ] D2. Implement `sipgoDialog` for inbound (UAS):
+- [x] D2. Implement `sipgoDialog` for inbound (UAS):
   - `Respond(code, reason, body)` → `sess.Respond(code, reason, body)`
   - `SendBye(ctx)` → `sess.Bye(ctx)`
   - `SendReInvite(ctx, sdp)` → `sess.TransactionRequest(ctx, reInviteReq)`
   - `Ack(ctx)` → handled by sipgo internally for UAS
-- [ ] D3. Wire `server.OnBye` → find call by dialog ID → `call.simulateBye()`
-- [ ] D4. Wire `server.OnCancel` → find call by dialog ID → end call
-- [ ] D5. Wire `server.OnAck` → `dialogServer.ReadAck(req, tx)`
-- [ ] D6. Verify: `go test ./... -count=1` + `go test -race ./...` pass
+- [x] D3. Wire `server.OnBye` → find call by dialog ID → `call.simulateBye()`
+- [x] D4. Wire `server.OnCancel` → find call by dialog ID → end call
+- [x] D5. Wire `server.OnAck` → `dialogServer.ReadAck(req, tx)`
+- [x] D6. Verify: `go test ./... -count=1` + `go test -race ./...` pass
 
 ## Phase E: integration tests with Docker/Asterisk
 

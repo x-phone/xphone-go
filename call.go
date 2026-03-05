@@ -105,6 +105,7 @@ type call struct {
 	mediaActive  bool
 	mediaTimeout time.Duration
 	mediaDone    chan struct{}
+	rtpInbound   chan *rtp.Packet
 	rtpReader    chan *rtp.Packet
 	rtpRawReader chan *rtp.Packet
 	rtpWriter    chan *rtp.Packet
@@ -119,6 +120,7 @@ func newInboundCall(d dialog) *call {
 		dlg:          d,
 		state:        StateRinging,
 		direction:    DirectionInbound,
+		rtpInbound:   make(chan *rtp.Packet, 256),
 		rtpReader:    make(chan *rtp.Packet, 256),
 		rtpRawReader: make(chan *rtp.Packet, 256),
 		rtpWriter:    make(chan *rtp.Packet, 256),
@@ -135,6 +137,7 @@ func newOutboundCall(d dialog, dialOpts ...DialOption) *call {
 		state:        StateDialing,
 		direction:    DirectionOutbound,
 		opts:         opts,
+		rtpInbound:   make(chan *rtp.Packet, 256),
 		rtpReader:    make(chan *rtp.Packet, 256),
 		rtpRawReader: make(chan *rtp.Packet, 256),
 		rtpWriter:    make(chan *rtp.Packet, 256),
@@ -386,4 +389,5 @@ func (c *call) mediaSessionActive() bool {
 // injectRTP is a test hook that feeds an RTP packet into the call's media
 // pipeline as if it arrived from the network.
 func (c *call) injectRTP(pkt *rtp.Packet) {
+	c.rtpInbound <- pkt
 }

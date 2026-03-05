@@ -145,39 +145,79 @@ type sipgoDialogUAS struct {
 }
 
 func (d *sipgoDialogUAS) Respond(code int, reason string, body []byte) error {
-	return nil // stub
+	return d.sess.Respond(code, reason, body)
 }
 
 func (d *sipgoDialogUAS) SendBye() error {
-	return nil // stub
+	return d.sess.Bye(context.Background())
 }
 
 func (d *sipgoDialogUAS) SendCancel() error {
-	return nil // stub
+	return ErrInvalidState
 }
 
 func (d *sipgoDialogUAS) SendReInvite(sdpBody []byte) error {
-	return nil // stub
+	req := sip.NewRequest(sip.INVITE, d.invite.Recipient)
+	req.SetBody(sdpBody)
+	_, err := d.sess.Do(context.Background(), req)
+	return err
 }
 
 func (d *sipgoDialogUAS) SendRefer(target string) error {
-	return nil // stub
+	req := sip.NewRequest(sip.REFER, d.invite.Recipient)
+	req.AppendHeader(sip.NewHeader("Refer-To", target))
+	_, err := d.sess.Do(context.Background(), req)
+	return err
 }
 
 func (d *sipgoDialogUAS) OnNotify(fn func(code int)) {
-	// stub
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onNotify = fn
 }
 
 func (d *sipgoDialogUAS) CallID() string {
-	return "" // stub
+	if h := d.invite.CallID(); h != nil {
+		return h.Value()
+	}
+	return ""
 }
 
 func (d *sipgoDialogUAS) Header(name string) []string {
-	return nil // stub
+	var vals []string
+	if d.response != nil {
+		for _, h := range d.response.GetHeaders(name) {
+			vals = append(vals, h.Value())
+		}
+	}
+	if len(vals) > 0 {
+		return vals
+	}
+	if d.invite != nil {
+		for _, h := range d.invite.GetHeaders(name) {
+			vals = append(vals, h.Value())
+		}
+	}
+	return vals
 }
 
 func (d *sipgoDialogUAS) Headers() map[string][]string {
-	return nil // stub
+	result := make(map[string][]string)
+	if d.response != nil {
+		for _, h := range d.response.Headers() {
+			name := h.Name()
+			result[name] = append(result[name], h.Value())
+		}
+	}
+	if d.invite != nil {
+		for _, h := range d.invite.Headers() {
+			name := h.Name()
+			if _, exists := result[name]; !exists {
+				result[name] = append(result[name], h.Value())
+			}
+		}
+	}
+	return result
 }
 
 // Ensure sipgoDialogUAS satisfies the dialog interface at compile time.

@@ -29,6 +29,7 @@ type phone struct {
 	reg      *registry
 	state    PhoneState
 	incoming func(Call)
+	calls    map[string]*call // active calls keyed by dialog ID (Call-ID)
 
 	// dialFn establishes an outbound SIP dialog and returns a dialog interface.
 	// Production: set by Connect() to use sipgo's dialog API.
@@ -47,6 +48,7 @@ func newPhone(cfg Config) *phone {
 		cfg:    cfg,
 		logger: resolveLogger(cfg.Logger),
 		state:  PhoneStateDisconnected,
+		calls:  make(map[string]*call),
 	}
 }
 
@@ -139,6 +141,12 @@ func (p *phone) Connect(ctx context.Context) error {
 	p.dialFn = tr.dial
 	p.mu.Unlock()
 
+	// Wire inbound INVITE handler for sipgo path.
+	tr.mu.Lock()
+	tr.onDialogInvite = p.handleDialogInvite
+	tr.mu.Unlock()
+	tr.startServer()
+
 	p.connectWithTransport(tr)
 	return nil
 }
@@ -224,6 +232,10 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 	// Create the call with the real dialog and replay responses.
 	c := newOutboundCall(dlg, opts...)
 	c.logger = p.logger
+	p.trackCall(c)
+	c.onEndedInternal = func(_ EndReason) {
+		p.untrackCall(c.CallID())
+	}
 	for _, r := range responses {
 		c.simulateResponse(r.code, r.reason)
 	}
@@ -245,24 +257,43 @@ func (p *phone) classifyDialError(ctx, dialCtx context.Context, err error) error
 	return err
 }
 
-// handleIncoming is called by the transport when an incoming INVITE arrives.
-// It auto-sends 100 Trying, creates an inbound call, fires OnIncoming, and
-// auto-sends 180 Ringing.
-func (p *phone) handleIncoming(from, to string) {
-	// Auto-send 100 Trying immediately.
+// trackCall adds a call to the active calls map under lock.
+func (p *phone) trackCall(c *call) {
 	p.mu.Lock()
-	tr := p.tr
-	p.mu.Unlock()
-	tr.Respond(100, "Trying")
+	defer p.mu.Unlock()
+	p.calls[c.CallID()] = c
+}
 
-	// Create an inbound call with a phone dialog.
-	dlg := newPhoneDialog()
+// untrackCall removes a call from the active calls map under lock.
+func (p *phone) untrackCall(dialogID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.calls, dialogID)
+}
+
+// findCall looks up an active call by dialog ID under lock.
+func (p *phone) findCall(dialogID string) *call {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls[dialogID]
+}
+
+// handleDialogInvite is called by sipUA's OnInvite handler when an inbound
+// INVITE arrives via sipgo. It creates an inbound call with the real dialog,
+// sends 100 Trying + 180 Ringing, and fires OnIncoming.
+func (p *phone) handleDialogInvite(dlg dialog, from, to string) {
+	// Auto-send 100 Trying.
+	dlg.Respond(100, "Trying", nil)
+
 	c := newInboundCall(dlg)
 	c.logger = p.logger
+	p.trackCall(c)
+	c.onEndedInternal = func(_ EndReason) {
+		p.untrackCall(c.CallID())
+	}
 
 	p.logger.Info("incoming call", "from", from, "to", to)
 
-	// Fire the OnIncoming callback if set.
 	p.mu.Lock()
 	fn := p.incoming
 	p.mu.Unlock()
@@ -270,7 +301,36 @@ func (p *phone) handleIncoming(from, to string) {
 		fn(c)
 	}
 
-	// Auto-send 180 Ringing after presenting the call.
+	// Auto-send 180 Ringing.
+	dlg.Respond(180, "Ringing", nil)
+}
+
+// handleIncoming is called by the mock transport when an incoming INVITE arrives.
+// It auto-sends 100 Trying via the transport, creates an inbound call, fires
+// OnIncoming, and auto-sends 180 Ringing via the transport.
+func (p *phone) handleIncoming(from, to string) {
+	p.mu.Lock()
+	tr := p.tr
+	p.mu.Unlock()
+	tr.Respond(100, "Trying")
+
+	dlg := newPhoneDialog()
+	c := newInboundCall(dlg)
+	c.logger = p.logger
+	p.trackCall(c)
+	c.onEndedInternal = func(_ EndReason) {
+		p.untrackCall(c.CallID())
+	}
+
+	p.logger.Info("incoming call", "from", from, "to", to)
+
+	p.mu.Lock()
+	fn := p.incoming
+	p.mu.Unlock()
+	if fn != nil {
+		fn(c)
+	}
+
 	tr.Respond(180, "Ringing")
 }
 

@@ -107,9 +107,10 @@ type call struct {
 	startTime time.Time
 	logger    *slog.Logger
 
-	onEndedFn   func(EndReason)
-	onMediaFn   func()
-	onStateFn   func(CallState)
+	onEndedFn       func(EndReason)
+	onEndedInternal func(EndReason) // internal hook for call tracking; not overwritten by OnEnded
+	onMediaFn       func()
+	onStateFn       func(CallState)
 	onDTMFFn    func(string)
 	onHoldFn    func()
 	onResumeFn  func()
@@ -335,6 +336,19 @@ func (c *call) fireOnState(state CallState) {
 	}
 }
 
+// fireOnEnded dispatches both the public OnEnded and internal onEndedInternal callbacks.
+// Must be called with c.mu held.
+func (c *call) fireOnEnded(reason EndReason) {
+	if c.onEndedInternal != nil {
+		fn := c.onEndedInternal
+		go fn(reason)
+	}
+	if c.onEndedFn != nil {
+		fn := c.onEndedFn
+		go fn(reason)
+	}
+}
+
 func (c *call) Accept(opts ...AcceptOption) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -370,10 +384,7 @@ func (c *call) Reject(code int, reason string) error {
 	c.state = StateEnded
 	c.fireOnState(StateEnded)
 	c.logger.Info("call rejected", "id", c.id, "code", code, "reason", reason)
-	if c.onEndedFn != nil {
-		fn := c.onEndedFn
-		go fn(EndedByRejected)
-	}
+	c.fireOnEnded(EndedByRejected)
 	return nil
 }
 
@@ -389,20 +400,14 @@ func (c *call) End() error {
 		c.state = StateEnded
 		c.fireOnState(StateEnded)
 		c.logger.Info("call ended", "id", c.id, "reason", "cancelled")
-		if c.onEndedFn != nil {
-			fn := c.onEndedFn
-			go fn(EndedByCancelled)
-		}
+		c.fireOnEnded(EndedByCancelled)
 		return nil
 	case StateActive, StateOnHold:
 		c.dlg.SendBye()
 		c.state = StateEnded
 		c.fireOnState(StateEnded)
 		c.logger.Info("call ended", "id", c.id, "reason", "local")
-		if c.onEndedFn != nil {
-			fn := c.onEndedFn
-			go fn(EndedByLocal)
-		}
+		c.fireOnEnded(EndedByLocal)
 		return nil
 	case StateEnded:
 		return ErrInvalidState
@@ -616,10 +621,7 @@ func (c *call) simulateBye() {
 	defer c.mu.Unlock()
 	c.state = StateEnded
 	c.fireOnState(StateEnded)
-	if c.onEndedFn != nil {
-		fn := c.onEndedFn
-		go fn(EndedByRemote)
-	}
+	c.fireOnEnded(EndedByRemote)
 }
 
 func (c *call) simulateReInvite(rawSDP string) {

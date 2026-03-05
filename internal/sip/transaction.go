@@ -20,14 +20,16 @@ type pendingTx struct {
 }
 
 // TransactionManager manages SIP client transactions.
-// It dispatches incoming responses to the correct pending transaction by Via branch.
+// It dispatches incoming responses to the correct pending transaction by Via branch,
+// and incoming requests to the OnRequest callback.
 type TransactionManager struct {
 	conn *Conn
 	mu   sync.Mutex
 	// pending maps Via branch to the transaction's response channel.
-	pending map[string]*pendingTx
-	stopped bool
-	done    chan struct{}
+	pending   map[string]*pendingTx
+	onRequest func(*Message, net.Addr) // callback for incoming requests
+	stopped   bool
+	done      chan struct{}
 }
 
 // NewTransactionManager creates a new TransactionManager and starts its read loop.
@@ -120,6 +122,13 @@ func (tm *TransactionManager) ReadResponse(branch string, timeout time.Duration)
 	}
 }
 
+// OnRequest registers a callback for incoming SIP requests (INVITE, BYE, etc.).
+func (tm *TransactionManager) OnRequest(fn func(*Message, net.Addr)) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.onRequest = fn
+}
+
 // readLoop continuously reads from the connection and dispatches responses.
 func (tm *TransactionManager) readLoop() {
 	for {
@@ -129,7 +138,7 @@ func (tm *TransactionManager) readLoop() {
 		default:
 		}
 
-		data, _, err := tm.conn.Receive(500 * time.Millisecond)
+		data, addr, err := tm.conn.Receive(500 * time.Millisecond)
 		if err != nil {
 			// Timeout — just loop again (check done).
 			continue
@@ -140,8 +149,14 @@ func (tm *TransactionManager) readLoop() {
 			continue
 		}
 
-		// Only dispatch responses (not requests — those are handled elsewhere).
+		// Dispatch incoming requests (INVITE, BYE, etc.) to the callback.
 		if !msg.IsResponse() {
+			tm.mu.Lock()
+			fn := tm.onRequest
+			tm.mu.Unlock()
+			if fn != nil {
+				fn(msg, addr)
+			}
 			continue
 		}
 

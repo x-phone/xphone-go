@@ -15,11 +15,19 @@ type Session struct {
 	Raw        string // original SDP text
 }
 
+// SDP direction constants.
+const (
+	DirSendRecv = "sendrecv"
+	DirSendOnly = "sendonly"
+	DirRecvOnly = "recvonly"
+	DirInactive = "inactive"
+)
+
 // MediaDesc describes a single media line in an SDP session.
 type MediaDesc struct {
 	Port      int
 	Codecs    []int  // payload type numbers
-	Direction string // "sendrecv" | "sendonly" | "recvonly" | "inactive"
+	Direction string // DirSendRecv | DirSendOnly | DirRecvOnly | DirInactive
 }
 
 // FirstCodec returns the first payload type from the first m= line, or -1 if none.
@@ -30,12 +38,12 @@ func (s *Session) FirstCodec() int {
 	return -1
 }
 
-// Dir returns the media direction, defaulting to "sendrecv".
+// Dir returns the media direction, defaulting to DirSendRecv.
 func (s *Session) Dir() string {
 	if len(s.Media) > 0 && s.Media[0].Direction != "" {
 		return s.Media[0].Direction
 	}
-	return "sendrecv"
+	return DirSendRecv
 }
 
 var codecNames = map[int]string{
@@ -84,7 +92,7 @@ func Parse(raw string) (*Session, error) {
 			}
 		case 'a':
 			switch val {
-			case "sendrecv", "sendonly", "recvonly", "inactive":
+			case DirSendRecv, DirSendOnly, DirRecvOnly, DirInactive:
 				if curMedia != nil {
 					curMedia.Direction = val
 				}

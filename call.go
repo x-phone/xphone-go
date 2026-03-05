@@ -278,6 +278,12 @@ func defaultCodecPrefs() []int {
 	return []int{8, 0, 9, 111}
 }
 
+// buildLocalSDP creates an SDP offer with placeholder address/port.
+// When real RTP port allocation is wired in, only this method needs to change.
+func (c *call) buildLocalSDP(direction string) string {
+	return sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), direction)
+}
+
 // negotiateCodec updates c.codec from a parsed remote SDP session.
 // Must be called with c.mu held.
 func (c *call) negotiateCodec(sess *sdp.Session) {
@@ -307,7 +313,7 @@ func (c *call) startSessionTimer() {
 			return
 		}
 		c.mu.Unlock()
-		refreshSDP := sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), "sendrecv")
+		refreshSDP := c.buildLocalSDP(sdp.DirSendRecv)
 		c.dlg.SendReInvite(refreshSDP)
 	})
 }
@@ -327,7 +333,7 @@ func (c *call) Accept(opts ...AcceptOption) error {
 	if c.state != StateRinging {
 		return ErrInvalidState
 	}
-	c.localSDP = sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), "sendrecv")
+	c.localSDP = c.buildLocalSDP(sdp.DirSendRecv)
 	if c.remoteSDP != "" {
 		if sess, err := sdp.Parse(c.remoteSDP); err == nil {
 			c.negotiateCodec(sess)
@@ -399,7 +405,7 @@ func (c *call) Hold() error {
 	if c.state != StateActive {
 		return ErrInvalidState
 	}
-	c.localSDP = sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), "sendonly")
+	c.localSDP = c.buildLocalSDP(sdp.DirSendOnly)
 	c.dlg.SendReInvite(c.localSDP)
 	c.state = StateOnHold
 	c.fireOnState(StateOnHold)
@@ -412,7 +418,7 @@ func (c *call) Resume() error {
 	if c.state != StateOnHold {
 		return ErrInvalidState
 	}
-	c.localSDP = sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), "sendrecv")
+	c.localSDP = c.buildLocalSDP(sdp.DirSendRecv)
 	c.dlg.SendReInvite(c.localSDP)
 	c.state = StateActive
 	c.fireOnState(StateActive)
@@ -620,14 +626,14 @@ func (c *call) simulateReInvite(rawSDP string) {
 	var holdFn, resumeFn, stateFn func()
 
 	switch {
-	case dir == "sendonly" && c.state == StateActive:
+	case dir == sdp.DirSendOnly && c.state == StateActive:
 		c.state = StateOnHold
 		holdFn = c.onHoldFn
 		if c.onStateFn != nil {
 			onState := c.onStateFn
 			stateFn = func() { onState(StateOnHold) }
 		}
-	case dir == "sendrecv" && c.state == StateOnHold:
+	case dir == sdp.DirSendRecv && c.state == StateOnHold:
 		c.state = StateActive
 		resumeFn = c.onResumeFn
 		if c.onStateFn != nil {

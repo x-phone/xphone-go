@@ -1,37 +1,15 @@
 package sdp
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// sampleSDP generates a minimal valid SDP for testing.
+// sampleSDP generates a minimal valid SDP for testing via BuildOffer.
 func sampleSDP(ip string, port int, dir string, codecs ...int) string {
-	codecNames := map[int]string{
-		0: "PCMU/8000", 8: "PCMA/8000", 9: "G722/8000", 111: "opus/48000/2",
-	}
-	s := "v=0\r\n"
-	s += "o=xphone 0 0 IN IP4 " + ip + "\r\n"
-	s += "s=xphone\r\n"
-	s += "c=IN IP4 " + ip + "\r\n"
-	s += "t=0 0\r\n"
-	s += fmt.Sprintf("m=audio %d RTP/AVP", port)
-	for _, c := range codecs {
-		s += fmt.Sprintf(" %d", c)
-	}
-	s += "\r\n"
-	for _, c := range codecs {
-		if name, ok := codecNames[c]; ok {
-			s += fmt.Sprintf("a=rtpmap:%d %s\r\n", c, name)
-		}
-	}
-	if dir != "" {
-		s += "a=" + dir + "\r\n"
-	}
-	return s
+	return BuildOffer(ip, port, codecs, dir)
 }
 
 func TestBuildOffer_SingleCodec(t *testing.T) {

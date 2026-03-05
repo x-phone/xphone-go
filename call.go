@@ -101,12 +101,16 @@ type call struct {
 	opts      DialOptions
 	startTime time.Time
 
-	onEndedFn  func(EndReason)
-	onMediaFn  func()
-	onStateFn  func(CallState)
-	onDTMFFn   func(string)
-	onHoldFn   func()
-	onResumeFn func()
+	onEndedFn   func(EndReason)
+	onMediaFn   func()
+	onStateFn   func(CallState)
+	onDTMFFn    func(string)
+	onHoldFn    func()
+	onResumeFn  func()
+	onMuteFn    func()
+	onUnmuteFn  func()
+
+	muted bool
 
 	localSDP  string
 	remoteSDP string
@@ -169,9 +173,54 @@ func (c *call) Direction() Direction {
 	return c.direction
 }
 
-func (c *call) RemoteURI() string { return "" }
-func (c *call) RemoteIP() string  { return "" }
-func (c *call) RemotePort() int   { return 0 }
+func (c *call) RemoteURI() string {
+	vals := c.dlg.Header("From")
+	if len(vals) == 0 {
+		return ""
+	}
+	v := vals[0]
+	start := strings.Index(v, "<")
+	end := strings.Index(v, ">")
+	if start >= 0 && end > start {
+		return v[start+1 : end]
+	}
+	return v
+}
+
+// remoteSession parses the remote SDP under lock and returns the session.
+// Returns nil if no remote SDP is set or parsing fails.
+func (c *call) remoteSession() *sdp.Session {
+	c.mu.Lock()
+	raw := c.remoteSDP
+	c.mu.Unlock()
+	if raw == "" {
+		return nil
+	}
+	sess, err := sdp.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	return sess
+}
+
+func (c *call) RemoteIP() string {
+	sess := c.remoteSession()
+	if sess == nil {
+		return ""
+	}
+	return sess.Connection
+}
+
+func (c *call) RemotePort() int {
+	sess := c.remoteSession()
+	if sess == nil {
+		return 0
+	}
+	if len(sess.Media) > 0 {
+		return sess.Media[0].Port
+	}
+	return 0
+}
 
 func (c *call) State() CallState {
 	c.mu.Lock()
@@ -270,6 +319,15 @@ func (c *call) startSessionTimer() {
 	})
 }
 
+// fireOnState dispatches the OnState callback outside the lock.
+// Must be called with c.mu held. Copies the function pointer and fires via goroutine.
+func (c *call) fireOnState(state CallState) {
+	if c.onStateFn != nil {
+		fn := c.onStateFn
+		go fn(state)
+	}
+}
+
 func (c *call) Accept(opts ...AcceptOption) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -286,6 +344,7 @@ func (c *call) Accept(opts ...AcceptOption) error {
 	c.state = StateActive
 	c.startTime = time.Now()
 	c.startSessionTimer()
+	c.fireOnState(StateActive)
 	if c.onMediaFn != nil {
 		fn := c.onMediaFn
 		go fn()
@@ -301,6 +360,7 @@ func (c *call) Reject(code int, reason string) error {
 	}
 	c.dlg.Respond(code, reason)
 	c.state = StateEnded
+	c.fireOnState(StateEnded)
 	if c.onEndedFn != nil {
 		fn := c.onEndedFn
 		go fn(EndedByRejected)
@@ -318,6 +378,7 @@ func (c *call) End() error {
 	case StateDialing, StateRemoteRinging, StateEarlyMedia:
 		c.dlg.SendCancel()
 		c.state = StateEnded
+		c.fireOnState(StateEnded)
 		if c.onEndedFn != nil {
 			fn := c.onEndedFn
 			go fn(EndedByCancelled)
@@ -326,6 +387,7 @@ func (c *call) End() error {
 	case StateActive, StateOnHold:
 		c.dlg.SendBye()
 		c.state = StateEnded
+		c.fireOnState(StateEnded)
 		if c.onEndedFn != nil {
 			fn := c.onEndedFn
 			go fn(EndedByLocal)
@@ -347,6 +409,7 @@ func (c *call) Hold() error {
 	c.localSDP = sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), "sendonly")
 	c.dlg.SendReInvite(c.localSDP)
 	c.state = StateOnHold
+	c.fireOnState(StateOnHold)
 	return nil
 }
 
@@ -359,11 +422,47 @@ func (c *call) Resume() error {
 	c.localSDP = sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), "sendrecv")
 	c.dlg.SendReInvite(c.localSDP)
 	c.state = StateActive
+	c.fireOnState(StateActive)
 	return nil
 }
 
-func (c *call) Mute() error                 { return nil }
-func (c *call) Unmute() error               { return nil }
+func (c *call) Mute() error {
+	c.mu.Lock()
+	if c.state != StateActive {
+		c.mu.Unlock()
+		return ErrInvalidState
+	}
+	if c.muted {
+		c.mu.Unlock()
+		return ErrAlreadyMuted
+	}
+	c.muted = true
+	fn := c.onMuteFn
+	c.mu.Unlock()
+	if fn != nil {
+		go fn()
+	}
+	return nil
+}
+
+func (c *call) Unmute() error {
+	c.mu.Lock()
+	if c.state != StateActive {
+		c.mu.Unlock()
+		return ErrInvalidState
+	}
+	if !c.muted {
+		c.mu.Unlock()
+		return ErrNotMuted
+	}
+	c.muted = false
+	fn := c.onUnmuteFn
+	c.mu.Unlock()
+	if fn != nil {
+		go fn()
+	}
+	return nil
+}
 func (c *call) SendDTMF(digit string) error {
 	c.mu.Lock()
 	if c.state != StateActive {
@@ -433,8 +532,17 @@ func (c *call) OnResume(fn func()) {
 	defer c.mu.Unlock()
 	c.onResumeFn = fn
 }
-func (c *call) OnMute(fn func())       {}
-func (c *call) OnUnmute(fn func())     {}
+func (c *call) OnMute(fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onMuteFn = fn
+}
+
+func (c *call) OnUnmute(fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onUnmuteFn = fn
+}
 
 func (c *call) OnMedia(fn func()) {
 	c.mu.Lock()
@@ -461,12 +569,14 @@ func (c *call) simulateResponse(code int, reason string) {
 	case code == 180:
 		if c.state == StateDialing {
 			c.state = StateRemoteRinging
+			c.fireOnState(StateRemoteRinging)
 		}
 	case code == 183:
 		if c.opts.EarlyMedia {
 			if c.state == StateDialing || c.state == StateRemoteRinging {
 				c.state = StateEarlyMedia
 				c.mediaActive = true
+				c.fireOnState(StateEarlyMedia)
 				if c.onMediaFn != nil {
 					fn := c.onMediaFn
 					go fn()
@@ -479,6 +589,7 @@ func (c *call) simulateResponse(code int, reason string) {
 			c.state = StateActive
 			c.startTime = time.Now()
 			c.mediaActive = true
+			c.fireOnState(StateActive)
 			if c.onMediaFn != nil {
 				fn := c.onMediaFn
 				go fn()
@@ -491,6 +602,7 @@ func (c *call) simulateBye() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.state = StateEnded
+	c.fireOnState(StateEnded)
 	if c.onEndedFn != nil {
 		fn := c.onEndedFn
 		go fn(EndedByRemote)
@@ -512,21 +624,32 @@ func (c *call) simulateReInvite(rawSDP string) {
 	c.remoteSDP = rawSDP
 
 	dir := sess.Dir()
-	var holdFn, resumeFn func()
+	var holdFn, resumeFn, stateFn func()
 
 	switch {
 	case dir == "sendonly" && c.state == StateActive:
 		c.state = StateOnHold
 		holdFn = c.onHoldFn
+		if c.onStateFn != nil {
+			onState := c.onStateFn
+			stateFn = func() { onState(StateOnHold) }
+		}
 	case dir == "sendrecv" && c.state == StateOnHold:
 		c.state = StateActive
 		resumeFn = c.onResumeFn
+		if c.onStateFn != nil {
+			onState := c.onStateFn
+			stateFn = func() { onState(StateActive) }
+		}
 	}
 
 	c.negotiateCodec(sess)
 
 	c.mu.Unlock()
 
+	if stateFn != nil {
+		go stateFn()
+	}
 	if holdFn != nil {
 		go holdFn()
 	}

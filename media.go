@@ -138,12 +138,24 @@ func (c *call) startMedia() {
 
 			case pkt := <-c.rtpWriter:
 				rtpWriterUsed = true
+				c.mu.Lock()
+				muted := c.muted
+				c.mu.Unlock()
+				if muted {
+					continue
+				}
 				if c.sentRTP != nil {
 					sendDropOldest(c.sentRTP, pkt)
 				}
 
 			case pcmFrame := <-c.pcmWriter:
 				if rtpWriterUsed || cp == nil {
+					continue
+				}
+				c.mu.Lock()
+				muted := c.muted
+				c.mu.Unlock()
+				if muted {
 					continue
 				}
 				encoded := cp.Encode(pcmFrame)

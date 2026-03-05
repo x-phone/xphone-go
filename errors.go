@@ -15,4 +15,6 @@ var (
 	ErrInvalidDTMFDigit   = errors.New("xphone: invalid DTMF digit")
 	ErrAlreadyMuted       = errors.New("xphone: already muted")
 	ErrNotMuted           = errors.New("xphone: not muted")
+	ErrAlreadyConnected   = errors.New("xphone: already connected")
+	ErrNotConnected       = errors.New("xphone: not connected")
 )

@@ -98,3 +98,61 @@ func WithCodecOverride(codecs ...Codec) DialOption {
 type AcceptOption func(*acceptOptions)
 
 type acceptOptions struct{}
+
+// PhoneOption is a functional option for New().
+type PhoneOption func(*Config)
+
+// New creates a new Phone with the given options.
+func New(opts ...PhoneOption) Phone {
+	cfg := Config{}
+	for _, fn := range opts {
+		fn(&cfg)
+	}
+	return newPhone(cfg)
+}
+
+// WithCredentials sets the SIP username, password, and host.
+func WithCredentials(username, password, host string) PhoneOption {
+	return func(c *Config) {
+		c.Username = username
+		c.Password = password
+		c.Host = host
+	}
+}
+
+// WithTransport sets the SIP transport protocol and optional TLS config.
+func WithTransport(protocol string, tlsCfg *tls.Config) PhoneOption {
+	return func(c *Config) {
+		c.Transport = protocol
+		c.TLSConfig = tlsCfg
+	}
+}
+
+// WithRTPPorts sets the RTP port range.
+func WithRTPPorts(min, max int) PhoneOption {
+	return func(c *Config) {
+		c.RTPPortMin = min
+		c.RTPPortMax = max
+	}
+}
+
+// WithCodecs sets the codec preference order.
+func WithCodecs(codecs ...Codec) PhoneOption {
+	return func(c *Config) {
+		c.CodecPrefs = codecs
+	}
+}
+
+// WithJitterBuffer sets the jitter buffer depth.
+func WithJitterBuffer(d time.Duration) PhoneOption {
+	return func(c *Config) {
+		c.JitterBuffer = d
+	}
+}
+
+// WithMediaTimeout sets the RTP media timeout.
+func WithMediaTimeout(d time.Duration) PhoneOption {
+	return func(c *Config) {
+		c.MediaTimeout = d
+	}
+}

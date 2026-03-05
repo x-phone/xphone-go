@@ -35,6 +35,7 @@ type MockTransport struct {
 	sent       []SentMessage
 	keepalives int
 	dropped    bool
+	closed     bool
 
 	inviteFunc      func()
 	dropHandler     func()
@@ -56,7 +57,17 @@ func NewMockTransport() *MockTransport {
 
 // Close implements sipTransport.
 func (m *MockTransport) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closed = true
 	return nil
+}
+
+// Closed returns whether Close was called.
+func (m *MockTransport) Closed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closed
 }
 
 // --- Test setup helpers ---

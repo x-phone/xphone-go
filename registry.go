@@ -192,6 +192,16 @@ func (r *registry) handleDrop() {
 	}
 }
 
+// refresh sends a REGISTER refresh and triggers re-registration on failure.
+func (r *registry) refresh(ctx context.Context) {
+	code, _, err := r.tr.SendRequest(ctx, "REGISTER", nil)
+	if err == nil && code == 200 {
+		return // still registered
+	}
+	r.logger.Warn("registration refresh failed", "code", code, "err", err)
+	r.handleDrop()
+}
+
 // loop runs the periodic refresh and NAT keepalive tickers until ctx is cancelled.
 func (r *registry) loop(ctx context.Context) {
 	refreshInterval := r.cfg.RegisterExpiry / 2
@@ -211,9 +221,7 @@ func (r *registry) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-refreshTicker.C:
-			// Fire-and-forget: record the REGISTER but don't block the loop
-			// waiting for a response (the mock may not have one queued).
-			go r.tr.SendRequest(ctx, "REGISTER", nil)
+			go r.refresh(ctx)
 		case <-keepaliveCh:
 			r.tr.SendKeepalive()
 		}

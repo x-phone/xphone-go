@@ -267,6 +267,7 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 	c.sipHost = p.cfg.Host
 	p.applyCallConfig(c)
 	// Transfer RTP socket ownership and capture SDP from the dialog.
+	p.logger.Debug("dial completed, setting up call", "target", target)
 	if uac, ok := dlg.(*sipgoDialogUAC); ok {
 		if uac.rtpConn != nil {
 			c.rtpConn = uac.rtpConn
@@ -281,6 +282,7 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 			body := uac.response.Body()
 			if len(body) > 0 {
 				c.remoteSDP = string(body)
+				p.logger.Debug("remote SDP received", "sdp", c.remoteSDP)
 				if sess, parseErr := sdp.Parse(c.remoteSDP); parseErr == nil {
 					c.negotiateCodec(sess)
 					c.setRemoteEndpoint(sess)
@@ -358,6 +360,9 @@ func (p *phone) handleDialogInvite(dlg dialog, from, to, sdpBody string) {
 	}
 
 	p.logger.Info("incoming call", "from", from, "to", to)
+	if sdpBody != "" {
+		p.logger.Debug("incoming remote SDP", "sdp", sdpBody)
+	}
 
 	// Auto-send 180 Ringing before presenting the call.
 	if err := dlg.Respond(180, "Ringing", nil); err != nil {

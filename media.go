@@ -128,11 +128,19 @@ func (c *call) startMedia() {
 	jb := media.NewJitterBuffer(jitterDepth)
 	cp := media.NewCodecProcessor(int(codec), pcmRate)
 
+	c.logger.Debug("media pipeline started",
+		"id", c.id, "codec", int(codec), "pcm_rate", pcmRate,
+		"jitter_depth", jitterDepth, "media_timeout", timeout,
+		"local_addr", conn.LocalAddr().String())
+
 	// Outbound RTP state for PCMWriter encode path.
 	var outSeq uint16
 	var outTimestamp uint32
 	outSSRC := randUint32()
 	var rtpWriterUsed bool
+	var inboundCount int
+	var lastDTMFTimestamp uint32 // dedup RFC 4733 redundant end events
+	var lastDTMFSeen bool
 
 	go func() {
 		mediaTimer := time.NewTimer(timeout)
@@ -156,11 +164,19 @@ func (c *call) startMedia() {
 				return
 
 			case pkt := <-c.rtpInbound:
+				inboundCount++
+				if inboundCount == 1 {
+					c.logger.Debug("first RTP packet received",
+						"id", c.id, "pt", pkt.PayloadType, "ssrc", pkt.SSRC,
+						"seq", pkt.SequenceNumber, "payload_len", len(pkt.Payload))
+				}
 				sendDropOldest(c.rtpRawReader, clonePacket(pkt))
 
 				// DTMF dispatch: intercept PT=101 before jitter buffer.
 				if pkt.PayloadType == DTMFPayloadType {
-					if ev := DecodeDTMF(pkt.Payload); ev != nil && ev.End {
+					if ev := DecodeDTMF(pkt.Payload); ev != nil && ev.End && !(lastDTMFSeen && pkt.Timestamp == lastDTMFTimestamp) {
+						lastDTMFTimestamp = pkt.Timestamp
+						lastDTMFSeen = true
 						c.mu.Lock()
 						fn := c.onDTMFFn
 						c.mu.Unlock()
@@ -180,6 +196,9 @@ func (c *call) startMedia() {
 				c.drainJB(jb, cp)
 
 			case pkt := <-c.rtpWriter:
+				if !rtpWriterUsed {
+					c.logger.Debug("first outbound RTP (raw writer)", "id", c.id, "pt", pkt.PayloadType)
+				}
 				rtpWriterUsed = true
 				c.mu.Lock()
 				muted := c.muted

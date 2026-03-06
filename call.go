@@ -425,6 +425,7 @@ func (c *call) setRemoteEndpoint(sess *sdp.Session) {
 		c.remoteIP = sess.Connection
 		c.remotePort = sess.Media[0].Port
 	}
+	c.logger.Debug("remote endpoint set", "id", c.id, "remote_ip", c.remoteIP, "remote_port", c.remotePort, "remote_addr", c.remoteAddr)
 }
 
 // listenRTPPort allocates a UDP socket for RTP. If min/max are both > 0,
@@ -464,7 +465,9 @@ func (c *call) ensureRTPPort() {
 // Must be called with c.mu held.
 func (c *call) buildLocalSDP(direction string) string {
 	c.ensureRTPPort()
-	return sdp.BuildOffer(c.localIP, c.rtpPort, c.resolveCodecPrefs(), direction)
+	offer := sdp.BuildOffer(c.localIP, c.rtpPort, c.resolveCodecPrefs(), direction)
+	c.logger.Debug("SDP offer built", "id", c.id, "local_ip", c.localIP, "rtp_port", c.rtpPort, "direction", direction, "sdp", offer)
+	return offer
 }
 
 // buildAnswerSDP creates an SDP answer that only includes codecs from the
@@ -475,7 +478,9 @@ func (c *call) buildAnswerSDP(remote *sdp.Session, direction string) string {
 	if len(remote.Media) > 0 {
 		remoteCodecs = remote.Media[0].Codecs
 	}
-	return sdp.BuildAnswer(c.localIP, c.rtpPort, c.resolveCodecPrefs(), remoteCodecs, direction)
+	answer := sdp.BuildAnswer(c.localIP, c.rtpPort, c.resolveCodecPrefs(), remoteCodecs, direction)
+	c.logger.Debug("SDP answer built", "id", c.id, "local_ip", c.localIP, "rtp_port", c.rtpPort, "direction", direction, "sdp", answer)
+	return answer
 }
 
 // negotiateCodec updates c.codec from a parsed remote SDP session.
@@ -488,6 +493,7 @@ func (c *call) negotiateCodec(sess *sdp.Session) {
 	if pt := sdp.NegotiateCodec(c.resolveCodecPrefs(), remoteCodecs); pt >= 0 {
 		c.codec = Codec(pt)
 	}
+	c.logger.Debug("codec negotiated", "id", c.id, "codec", int(c.codec), "local_prefs", c.resolveCodecPrefs(), "remote_codecs", remoteCodecs)
 }
 
 func (c *call) startSessionTimer() {
@@ -555,6 +561,7 @@ func (c *call) Accept(opts ...AcceptOption) error {
 		return ErrInvalidState
 	}
 	// Build SDP answer: if we have the remote offer, restrict to offered codecs.
+	c.logger.Debug("accepting call", "id", c.id, "remote_sdp", c.remoteSDP)
 	if c.remoteSDP != "" {
 		if sess, err := sdp.Parse(c.remoteSDP); err == nil {
 			c.negotiateCodec(sess)
@@ -611,14 +618,22 @@ func (c *call) End() error {
 	}
 	switch c.state {
 	case StateDialing, StateRemoteRinging, StateEarlyMedia:
-		c.dlg.SendCancel()
+		if err := c.dlg.SendCancel(); err != nil {
+			c.logger.Error("failed to send CANCEL", "id", c.id, "err", err)
+		} else {
+			c.logger.Debug("CANCEL sent", "id", c.id)
+		}
 		c.state = StateEnded
 		c.fireOnState(StateEnded)
 		c.logger.Info("call ended", "id", c.id, "reason", "cancelled")
 		c.fireOnEnded(EndedByCancelled)
 		return nil
 	case StateActive, StateOnHold:
-		c.dlg.SendBye()
+		if err := c.dlg.SendBye(); err != nil {
+			c.logger.Error("failed to send BYE", "id", c.id, "err", err)
+		} else {
+			c.logger.Debug("BYE sent", "id", c.id)
+		}
 		c.state = StateEnded
 		c.fireOnState(StateEnded)
 		c.logger.Info("call ended", "id", c.id, "reason", "local")

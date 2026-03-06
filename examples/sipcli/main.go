@@ -14,11 +14,13 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	xphone "github.com/x-phone/xphone-go"
+	"gopkg.in/yaml.v3"
 )
 
 // prog is the running bubbletea program. Used by xphone callbacks to send
@@ -361,17 +363,87 @@ func endReasonName(r xphone.EndReason) string {
 	return fmt.Sprintf("unknown(%d)", r)
 }
 
+// --- profiles ---
+
+// profile holds SIP connection settings loaded from ~/.sipcli.yaml.
+type profile struct {
+	Server    string `yaml:"server"`
+	User      string `yaml:"user"`
+	Pass      string `yaml:"pass"`
+	Transport string `yaml:"transport"`
+}
+
+type profileFile struct {
+	Profiles map[string]profile `yaml:"profiles"`
+}
+
+// loadProfile reads ~/.sipcli.yaml and returns the named profile.
+func loadProfile(name string) (profile, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return profile{}, fmt.Errorf("cannot find home directory: %w", err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".sipcli.yaml"))
+	if err != nil {
+		return profile{}, fmt.Errorf("cannot read ~/.sipcli.yaml: %w", err)
+	}
+	var f profileFile
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		return profile{}, fmt.Errorf("invalid ~/.sipcli.yaml: %w", err)
+	}
+	p, ok := f.Profiles[name]
+	if !ok {
+		available := make([]string, 0, len(f.Profiles))
+		for k := range f.Profiles {
+			available = append(available, k)
+		}
+		return profile{}, fmt.Errorf("profile %q not found (available: %s)", name, strings.Join(available, ", "))
+	}
+	return p, nil
+}
+
 // --- main ---
 
 func main() {
-	server := flag.String("server", "", "SIP server hostname or IP (required)")
-	user := flag.String("user", "", "SIP username (required)")
+	profileName := flag.String("profile", "", "load settings from ~/.sipcli.yaml profile")
+	server := flag.String("server", "", "SIP server hostname or IP")
+	user := flag.String("user", "", "SIP username")
 	pass := flag.String("pass", "", "SIP password")
-	transport := flag.String("transport", "udp", "SIP transport: udp, tcp, tls")
+	transport := flag.String("transport", "", "SIP transport: udp, tcp, tls")
 	flag.Parse()
 
-	if *server == "" || *user == "" {
-		fmt.Fprintln(os.Stderr, "Usage: sipcli -server <host> -user <username> [-pass <password>] [-transport udp|tcp|tls]")
+	// Start with profile defaults, then overlay flags.
+	var p profile
+	if *profileName != "" {
+		var err error
+		p, err = loadProfile(*profileName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	// Flags override profile values.
+	if *server != "" {
+		p.Server = *server
+	}
+	if *user != "" {
+		p.User = *user
+	}
+	if *pass != "" {
+		p.Pass = *pass
+	}
+	if *transport != "" {
+		p.Transport = *transport
+	}
+	if p.Transport == "" {
+		p.Transport = "udp"
+	}
+
+	if p.Server == "" || p.User == "" {
+		fmt.Fprintln(os.Stderr, "Usage: sipcli -profile <name>")
+		fmt.Fprintln(os.Stderr, "       sipcli -server <host> -user <username> [-pass <password>] [-transport udp|tcp|tls]")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Profiles are loaded from ~/.sipcli.yaml. Flags override profile values.")
 		os.Exit(1)
 	}
 
@@ -380,8 +452,8 @@ func main() {
 	silent := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	phone := xphone.New(
-		xphone.WithCredentials(*user, *pass, *server),
-		xphone.WithTransport(*transport, nil),
+		xphone.WithCredentials(p.User, p.Pass, p.Server),
+		xphone.WithTransport(p.Transport, nil),
 		xphone.WithLogger(silent),
 	)
 
@@ -392,7 +464,7 @@ func main() {
 
 	// Connect in background so the TUI renders immediately.
 	go func() {
-		prog.Send(msgLog("[info] connecting to " + *server + "..."))
+		prog.Send(msgLog("[info] connecting to " + p.Server + " as " + p.User + "..."))
 		prog.Send(msgRegState("registering"))
 		if err := phone.Connect(context.Background()); err != nil {
 			prog.Send(msgLog(fmt.Sprintf("[error] connect: %s", err)))

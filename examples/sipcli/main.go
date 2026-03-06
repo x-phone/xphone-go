@@ -11,6 +11,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -373,9 +375,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Silence library logs — they leak to the terminal and break the TUI.
+	// Events are surfaced through callbacks in the event log panel instead.
+	silent := slog.New(slog.NewTextHandler(io.Discard, nil))
+
 	phone := xphone.New(
 		xphone.WithCredentials(*user, *pass, *server),
 		xphone.WithTransport(*transport, nil),
+		xphone.WithLogger(silent),
 	)
 
 	// Wire callbacks before Connect.

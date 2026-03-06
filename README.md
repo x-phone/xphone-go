@@ -27,6 +27,15 @@ go get github.com/x-phone/xphone-go
 
 Requires Go 1.23+.
 
+## Example App
+
+`examples/sipcli` is a fully interactive terminal SIP client that exercises the library's event-driven API — registration, inbound/outbound calls, hold, resume, DTMF, mute, and transfer:
+
+```bash
+cd examples/sipcli
+go run . -server pbx.example.com -user 1001 -pass secret
+```
+
 ## Quick Start
 
 ### Register and receive calls

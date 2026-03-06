@@ -131,6 +131,26 @@ phone := xphone.New(
 
 See the [Go documentation](https://pkg.go.dev/github.com/x-phone/xphone-go) for all options.
 
+## Logging
+
+xphone uses Go's standard `log/slog`. Pass your own logger to control level, format, and destination:
+
+```go
+// Structured JSON logs at debug level
+phone := xphone.New(
+    xphone.WithLogger(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+        Level: slog.LevelDebug,
+    }))),
+)
+
+// Silence all library logs
+phone := xphone.New(
+    xphone.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+)
+```
+
+If no logger is provided, `slog.Default()` is used. The library logs registration events, call state transitions, media timeouts, and errors.
+
 ## Call States
 
 ```

@@ -1,3 +1,7 @@
+// Package xphone provides an event-driven SIP user agent for embedding
+// VoIP telephony into Go applications. It manages SIP registration, call
+// state machines, RTP media pipelines, codec encode/decode, and DTMF —
+// exposing a concurrency-safe API for handling multiple concurrent calls.
 package xphone
 
 import (

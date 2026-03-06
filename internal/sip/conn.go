@@ -11,7 +11,7 @@ const maxSIPMessageSize = 65535
 
 // Conn wraps a UDP connection for sending and receiving SIP messages.
 type Conn struct {
-	conn   *net.UDPConn
+	conn    *net.UDPConn
 	recvBuf []byte // reusable receive buffer
 }
 

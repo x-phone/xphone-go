@@ -35,11 +35,13 @@ func (s *fakeServer) readAndRespond(t *testing.T, code int, reason string, extra
 	t.Helper()
 	data, addr, err := s.conn.Receive(2 * time.Second)
 	if err != nil {
-		t.Fatalf("server Receive() error: %v", err)
+		t.Errorf("server Receive() error: %v", err)
+		return nil
 	}
 	req, err := Parse(data)
 	if err != nil {
-		t.Fatalf("server Parse() error: %v", err)
+		t.Errorf("server Parse() error: %v", err)
+		return nil
 	}
 
 	resp := &Message{StatusCode: code, Reason: reason}
@@ -52,7 +54,8 @@ func (s *fakeServer) readAndRespond(t *testing.T, code int, reason string, extra
 		resp.SetHeader(k, v)
 	}
 	if err := s.conn.Send(resp.Bytes(), addr); err != nil {
-		t.Fatalf("server Send() error: %v", err)
+		t.Errorf("server Send() error: %v", err)
+		return nil
 	}
 	return req
 }

@@ -14,14 +14,14 @@ import (
 // sipUA wraps sipgo's UserAgent and Client to implement sipTransport.
 // It provides real SIP signaling for registration and call control.
 type sipUA struct {
-	mu     sync.Mutex // protects dropHandler, incomingHandler, onDialogInvite only; cfg is immutable after construction
-	ua     *sipgo.UserAgent
-	client *sipgo.Client
-	server *sipgo.Server
-	dc     *sipgo.DialogClientCache // outbound dialog management
-	ds     *sipgo.DialogServerCache // inbound dialog management
-	cfg     Config  // immutable after newSipUA returns
-	localIP string  // cached localIPFor(cfg.Host), immutable after construction
+	mu      sync.Mutex // protects dropHandler, incomingHandler, onDialogInvite only; cfg is immutable after construction
+	ua      *sipgo.UserAgent
+	client  *sipgo.Client
+	server  *sipgo.Server
+	dc      *sipgo.DialogClientCache // outbound dialog management
+	ds      *sipgo.DialogServerCache // inbound dialog management
+	cfg     Config                   // immutable after newSipUA returns
+	localIP string                   // cached localIPFor(cfg.Host), immutable after construction
 
 	dropHandler     func()
 	incomingHandler func(from, to string)

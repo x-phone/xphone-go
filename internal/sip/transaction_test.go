@@ -26,11 +26,13 @@ func respondWith(t *testing.T, server *Conn, code int, reason string) {
 	t.Helper()
 	data, addr, err := server.Receive(time.Second)
 	if err != nil {
-		t.Fatalf("server Receive() error: %v", err)
+		t.Errorf("server Receive() error: %v", err)
+		return
 	}
 	parsed, err := Parse(data)
 	if err != nil {
-		t.Fatalf("server Parse() error: %v", err)
+		t.Errorf("server Parse() error: %v", err)
+		return
 	}
 
 	msg := &Message{StatusCode: code, Reason: reason}
@@ -39,7 +41,7 @@ func respondWith(t *testing.T, server *Conn, code int, reason string) {
 	msg.SetHeader("CSeq", parsed.Header("CSeq"))
 	err = server.Send(msg.Bytes(), addr)
 	if err != nil {
-		t.Fatalf("server Send() error: %v", err)
+		t.Errorf("server Send() error: %v", err)
 	}
 }
 

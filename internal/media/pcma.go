@@ -49,8 +49,8 @@ func (p *pcmaProcessor) Encode(samples []int16) []byte {
 	return out
 }
 
-func (p *pcmaProcessor) PayloadType() uint8     { return 8 }
-func (p *pcmaProcessor) ClockRate() uint32      { return 8000 }
+func (p *pcmaProcessor) PayloadType() uint8      { return 8 }
+func (p *pcmaProcessor) ClockRate() uint32       { return 8000 }
 func (p *pcmaProcessor) SamplesPerFrame() uint32 { return 160 }
 
 // encodeALaw converts a 16-bit linear PCM sample to A-law.

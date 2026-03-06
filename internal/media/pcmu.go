@@ -59,8 +59,8 @@ func (p *pcmuProcessor) Encode(samples []int16) []byte {
 	return out
 }
 
-func (p *pcmuProcessor) PayloadType() uint8     { return 0 }
-func (p *pcmuProcessor) ClockRate() uint32      { return 8000 }
+func (p *pcmuProcessor) PayloadType() uint8      { return 0 }
+func (p *pcmuProcessor) ClockRate() uint32       { return 8000 }
 func (p *pcmuProcessor) SamplesPerFrame() uint32 { return 160 }
 
 // encodeMuLaw converts a 16-bit linear PCM sample to mu-law.

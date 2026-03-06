@@ -433,3 +433,95 @@ func drainPackets(ch <-chan *rtp.Packet) []*rtp.Packet {
 		}
 	}
 }
+
+// --- Mute / Unmute media tests ---
+
+func TestCall_Mute_SuppressesOutboundPCM(t *testing.T) {
+	c := activeCall()
+	defer c.stopMedia()
+
+	require.NoError(t, c.Mute())
+
+	// Write a PCM frame — should be silently dropped (muted).
+	frame := make([]int16, 160)
+	frame[0] = 9999
+	select {
+	case c.PCMWriter() <- frame:
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// No packet should appear on sentRTP.
+	time.Sleep(50 * time.Millisecond)
+	pkts := drainPackets(c.sentRTP)
+	assert.Empty(t, pkts, "PCMWriter output must be suppressed while muted")
+}
+
+func TestCall_Mute_SuppressesOutboundRTPWriter(t *testing.T) {
+	c := activeCall()
+	defer c.stopMedia()
+
+	require.NoError(t, c.Mute())
+
+	pkt := &rtp.Packet{Header: rtp.Header{SequenceNumber: 42, PayloadType: 0}}
+	select {
+	case c.RTPWriter() <- pkt:
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	pkts := drainPackets(c.sentRTP)
+	assert.Empty(t, pkts, "RTPWriter output must be suppressed while muted")
+}
+
+func TestCall_Unmute_RestoresOutboundPCM(t *testing.T) {
+	c := activeCall()
+	defer c.stopMedia()
+
+	require.NoError(t, c.Mute())
+	require.NoError(t, c.Unmute())
+
+	// PCM frame should now produce outbound RTP again.
+	frame := make([]int16, 160)
+	select {
+	case c.PCMWriter() <- frame:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("PCMWriter blocked")
+	}
+
+	sent := readPacket(t, c.sentRTP, 200*time.Millisecond)
+	assert.NotNil(t, sent, "PCMWriter should produce packets after Unmute")
+}
+
+func TestCall_Unmute_RestoresOutboundRTPWriter(t *testing.T) {
+	c := activeCall()
+	defer c.stopMedia()
+
+	require.NoError(t, c.Mute())
+	require.NoError(t, c.Unmute())
+
+	pkt := &rtp.Packet{Header: rtp.Header{SequenceNumber: 77, PayloadType: 0}}
+	select {
+	case c.RTPWriter() <- pkt:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("RTPWriter blocked")
+	}
+
+	sent := readPacket(t, c.sentRTP, 200*time.Millisecond)
+	assert.Equal(t, uint16(77), sent.SequenceNumber, "RTPWriter should forward packets after Unmute")
+}
+
+func TestCall_Mute_InboundStillFlows(t *testing.T) {
+	c := activeCall()
+	defer c.stopMedia()
+
+	require.NoError(t, c.Mute())
+
+	// Inject inbound RTP — should still arrive on readers.
+	c.injectRTP(&rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 1, PayloadType: 0},
+		Payload: make([]byte, 160),
+	})
+
+	raw := readPacket(t, c.RTPRawReader(), 200*time.Millisecond)
+	assert.NotNil(t, raw, "inbound RTP must still flow while muted")
+}

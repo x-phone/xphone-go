@@ -55,6 +55,6 @@ func (p *g722Processor) Encode(samples []int16) []byte {
 	return dst[:n]
 }
 
-func (p *g722Processor) PayloadType() uint8     { return 9 }
-func (p *g722Processor) ClockRate() uint32      { return 8000 }
+func (p *g722Processor) PayloadType() uint8      { return 9 }
+func (p *g722Processor) ClockRate() uint32       { return 8000 }
 func (p *g722Processor) SamplesPerFrame() uint32 { return 160 }

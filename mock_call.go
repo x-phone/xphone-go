@@ -13,33 +13,33 @@ import (
 type MockCall struct {
 	mu sync.Mutex
 
-	id          string
-	callID      string
-	state       CallState
-	direction   Direction
-	from        string
-	to          string
-	fromName    string
-	remoteURI   string
-	remoteIP    string
-	remotePort  int
-	codec       Codec
-	localSDP    string
-	remoteSDP   string
-	startTime   time.Time
-	muted       bool
-	sentDTMF    []string
-	transferTo  string
-	headers     map[string][]string
+	id         string
+	callID     string
+	state      CallState
+	direction  Direction
+	from       string
+	to         string
+	fromName   string
+	remoteURI  string
+	remoteIP   string
+	remotePort int
+	codec      Codec
+	localSDP   string
+	remoteSDP  string
+	startTime  time.Time
+	muted      bool
+	sentDTMF   []string
+	transferTo string
+	headers    map[string][]string
 
-	onDTMFFn    func(string)
-	onHoldFn    func()
-	onResumeFn  func()
-	onMuteFn    func()
-	onUnmuteFn  func()
-	onMediaFn   func()
-	onStateFn   func(CallState)
-	onEndedFn   func(EndReason)
+	onDTMFFn   func(string)
+	onHoldFn   func()
+	onResumeFn func()
+	onMuteFn   func()
+	onUnmuteFn func()
+	onMediaFn  func()
+	onStateFn  func(CallState)
+	onEndedFn  func(EndReason)
 
 	rtpRawReader chan *rtp.Packet
 	rtpReader    chan *rtp.Packet
@@ -66,7 +66,7 @@ func NewMockCall() *MockCall {
 
 // --- Call interface implementation ---
 
-func (c *MockCall) ID() string    { return c.id }
+func (c *MockCall) ID() string     { return c.id }
 func (c *MockCall) CallID() string { return c.callID }
 
 func (c *MockCall) Direction() Direction {

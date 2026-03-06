@@ -562,4 +562,3 @@ func TestBytes_ZeroContentLength(t *testing.T) {
 		t.Errorf("Content-Length = %q, want %q", parsed.Header("Content-Length"), "0")
 	}
 }
-

@@ -137,11 +137,11 @@ type call struct {
 	onEndedInternal func(EndReason) // internal hook for call tracking; not overwritten by OnEnded
 	onMediaFn       func()
 	onStateFn       func(CallState)
-	onDTMFFn    func(string)
-	onHoldFn    func()
-	onResumeFn  func()
-	onMuteFn    func()
-	onUnmuteFn  func()
+	onDTMFFn        func(string)
+	onHoldFn        func()
+	onResumeFn      func()
+	onMuteFn        func()
+	onUnmuteFn      func()
 
 	muted bool
 

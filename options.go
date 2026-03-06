@@ -157,6 +157,20 @@ func WithMediaTimeout(d time.Duration) PhoneOption {
 	}
 }
 
+// WithNATKeepalive sets the NAT keepalive interval (CRLF ping over UDP).
+func WithNATKeepalive(d time.Duration) PhoneOption {
+	return func(c *Config) {
+		c.NATKeepaliveInterval = d
+	}
+}
+
+// WithPCMRate sets the output sample rate for PCMReader.
+func WithPCMRate(rate int) PhoneOption {
+	return func(c *Config) {
+		c.PCMRate = rate
+	}
+}
+
 // WithLogger sets the structured logger for the phone.
 // If nil or not called, slog.Default() is used.
 func WithLogger(l *slog.Logger) PhoneOption {

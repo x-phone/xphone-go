@@ -10,7 +10,7 @@ import (
 // Session represents a parsed SDP session description.
 type Session struct {
 	Origin     string
-	Connection string      // IP from c= line
+	Connection string // IP from c= line
 	Media      []MediaDesc
 	Raw        string // original SDP text
 }

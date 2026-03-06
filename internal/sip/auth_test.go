@@ -150,4 +150,3 @@ func TestBuildAuthorizationHeader_WithOpaque(t *testing.T) {
 		t.Errorf("header missing opaque: %s", hdr)
 	}
 }
-

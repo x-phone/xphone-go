@@ -664,3 +664,409 @@ func TestCall_SessionTimer_CancelledOnEnd(t *testing.T) {
 	time.Sleep(600 * time.Millisecond)
 	assert.Empty(t, dialog.LastReInviteSDP(), "session timer should be cancelled on End")
 }
+
+// --- Mute / Unmute state ---
+
+func TestCall_Mute_WhenNotActiveReturnsError(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.ErrorIs(t, c.Mute(), ErrInvalidState)
+}
+
+func TestCall_Unmute_WhenNotActiveReturnsError(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.ErrorIs(t, c.Unmute(), ErrInvalidState)
+}
+
+func TestCall_Mute_WhenAlreadyMutedReturnsError(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	require.NoError(t, c.Mute())
+	assert.ErrorIs(t, c.Mute(), ErrAlreadyMuted)
+}
+
+func TestCall_Unmute_WhenNotMutedReturnsError(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	assert.ErrorIs(t, c.Unmute(), ErrNotMuted)
+}
+
+func TestCall_Mute_WhenOnHoldReturnsError(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	c.Hold()
+	assert.ErrorIs(t, c.Mute(), ErrInvalidState)
+}
+
+func TestCall_Unmute_WhenEndedReturnsError(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	c.End()
+	assert.ErrorIs(t, c.Unmute(), ErrInvalidState)
+}
+
+func TestCall_OnMute_CallbackFires(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+
+	fired := make(chan struct{}, 1)
+	c.OnMute(func() { fired <- struct{}{} })
+
+	c.Mute()
+
+	select {
+	case <-fired:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnMute callback never fired")
+	}
+}
+
+func TestCall_OnUnmute_CallbackFires(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+
+	fired := make(chan struct{}, 1)
+	c.OnUnmute(func() { fired <- struct{}{} })
+
+	c.Mute()
+	c.Unmute()
+
+	select {
+	case <-fired:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnUnmute callback never fired")
+	}
+}
+
+// --- RemoteURI / RemoteIP / RemotePort ---
+
+func TestCall_RemoteURI_FromDialogHeader(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"From": {"<sip:1001@pbx.example.com>"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "sip:1001@pbx.example.com", c.RemoteURI())
+}
+
+func TestCall_RemoteURI_EmptyWhenNoFromHeader(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.Equal(t, "", c.RemoteURI())
+}
+
+func TestCall_RemoteURI_StripsDisplayName(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"From": {"\"Alice\" <sip:alice@example.com>"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "sip:alice@example.com", c.RemoteURI())
+}
+
+// --- From / To / FromName ---
+
+func TestCall_From_ExtractsUserPart(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"From": {"\"Alice\" <sip:+15551234567@pbx.example.com>;tag=abc"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "+15551234567", c.From())
+}
+
+func TestCall_From_Extension(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"From": {"<sip:1001@10.200.1.2>"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "1001", c.From())
+}
+
+func TestCall_From_EmptyWhenNoHeader(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.Equal(t, "", c.From())
+}
+
+func TestCall_To_ExtractsUserPart(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"To": {"<sip:1002@pbx.example.com>"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "1002", c.To())
+}
+
+func TestCall_To_EmptyWhenNoHeader(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.Equal(t, "", c.To())
+}
+
+func TestCall_FromName_QuotedDisplayName(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"From": {"\"Alice Smith\" <sip:alice@example.com>"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "Alice Smith", c.FromName())
+}
+
+func TestCall_FromName_UnquotedDisplayName(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"From": {"Alice <sip:alice@example.com>"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "Alice", c.FromName())
+}
+
+func TestCall_FromName_EmptyWhenNoDisplayName(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"From": {"<sip:1001@pbx.example.com>"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "", c.FromName())
+}
+
+func TestCall_FromName_EmptyWhenNoHeader(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.Equal(t, "", c.FromName())
+}
+
+func TestCall_RemoteIP_FromRemoteSDP(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.remoteSDP = testSDP("192.168.1.200", 5004, "sendrecv", 0)
+	assert.Equal(t, "192.168.1.200", c.RemoteIP())
+}
+
+func TestCall_RemoteIP_EmptyBeforeSDP(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.Equal(t, "", c.RemoteIP())
+}
+
+func TestCall_RemotePort_FromRemoteSDP(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.remoteSDP = testSDP("192.168.1.200", 5004, "sendrecv", 0)
+	assert.Equal(t, 5004, c.RemotePort())
+}
+
+func TestCall_RemotePort_ZeroBeforeSDP(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.Equal(t, 0, c.RemotePort())
+}
+
+func TestCall_RemoteMedia_UpdatesAfterReInvite(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	c.remoteSDP = testSDP("192.168.1.100", 5000, "sendrecv", 0)
+	assert.Equal(t, "192.168.1.100", c.RemoteIP())
+
+	// Re-INVITE changes remote IP and port.
+	c.simulateReInvite(testSDP("10.0.0.50", 6000, "sendrecv", 0))
+	assert.Equal(t, "10.0.0.50", c.RemoteIP())
+	assert.Equal(t, 6000, c.RemotePort())
+}
+
+// --- OnState callback ---
+
+func TestCall_OnState_FiresOnAccept(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	states := make(chan CallState, 10)
+	c.OnState(func(s CallState) { states <- s })
+
+	c.Accept()
+
+	select {
+	case s := <-states:
+		assert.Equal(t, StateActive, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired on Accept")
+	}
+}
+
+func TestCall_OnState_FiresOnReject(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	states := make(chan CallState, 10)
+	c.OnState(func(s CallState) { states <- s })
+
+	c.Reject(486, "Busy Here")
+
+	select {
+	case s := <-states:
+		assert.Equal(t, StateEnded, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired on Reject")
+	}
+}
+
+func TestCall_OnState_FiresOnEnd(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+
+	states := make(chan CallState, 10)
+	c.OnState(func(s CallState) { states <- s })
+
+	c.End()
+
+	select {
+	case s := <-states:
+		assert.Equal(t, StateEnded, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired on End")
+	}
+}
+
+func TestCall_OnState_FiresOnHold(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+
+	states := make(chan CallState, 10)
+	c.OnState(func(s CallState) { states <- s })
+
+	c.Hold()
+
+	select {
+	case s := <-states:
+		assert.Equal(t, StateOnHold, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired on Hold")
+	}
+}
+
+func TestCall_OnState_FiresOnResume(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+	c.Hold()
+
+	states := make(chan CallState, 10)
+	c.OnState(func(s CallState) { states <- s })
+
+	c.Resume()
+
+	select {
+	case s := <-states:
+		assert.Equal(t, StateActive, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired on Resume")
+	}
+}
+
+func TestCall_OnState_FiresOnRemoteBye(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+
+	states := make(chan CallState, 10)
+	c.OnState(func(s CallState) { states <- s })
+
+	c.simulateBye()
+
+	select {
+	case s := <-states:
+		assert.Equal(t, StateEnded, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired on remote BYE")
+	}
+}
+
+func TestCall_OnState_FiresOnOutboundRinging(t *testing.T) {
+	c := newOutboundCall(testutil.NewMockDialog())
+	states := make(chan CallState, 10)
+	c.OnState(func(s CallState) { states <- s })
+
+	c.simulateResponse(180, "Ringing")
+
+	select {
+	case s := <-states:
+		assert.Equal(t, StateRemoteRinging, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired on 180")
+	}
+}
+
+func TestCall_OnState_FiresOnOutbound200(t *testing.T) {
+	c := newOutboundCall(testutil.NewMockDialog())
+	states := make(chan CallState, 10)
+	c.OnState(func(s CallState) { states <- s })
+
+	c.simulateResponse(200, "OK")
+
+	select {
+	case s := <-states:
+		assert.Equal(t, StateActive, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired on 200 OK")
+	}
+}
+
+func TestCall_OnState_FiresOnEarlyMedia(t *testing.T) {
+	c := newOutboundCall(testutil.NewMockDialog(), WithEarlyMedia())
+	states := make(chan CallState, 10)
+	c.OnState(func(s CallState) { states <- s })
+
+	c.simulateResponse(183, "Session Progress")
+
+	select {
+	case s := <-states:
+		assert.Equal(t, StateEarlyMedia, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired on 183 EarlyMedia")
+	}
+}
+
+func TestCall_OnState_DoesNotFireOnMute(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	c.Accept()
+
+	states := make(chan CallState, 10)
+	c.OnState(func(s CallState) { states <- s })
+
+	c.Mute()
+
+	// Mute does not change CallState — no OnState should fire.
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case s := <-states:
+		t.Fatalf("OnState should not fire on Mute, got %v", s)
+	default:
+		// correct
+	}
+}
+
+func TestCall_OnState_TracksFullLifecycle(t *testing.T) {
+	c := newOutboundCall(testutil.NewMockDialog())
+	states := make(chan CallState, 10)
+	c.OnState(func(s CallState) { states <- s })
+
+	// Read each state after each operation to avoid goroutine ordering assumptions.
+	c.simulateResponse(180, "Ringing")
+	select {
+	case s := <-states:
+		assert.Equal(t, StateRemoteRinging, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired for StateRemoteRinging")
+	}
+
+	c.simulateResponse(200, "OK")
+	select {
+	case s := <-states:
+		assert.Equal(t, StateActive, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired for StateActive")
+	}
+
+	c.Hold()
+	select {
+	case s := <-states:
+		assert.Equal(t, StateOnHold, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired for StateOnHold")
+	}
+
+	c.Resume()
+	select {
+	case s := <-states:
+		assert.Equal(t, StateActive, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired for StateActive after Resume")
+	}
+
+	c.End()
+	select {
+	case s := <-states:
+		assert.Equal(t, StateEnded, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnState never fired for StateEnded")
+	}
+}

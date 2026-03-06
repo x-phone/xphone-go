@@ -6,6 +6,8 @@ import (
 	"net"
 	"strings"
 	"sync"
+
+	"github.com/x-phone/xphone-go/internal/sdp"
 )
 
 // Phone is the public interface for the xphone library.
@@ -235,13 +237,27 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 	c := newOutboundCall(dlg, opts...)
 	c.logger = p.logger
 	c.sipHost = p.cfg.Host
-	// Transfer RTP socket ownership from the dialog to the call so that
-	// fireOnEnded cleans it up regardless of how the call terminates.
-	if uac, ok := dlg.(*sipgoDialogUAC); ok && uac.rtpConn != nil {
-		c.rtpConn = uac.rtpConn
-		c.rtpPort = uac.rtpConn.LocalAddr().(*net.UDPAddr).Port
-		c.localIP = localIPFor(p.cfg.Host)
-		uac.rtpConn = nil // transfer ownership
+	// Transfer RTP socket ownership and capture SDP from the dialog.
+	if uac, ok := dlg.(*sipgoDialogUAC); ok {
+		if uac.rtpConn != nil {
+			c.rtpConn = uac.rtpConn
+			c.rtpPort = uac.rtpConn.LocalAddr().(*net.UDPAddr).Port
+			c.localIP = localIPFor(p.cfg.Host)
+			uac.rtpConn = nil // transfer ownership
+		}
+		if uac.invite != nil {
+			c.localSDP = string(uac.invite.Body())
+		}
+		if uac.response != nil {
+			body := uac.response.Body()
+			if len(body) > 0 {
+				c.remoteSDP = string(body)
+				if sess, parseErr := sdp.Parse(c.remoteSDP); parseErr == nil {
+					c.negotiateCodec(sess)
+					c.remoteAddr = remoteAddrFromSession(sess)
+				}
+			}
+		}
 	}
 	p.trackCall(c)
 	c.onEndedInternal = func(_ EndReason) {
@@ -249,6 +265,12 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 	}
 	for _, r := range responses {
 		c.simulateResponse(r.code, r.reason)
+	}
+
+	// Start media pipeline for production calls with an RTP socket.
+	if c.rtpConn != nil {
+		c.startMedia()
+		c.startRTPReader()
 	}
 
 	return c, nil
@@ -296,6 +318,8 @@ func (p *phone) handleDialogInvite(dlg dialog, from, to, sdpBody string) {
 	c := newInboundCall(dlg)
 	c.logger = p.logger
 	c.sipHost = p.cfg.Host
+	c.rtpPortMin = p.cfg.RTPPortMin
+	c.rtpPortMax = p.cfg.RTPPortMax
 	c.remoteSDP = sdpBody
 	p.trackCall(c)
 	c.onEndedInternal = func(_ EndReason) {

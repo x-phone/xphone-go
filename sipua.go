@@ -55,7 +55,8 @@ func newSipUA(cfg Config) (*sipUA, error) {
 		return nil, fmt.Errorf("xphone: create UA: %w", err)
 	}
 
-	client, err := sipgo.NewClient(ua)
+	contactIP := localIPFor(cfg.Host)
+	client, err := sipgo.NewClient(ua, sipgo.WithClientHostname(contactIP))
 	if err != nil {
 		ua.Close()
 		return nil, fmt.Errorf("xphone: create client: %w", err)
@@ -69,7 +70,7 @@ func newSipUA(cfg Config) (*sipUA, error) {
 	}
 
 	contactHDR := sip.ContactHeader{
-		Address: sip.Uri{Scheme: "sip", User: cfg.Username, Host: "0.0.0.0"},
+		Address: sip.Uri{Scheme: "sip", User: cfg.Username, Host: contactIP},
 	}
 	dc := sipgo.NewDialogClientCache(client, contactHDR)
 	ds := sipgo.NewDialogServerCache(client, contactHDR)
@@ -97,7 +98,7 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 
 	// Build SDP offer with real local IP and an allocated RTP port.
 	ip := localIPFor(s.cfg.Host)
-	rtpConn, err := net.ListenPacket("udp", ":0")
+	rtpConn, err := listenRTPPort(s.cfg.RTPPortMin, s.cfg.RTPPortMax)
 	if err != nil {
 		return nil, fmt.Errorf("xphone: allocate RTP port: %w", err)
 	}
@@ -105,7 +106,10 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 	sdpOffer := sdp.BuildOffer(ip, rtpPort, defaultCodecPrefs(), sdp.DirSendRecv)
 
 	// Create the dialog session and send INVITE.
-	sess, err := s.dc.Invite(ctx, recipient, []byte(sdpOffer))
+	// Content-Type must be set explicitly — sipgo doesn't add it automatically,
+	// and without it Asterisk treats the body as non-SDP (late offer).
+	contentType := sip.NewHeader("Content-Type", "application/sdp")
+	sess, err := s.dc.Invite(ctx, recipient, []byte(sdpOffer), contentType)
 	if err != nil {
 		rtpConn.Close()
 		return nil, fmt.Errorf("xphone: invite: %w", err)

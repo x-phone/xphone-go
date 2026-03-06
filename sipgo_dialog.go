@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/emiago/sipgo/sip"
 )
@@ -37,7 +38,9 @@ func (d *sipgoDialogUAC) Respond(code int, reason string, body []byte) error {
 }
 
 func (d *sipgoDialogUAC) SendBye() error {
-	return d.sess.Bye(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return d.sess.Bye(ctx)
 }
 
 func (d *sipgoDialogUAC) SendCancel() error {
@@ -53,6 +56,9 @@ func (d *sipgoDialogUAC) SendCancel() error {
 
 func (d *sipgoDialogUAC) SendReInvite(sdpBody []byte) error {
 	req := sip.NewRequest(sip.INVITE, d.invite.Recipient)
+	if len(sdpBody) > 0 {
+		req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+	}
 	req.SetBody(sdpBody)
 	_, err := d.sess.Do(context.Background(), req)
 	return err
@@ -157,7 +163,9 @@ func (d *sipgoDialogUAS) Respond(code int, reason string, body []byte) error {
 }
 
 func (d *sipgoDialogUAS) SendBye() error {
-	return d.sess.Bye(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return d.sess.Bye(ctx)
 }
 
 func (d *sipgoDialogUAS) SendCancel() error {
@@ -166,6 +174,9 @@ func (d *sipgoDialogUAS) SendCancel() error {
 
 func (d *sipgoDialogUAS) SendReInvite(sdpBody []byte) error {
 	req := sip.NewRequest(sip.INVITE, d.invite.Recipient)
+	if len(sdpBody) > 0 {
+		req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+	}
 	req.SetBody(sdpBody)
 	_, err := d.sess.Do(context.Background(), req)
 	return err

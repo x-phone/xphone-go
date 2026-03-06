@@ -143,10 +143,13 @@ type call struct {
 
 	muted bool
 
-	sipHost string         // SIP server host (for local IP detection)
-	localIP string         // cached local IP (set by ensureRTPPort)
-	rtpPort int            // allocated RTP port for SDP
-	rtpConn net.PacketConn // bound UDP socket to keep port reserved
+	sipHost    string         // SIP server host (for local IP detection)
+	localIP    string         // cached local IP (set by ensureRTPPort)
+	rtpPort    int            // allocated RTP port for SDP
+	rtpPortMin int            // minimum RTP port (0 = OS-assigned)
+	rtpPortMax int            // maximum RTP port (0 = OS-assigned)
+	rtpConn    net.PacketConn // bound UDP socket to keep port reserved
+	remoteAddr net.Addr       // remote RTP endpoint (from remote SDP)
 
 	localSDP  string
 	remoteSDP string
@@ -313,7 +316,48 @@ func (c *call) Headers() map[string][]string {
 }
 
 func defaultCodecPrefs() []int {
-	return []int{8, 0, 9, 111}
+	return []int{8, 0, 9, 101, 111}
+}
+
+// remoteAddrFromSession extracts the remote RTP endpoint (IP:port) from a parsed SDP session.
+func remoteAddrFromSession(sess *sdp.Session) net.Addr {
+	if len(sess.Media) == 0 {
+		return nil
+	}
+	ip := sess.Connection
+	port := sess.Media[0].Port
+	if ip == "" || port <= 0 {
+		return nil
+	}
+	addr, _ := net.ResolveUDPAddr("udp", net.JoinHostPort(ip, strconv.Itoa(port)))
+	return addr
+}
+
+// parseRemoteAddr extracts the remote RTP endpoint (IP:port) from a raw SDP string.
+func parseRemoteAddr(rawSDP string) net.Addr {
+	sess, err := sdp.Parse(rawSDP)
+	if err != nil {
+		return nil
+	}
+	return remoteAddrFromSession(sess)
+}
+
+// listenRTPPort allocates a UDP socket for RTP. If min/max are both > 0,
+// it tries even ports in that range; otherwise it uses an OS-assigned port.
+func listenRTPPort(min, max int) (net.PacketConn, error) {
+	if min > 0 && max > 0 {
+		for p := min; p <= max; p++ {
+			if p%2 != 0 {
+				continue // RTP uses even ports
+			}
+			conn, err := net.ListenPacket("udp", fmt.Sprintf(":%d", p))
+			if err == nil {
+				return conn, nil
+			}
+		}
+		return nil, fmt.Errorf("xphone: no available RTP port in range %d-%d", min, max)
+	}
+	return net.ListenPacket("udp", ":0")
 }
 
 // ensureRTPPort lazily allocates a UDP socket and caches the local IP and
@@ -323,7 +367,7 @@ func (c *call) ensureRTPPort() {
 		c.localIP = localIPFor(c.sipHost)
 	}
 	if c.rtpPort == 0 {
-		conn, err := net.ListenPacket("udp", ":0")
+		conn, err := listenRTPPort(c.rtpPortMin, c.rtpPortMax)
 		if err == nil {
 			c.rtpPort = conn.LocalAddr().(*net.UDPAddr).Port
 			c.rtpConn = conn
@@ -377,8 +421,8 @@ func (c *call) startSessionTimer() {
 			c.mu.Unlock()
 			return
 		}
-		c.mu.Unlock()
 		refreshSDP := c.buildLocalSDP(sdp.DirSendRecv)
+		c.mu.Unlock()
 		c.dlg.SendReInvite([]byte(refreshSDP))
 	})
 }
@@ -395,6 +439,16 @@ func (c *call) fireOnState(state CallState) {
 // fireOnEnded dispatches both the public OnEnded and internal onEndedInternal callbacks.
 // Must be called with c.mu held.
 func (c *call) fireOnEnded(reason EndReason) {
+	// Stop media pipeline goroutine.
+	if c.mediaDone != nil {
+		select {
+		case <-c.mediaDone:
+		default:
+			close(c.mediaDone)
+		}
+		c.mediaActive = false
+	}
+	// Close RTP socket (also stops the RTP reader goroutine).
 	if c.rtpConn != nil {
 		c.rtpConn.Close()
 		c.rtpConn = nil
@@ -411,8 +465,8 @@ func (c *call) fireOnEnded(reason EndReason) {
 
 func (c *call) Accept(opts ...AcceptOption) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.state != StateRinging {
+		c.mu.Unlock()
 		return ErrInvalidState
 	}
 	// Build SDP answer: if we have the remote offer, restrict to offered codecs.
@@ -420,6 +474,7 @@ func (c *call) Accept(opts ...AcceptOption) error {
 		if sess, err := sdp.Parse(c.remoteSDP); err == nil {
 			c.negotiateCodec(sess)
 			c.localSDP = c.buildAnswerSDP(sess, sdp.DirSendRecv)
+			c.remoteAddr = remoteAddrFromSession(sess)
 		} else {
 			c.localSDP = c.buildLocalSDP(sdp.DirSendRecv)
 		}
@@ -434,9 +489,17 @@ func (c *call) Accept(opts ...AcceptOption) error {
 	c.startSessionTimer()
 	c.fireOnState(StateActive)
 	c.logger.Info("call accepted", "id", c.id)
-	if c.onMediaFn != nil {
-		fn := c.onMediaFn
-		go fn()
+	hasRTP := c.rtpConn != nil
+	onMediaFn := c.onMediaFn
+	c.mu.Unlock()
+
+	// Start media pipeline and RTP socket I/O for production calls.
+	if hasRTP {
+		c.startMedia()
+		c.startRTPReader()
+	}
+	if onMediaFn != nil {
+		go onMediaFn()
 	}
 	return nil
 }
@@ -559,15 +622,22 @@ func (c *call) SendDTMF(digit string) error {
 		return ErrInvalidDTMFDigit
 	}
 	sentRTP := c.sentRTP
+	conn := c.rtpConn
+	addr := c.remoteAddr
 	c.mu.Unlock()
 
 	pkts, err := EncodeDTMF(digit, 0, 0, 0)
 	if err != nil {
 		return err
 	}
-	if sentRTP != nil {
-		for _, pkt := range pkts {
+	for _, pkt := range pkts {
+		if sentRTP != nil {
 			sendDropOldest(sentRTP, pkt)
+		}
+		if conn != nil && addr != nil {
+			if data, marshalErr := pkt.Marshal(); marshalErr == nil {
+				conn.WriteTo(data, addr)
+			}
 		}
 	}
 	return nil
@@ -584,11 +654,9 @@ func (c *call) BlindTransfer(target string) error {
 		if code == 200 {
 			c.mu.Lock()
 			c.state = StateEnded
-			fn := c.onEndedFn
+			c.fireOnState(StateEnded)
+			c.fireOnEnded(EndedByTransfer)
 			c.mu.Unlock()
-			if fn != nil {
-				fn(EndedByTransfer)
-			}
 		}
 	})
 	return nil

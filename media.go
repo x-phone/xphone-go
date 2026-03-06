@@ -68,10 +68,44 @@ func randUint32() uint32 {
 	return binary.BigEndian.Uint32(b[:])
 }
 
+// startRTPReader launches a goroutine that reads RTP packets from the
+// network socket (rtpConn) and feeds them into the media pipeline's
+// rtpInbound channel. The goroutine exits when rtpConn is closed.
+func (c *call) startRTPReader() {
+	c.mu.Lock()
+	conn := c.rtpConn
+	c.mu.Unlock()
+	if conn == nil {
+		return
+	}
+
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, _, err := conn.ReadFrom(buf)
+			if err != nil {
+				return // socket closed
+			}
+			// Copy before unmarshal since we reuse the read buffer.
+			cp := make([]byte, n)
+			copy(cp, buf[:n])
+			pkt := &rtp.Packet{}
+			if err := pkt.Unmarshal(cp); err != nil {
+				continue
+			}
+			sendDropOldest(c.rtpInbound, pkt)
+		}
+	}()
+}
+
 // startMedia initializes the media pipeline (jitter buffer, RTP demux,
 // media timeout timer, codec dispatch, outbound encoding).
 func (c *call) startMedia() {
 	c.mu.Lock()
+	if c.mediaDone != nil {
+		c.mu.Unlock()
+		return // already running
+	}
 	timeout := c.mediaTimeout
 	if timeout == 0 {
 		timeout = defaultMediaTimeout
@@ -80,6 +114,8 @@ func (c *call) startMedia() {
 	c.mediaDone = make(chan struct{})
 	c.mediaActive = true
 	done := c.mediaDone
+	conn := c.rtpConn
+	remoteAddr := c.remoteAddr
 	c.mu.Unlock()
 
 	jb := media.NewJitterBuffer(defaultJitterDepth)
@@ -147,6 +183,11 @@ func (c *call) startMedia() {
 				if c.sentRTP != nil {
 					sendDropOldest(c.sentRTP, pkt)
 				}
+				if conn != nil && remoteAddr != nil {
+					if data, err := pkt.Marshal(); err == nil {
+						conn.WriteTo(data, remoteAddr)
+					}
+				}
 
 			case pcmFrame := <-c.pcmWriter:
 				if rtpWriterUsed || cp == nil {
@@ -174,6 +215,11 @@ func (c *call) startMedia() {
 				if c.sentRTP != nil {
 					sendDropOldest(c.sentRTP, outPkt)
 				}
+				if conn != nil && remoteAddr != nil {
+					if data, err := outPkt.Marshal(); err == nil {
+						conn.WriteTo(data, remoteAddr)
+					}
+				}
 
 			case <-mediaTimer.C:
 				c.mu.Lock()
@@ -183,13 +229,10 @@ func (c *call) startMedia() {
 					continue
 				}
 				c.state = StateEnded
-				c.mediaActive = false
-				fn := c.onEndedFn
-				c.mu.Unlock()
+				c.fireOnState(StateEnded)
 				c.logger.Warn("media timeout", "id", c.id)
-				if fn != nil {
-					go fn(EndedByTimeout)
-				}
+				c.fireOnEnded(EndedByTimeout)
+				c.mu.Unlock()
 				return
 			}
 		}

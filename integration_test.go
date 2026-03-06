@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/rtp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -35,6 +36,8 @@ func integrationConfig(ext, password string) Config {
 		RegisterRetry:    time.Second,
 		RegisterMaxRetry: 3,
 		MediaTimeout:     10 * time.Second,
+		RTPPortMin:       20000,
+		RTPPortMax:       20099,
 	}
 }
 
@@ -182,20 +185,122 @@ func TestIntegration_InboundAcceptAndRemoteBye(t *testing.T) {
 	}
 }
 
+// establishCall connects two phones and dials from p1 to p2, returning
+// the outbound and inbound calls after accept. Both calls are Active.
+func establishCall(t *testing.T, p1, p2 Phone) (outCall, inCall Call) {
+	t.Helper()
+
+	incoming := make(chan Call, 1)
+	p2.OnIncoming(func(c Call) { incoming <- c })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	callDone := make(chan Call, 1)
+	go func() {
+		c, err := p1.Dial(ctx, "1002")
+		if err == nil {
+			callDone <- c
+		}
+	}()
+
+	select {
+	case inCall = <-incoming:
+	case <-ctx.Done():
+		t.Fatal("incoming call never received")
+	}
+
+	err := inCall.Accept()
+	require.NoError(t, err)
+
+	select {
+	case outCall = <-callDone:
+	case <-ctx.Done():
+		t.Fatal("outbound call never completed")
+	}
+
+	require.Equal(t, StateActive, outCall.State())
+	require.Equal(t, StateActive, inCall.State())
+	return outCall, inCall
+}
+
 // E4: Hold/resume via re-INVITE.
-// Requires working RTP port allocation (not yet wired).
+// TODO: Asterisk sends BYE shortly after bridge setup (491 collision or
+// unexpected re-INVITE). Requires investigation — skip for now.
 func TestIntegration_HoldResume(t *testing.T) {
-	t.Skip("requires RTP port allocation (Phase 5+)")
+	t.Skip("Asterisk BYEs call after bridge setup — needs investigation")
 }
 
 // E5: DTMF send/receive.
-// Requires working media pipeline (not yet wired).
+// p1 dials p2, p2 sends DTMF digits, p1 receives them via OnDTMF.
 func TestIntegration_DTMF(t *testing.T) {
-	t.Skip("requires media pipeline (Phase 5+)")
+	p1 := connectPhone(t, "1001", "test")
+	p2 := connectPhone(t, "1002", "test")
+	outCall, inCall := establishCall(t, p1, p2)
+
+	// Register DTMF callback on p1's outbound call.
+	dtmfReceived := make(chan string, 10)
+	outCall.OnDTMF(func(digit string) {
+		dtmfReceived <- digit
+	})
+
+	// Brief pause to let RTP media paths establish through Asterisk.
+	time.Sleep(500 * time.Millisecond)
+
+	// p2 sends DTMF digit "5".
+	err := inCall.SendDTMF("5")
+	require.NoError(t, err)
+
+	// Wait for p1 to receive the DTMF.
+	select {
+	case digit := <-dtmfReceived:
+		assert.Equal(t, "5", digit)
+	case <-time.After(5 * time.Second):
+		t.Fatal("DTMF digit never received by p1")
+	}
+
+	outCall.End()
 }
 
-// E6: Echo test — dial 9999, verify media.
-// Requires working media pipeline (not yet wired).
+// E6: Echo test — dial 9999, send audio, verify we receive RTP back.
 func TestIntegration_EchoTest(t *testing.T) {
-	t.Skip("requires media pipeline (Phase 5+)")
+	p := connectPhone(t, "1001", "test")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	c, err := p.Dial(ctx, "9999")
+	require.NoError(t, err)
+	require.Equal(t, StateActive, c.State())
+
+	// Send silence via RTPWriter so Asterisk Echo() has something to reflect.
+	silence := make([]byte, 160)
+	for i := range silence {
+		silence[i] = 0xFF // PCMU silence
+	}
+	for i := 0; i < 50; i++ {
+		pkt := &rtp.Packet{
+			Header: rtp.Header{
+				Version:        2,
+				PayloadType:    0,
+				SequenceNumber: uint16(i),
+				Timestamp:      uint32(i) * 160,
+				SSRC:           0xDEADBEEF,
+			},
+			Payload: silence,
+		}
+		c.RTPWriter() <- pkt
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Verify we receive echoed RTP back.
+	select {
+	case pkt := <-c.RTPReader():
+		assert.NotNil(t, pkt)
+		assert.NotEmpty(t, pkt.Payload)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no echo response received")
+	}
+
+	c.End()
 }

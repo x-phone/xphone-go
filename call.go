@@ -48,7 +48,7 @@ func resolveLogger(l *slog.Logger) *slog.Logger {
 func newCallID() string {
 	b := make([]byte, 16)
 	rand.Read(b)
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return fmt.Sprintf("CA%x", b)
 }
 
 // dialog is the internal interface for SIP dialog operations.
@@ -81,7 +81,6 @@ type dialog interface {
 // Call is the public interface for an active call.
 type Call interface {
 	ID() string
-	DialogID() string
 	CallID() string
 	Direction() Direction
 	RemoteURI() string
@@ -205,8 +204,6 @@ func newOutboundCall(d dialog, dialOpts ...DialOption) *call {
 }
 
 func (c *call) ID() string { return c.id }
-
-func (c *call) DialogID() string { return c.dlg.CallID() }
 
 func (c *call) CallID() string { return c.dlg.CallID() }
 

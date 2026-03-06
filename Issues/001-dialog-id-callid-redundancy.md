@@ -1,18 +1,14 @@
 # DialogID() and CallID() return the same value
 
+## Status: RESOLVED
+
 ## Problem
 
-Both methods on `call` delegate to `c.dlg.CallID()` and return identical values:
+`DialogID()` and `CallID()` on the `Call` interface both returned `dlg.CallID()` (the SIP Call-ID header). Two methods with different names returning the same value was misleading.
 
-```go
-func (c *call) DialogID() string { return c.dlg.CallID() }
-func (c *call) CallID() string   { return c.dlg.CallID() }
-```
+## Fix
 
-Both are exposed on the `Call` interface. In SIP, a dialog identifier and a Call-ID header are distinct concepts (especially in forked-dialog scenarios). Having two methods with different names return the same value is misleading.
-
-## Proposed fix
-
-Either:
-1. Differentiate them when real SIP dialog tracking is implemented (dialog ID = Call-ID + local tag + remote tag)
-2. Remove `DialogID()` from the interface and keep only `CallID()` if they are not intended to diverge
+- Removed `DialogID()` from the `Call` interface and all implementations
+- Changed `ID()` to use Twilio-style `CA` prefix (`CA` + 32 hex chars) so it's visually distinct from a SIP Call-ID
+- `ID()` — xphone's internal call identifier (e.g. `CA8f3a1b...`), use in app logic
+- `CallID()` — the SIP Call-ID header, use for PBX log/CDR correlation

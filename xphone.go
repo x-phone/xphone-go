@@ -33,7 +33,7 @@ type phone struct {
 	localIP  string // cached localIPFor(cfg.Host), set at construction
 	state    PhoneState
 	incoming func(Call)
-	calls    map[string]*call // active calls keyed by dialog ID (Call-ID)
+	calls    map[string]*call // active calls keyed by SIP Call-ID
 
 	// dialFn establishes an outbound SIP dialog and returns a dialog interface.
 	// Production: set by Connect() to use sipgo's dialog API.

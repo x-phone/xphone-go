@@ -2,6 +2,7 @@ package xphone
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -216,11 +217,12 @@ func TestMockCall_OnStateFired(t *testing.T) {
 	}
 }
 
-func TestMockCall_DialogAndCallID(t *testing.T) {
+func TestMockCall_IDAndCallID(t *testing.T) {
 	c := NewMockCall()
-	assert.NotEmpty(t, c.DialogID())
+	assert.NotEmpty(t, c.ID())
+	assert.True(t, strings.HasPrefix(c.ID(), "CA"), "ID should have CA prefix")
 	assert.NotEmpty(t, c.CallID())
-	assert.Equal(t, c.DialogID(), c.CallID())
+	assert.NotEqual(t, c.ID(), c.CallID(), "ID and CallID should be distinct")
 }
 
 // ==========================================================================

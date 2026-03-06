@@ -63,9 +63,8 @@ func NewMockCall() *MockCall {
 
 // --- Call interface implementation ---
 
-func (c *MockCall) ID() string       { return c.id }
-func (c *MockCall) DialogID() string  { return c.callID }
-func (c *MockCall) CallID() string    { return c.callID }
+func (c *MockCall) ID() string    { return c.id }
+func (c *MockCall) CallID() string { return c.callID }
 
 func (c *MockCall) Direction() Direction {
 	c.mu.Lock()

@@ -225,10 +225,27 @@ func establishCall(t *testing.T, p1, p2 Phone) (outCall, inCall Call) {
 }
 
 // E4: Hold/resume via re-INVITE.
-// TODO: Asterisk sends BYE shortly after bridge setup (491 collision or
-// unexpected re-INVITE). Requires investigation — skip for now.
 func TestIntegration_HoldResume(t *testing.T) {
-	t.Skip("Asterisk BYEs call after bridge setup — needs investigation")
+	p1 := connectPhone(t, "1001", "test")
+	p2 := connectPhone(t, "1002", "test")
+	outCall, _ := establishCall(t, p1, p2)
+
+	// Let media paths stabilize.
+	time.Sleep(500 * time.Millisecond)
+
+	// p1 puts the call on hold.
+	err := outCall.Hold()
+	require.NoError(t, err)
+	assert.Equal(t, StateOnHold, outCall.State())
+
+	time.Sleep(500 * time.Millisecond)
+
+	// p1 resumes the call.
+	err = outCall.Resume()
+	require.NoError(t, err)
+	assert.Equal(t, StateActive, outCall.State())
+
+	outCall.End()
 }
 
 // E5: DTMF send/receive.

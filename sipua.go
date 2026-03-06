@@ -4,12 +4,38 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
 	"github.com/x-phone/xphone-go/internal/sdp"
 )
+
+// parseSIPTarget parses a dial target into a sip.Uri.
+// Accepts either a full SIP URI ("sip:1002@pbx.example.com") or a user-only
+// string ("1002"), in which case defaultHost and defaultPort are used.
+func parseSIPTarget(target, defaultHost string, defaultPort int) sip.Uri {
+	if strings.HasPrefix(target, "sip:") || strings.HasPrefix(target, "sips:") {
+		scheme := "sip"
+		rest := target[4:]
+		if strings.HasPrefix(target, "sips:") {
+			scheme = "sips"
+			rest = target[5:]
+		}
+		user := rest
+		host := defaultHost
+		port := defaultPort
+		if at := strings.Index(rest, "@"); at >= 0 {
+			user = rest[:at]
+			host = rest[at+1:]
+			port = 0 // let sipgo resolve from the host part
+		}
+		return sip.Uri{Scheme: scheme, User: user, Host: host, Port: port}
+	}
+	// Plain user part — combine with configured host/port.
+	return sip.Uri{Scheme: "sip", User: target, Host: defaultHost, Port: defaultPort}
+}
 
 // sipUA wraps sipgo's UserAgent and Client to implement sipTransport.
 // It provides real SIP signaling for registration and call control.
@@ -37,6 +63,9 @@ type sipUA struct {
 
 // newSipUA creates a sipgo-backed SIP transport.
 func newSipUA(cfg Config) (*sipUA, error) {
+	if cfg.Host == "" {
+		return nil, ErrHostRequired
+	}
 	switch cfg.Transport {
 	case "udp", "tcp":
 		// OK
@@ -90,13 +119,11 @@ func newSipUA(cfg Config) (*sipUA, error) {
 // dial establishes an outbound SIP dialog using sipgo's dialog API.
 // It sends INVITE with SDP, waits for the answer (handling provisionals via
 // onResponse), sends ACK, and returns a sipgoDialogUAC.
+//
+// target may be a full SIP URI ("sip:1002@pbx.example.com") or just the
+// user part ("1002"), in which case the configured Host and Port are used.
 func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code int, reason string)) (dialog, error) {
-	recipient := sip.Uri{
-		Scheme: "sip",
-		User:   target,
-		Host:   s.cfg.Host,
-		Port:   s.cfg.Port,
-	}
+	recipient := parseSIPTarget(target, s.cfg.Host, s.cfg.Port)
 
 	// Build SDP offer with cached local IP and an allocated RTP port.
 	ip := s.localIP
@@ -105,7 +132,11 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 		return nil, fmt.Errorf("xphone: allocate RTP port: %w", err)
 	}
 	rtpPort := rtpConn.LocalAddr().(*net.UDPAddr).Port
-	sdpOffer := sdp.BuildOffer(ip, rtpPort, defaultCodecPrefs(), sdp.DirSendRecv)
+	codecPT := codecPrefsToInts(s.cfg.CodecPrefs)
+	if len(codecPT) == 0 {
+		codecPT = defaultCodecPrefs
+	}
+	sdpOffer := sdp.BuildOffer(ip, rtpPort, codecPT, sdp.DirSendRecv)
 
 	// Create the dialog session and send INVITE.
 	// Content-Type must be set explicitly — sipgo doesn't add it automatically,
@@ -282,7 +313,7 @@ func (s *sipUA) SendRequest(ctx context.Context, method string, headers map[stri
 	// Add Contact for REGISTER.
 	if method == "REGISTER" {
 		contact := sip.ContactHeader{
-			Address: sip.Uri{Scheme: "sip", User: s.cfg.Username, Host: "0.0.0.0"},
+			Address: sip.Uri{Scheme: "sip", User: s.cfg.Username, Host: s.localIP},
 		}
 		req.AppendHeader(&contact)
 	}
@@ -319,8 +350,11 @@ func (s *sipUA) SendRequest(ctx context.Context, method string, headers map[stri
 	return res.StatusCode, res.Reason, nil
 }
 
+// ReadResponse is unused in the production sipgo path (dialogs handle responses
+// internally via WaitAnswer/OnResponse). It exists to satisfy sipTransport for
+// the mock-based transportDial path used in tests.
 func (s *sipUA) ReadResponse(_ context.Context) (int, string, error) {
-	return 0, "", fmt.Errorf("xphone: ReadResponse not yet implemented")
+	return 0, "", fmt.Errorf("xphone: ReadResponse not used in sipgo transport")
 }
 
 func (s *sipUA) SendKeepalive() error {

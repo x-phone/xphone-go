@@ -145,15 +145,18 @@ type call struct {
 
 	muted bool
 
-	sipHost    string         // SIP server host (for local IP detection)
-	localIP    string         // cached local IP (set by ensureRTPPort)
-	rtpPort    int            // allocated RTP port for SDP
-	rtpPortMin int            // minimum RTP port (0 = OS-assigned)
-	rtpPortMax int            // maximum RTP port (0 = OS-assigned)
-	rtpConn    net.PacketConn // bound UDP socket to keep port reserved
-	remoteAddr net.Addr       // remote RTP endpoint (from remote SDP)
-	remoteIP   string         // cached remote IP (from remote SDP)
-	remotePort int            // cached remote port (from remote SDP)
+	codecPrefs  []int          // codec preference order (payload types)
+	jitterDepth time.Duration  // jitter buffer depth (0 = default)
+	pcmRate     int            // PCM sample rate (0 = default 8000)
+	sipHost     string         // SIP server host (for local IP detection)
+	localIP     string         // cached local IP (set by ensureRTPPort)
+	rtpPort     int            // allocated RTP port for SDP
+	rtpPortMin  int            // minimum RTP port (0 = OS-assigned)
+	rtpPortMax  int            // maximum RTP port (0 = OS-assigned)
+	rtpConn     net.PacketConn // bound UDP socket to keep port reserved
+	remoteAddr  net.Addr       // remote RTP endpoint (from remote SDP)
+	remoteIP    string         // cached remote IP (from remote SDP)
+	remotePort  int            // cached remote port (from remote SDP)
 
 	localSDP  string
 	remoteSDP string
@@ -379,8 +382,16 @@ func (c *call) Headers() map[string][]string {
 	return c.dlg.Headers()
 }
 
-func defaultCodecPrefs() []int {
-	return []int{8, 0, 9, 101, 111}
+// defaultCodecPrefs is the default codec preference order (payload types).
+// Shared slice — callers must not modify.
+var defaultCodecPrefs = []int{8, 0, 9, 101, 111}
+
+// resolveCodecPrefs returns the call's codec prefs if set, otherwise the defaults.
+func (c *call) resolveCodecPrefs() []int {
+	if len(c.codecPrefs) > 0 {
+		return c.codecPrefs
+	}
+	return defaultCodecPrefs
 }
 
 // remoteAddrFromSession extracts the remote RTP endpoint (IP:port) from a parsed SDP session.
@@ -453,7 +464,7 @@ func (c *call) ensureRTPPort() {
 // Must be called with c.mu held.
 func (c *call) buildLocalSDP(direction string) string {
 	c.ensureRTPPort()
-	return sdp.BuildOffer(c.localIP, c.rtpPort, defaultCodecPrefs(), direction)
+	return sdp.BuildOffer(c.localIP, c.rtpPort, c.resolveCodecPrefs(), direction)
 }
 
 // buildAnswerSDP creates an SDP answer that only includes codecs from the
@@ -464,7 +475,7 @@ func (c *call) buildAnswerSDP(remote *sdp.Session, direction string) string {
 	if len(remote.Media) > 0 {
 		remoteCodecs = remote.Media[0].Codecs
 	}
-	return sdp.BuildAnswer(c.localIP, c.rtpPort, defaultCodecPrefs(), remoteCodecs, direction)
+	return sdp.BuildAnswer(c.localIP, c.rtpPort, c.resolveCodecPrefs(), remoteCodecs, direction)
 }
 
 // negotiateCodec updates c.codec from a parsed remote SDP session.
@@ -474,7 +485,7 @@ func (c *call) negotiateCodec(sess *sdp.Session) {
 	if len(sess.Media) > 0 {
 		remoteCodecs = sess.Media[0].Codecs
 	}
-	if pt := sdp.NegotiateCodec(defaultCodecPrefs(), remoteCodecs); pt >= 0 {
+	if pt := sdp.NegotiateCodec(c.resolveCodecPrefs(), remoteCodecs); pt >= 0 {
 		c.codec = Codec(pt)
 	}
 }

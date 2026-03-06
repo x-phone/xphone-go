@@ -32,4 +32,6 @@ var (
 	ErrAlreadyConnected = errors.New("xphone: already connected")
 	// ErrNotConnected is returned when Disconnect is called on a phone that is not connected.
 	ErrNotConnected = errors.New("xphone: not connected")
+	// ErrHostRequired is returned when Connect is called without a Host configured.
+	ErrHostRequired = errors.New("xphone: Host is required")
 )

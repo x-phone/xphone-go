@@ -30,14 +30,15 @@ type Phone interface {
 type phone struct {
 	mu sync.Mutex
 
-	cfg      Config
-	logger   *slog.Logger
-	tr       sipTransport
-	reg      *registry
-	localIP  string // cached localIPFor(cfg.Host), set at construction
-	state    PhoneState
-	incoming func(Call)
-	calls    map[string]*call // active calls keyed by SIP Call-ID
+	cfg        Config
+	logger     *slog.Logger
+	tr         sipTransport
+	reg        *registry
+	localIP    string // cached localIPFor(cfg.Host), set at construction
+	codecPrefs []int  // cached codecPrefsToInts(cfg.CodecPrefs), set at construction
+	state      PhoneState
+	incoming   func(Call)
+	calls      map[string]*call // active calls keyed by SIP Call-ID
 
 	// dialFn establishes an outbound SIP dialog and returns a dialog interface.
 	// Production: set by Connect() to use sipgo's dialog API.
@@ -51,14 +52,35 @@ type phone struct {
 	onErrorFn        func(error)
 }
 
+// codecPrefsToInts converts []Codec to []int for SDP/negotiation.
+func codecPrefsToInts(codecs []Codec) []int {
+	if len(codecs) == 0 {
+		return nil
+	}
+	pts := make([]int, len(codecs))
+	for i, c := range codecs {
+		pts[i] = int(c)
+	}
+	return pts
+}
+
 func newPhone(cfg Config) *phone {
 	return &phone{
-		cfg:     cfg,
-		logger:  resolveLogger(cfg.Logger),
-		localIP: localIPFor(cfg.Host),
-		state:   PhoneStateDisconnected,
-		calls:   make(map[string]*call),
+		cfg:        cfg,
+		logger:     resolveLogger(cfg.Logger),
+		localIP:    localIPFor(cfg.Host),
+		codecPrefs: codecPrefsToInts(cfg.CodecPrefs),
+		state:      PhoneStateDisconnected,
+		calls:      make(map[string]*call),
 	}
+}
+
+// applyCallConfig threads phone-level config into a new call.
+func (p *phone) applyCallConfig(c *call) {
+	c.mediaTimeout = p.cfg.MediaTimeout
+	c.jitterDepth = p.cfg.JitterBuffer
+	c.pcmRate = p.cfg.PCMRate
+	c.codecPrefs = p.codecPrefs
 }
 
 // transportDial implements dialFn using the sipTransport interface.
@@ -243,6 +265,7 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 	c := newOutboundCall(dlg, opts...)
 	c.logger = p.logger
 	c.sipHost = p.cfg.Host
+	p.applyCallConfig(c)
 	// Transfer RTP socket ownership and capture SDP from the dialog.
 	if uac, ok := dlg.(*sipgoDialogUAC); ok {
 		if uac.rtpConn != nil {
@@ -327,6 +350,7 @@ func (p *phone) handleDialogInvite(dlg dialog, from, to, sdpBody string) {
 	c.localIP = p.localIP
 	c.rtpPortMin = p.cfg.RTPPortMin
 	c.rtpPortMax = p.cfg.RTPPortMax
+	p.applyCallConfig(c)
 	c.remoteSDP = sdpBody
 	p.trackCall(c)
 	c.onEndedInternal = func(_ EndReason) {

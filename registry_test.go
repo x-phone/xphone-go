@@ -35,19 +35,18 @@ func TestRegistry_SendsInitialRegister(t *testing.T) {
 	assert.Equal(t, 1, tr.CountSent("REGISTER"))
 }
 
-func TestRegistry_Handles401WithNonceAndRetries(t *testing.T) {
+func TestRegistry_SucceedsWhenTransportHandles401(t *testing.T) {
+	// Auth challenges are handled by the transport layer (sipUA.DoDigestAuth).
+	// The registry only sees the final response code (200 OK).
 	tr := testutil.NewMockTransport()
-	tr.RespondSequence(
-		testutil.Response{Code: 401, Header: "WWW-Authenticate: Digest nonce=\"abc123\""},
-		testutil.Response{Code: 200},
-	)
+	tr.RespondWith(200, "OK")
 
 	r := newRegistry(tr, testConfig())
 	err := r.Start(context.Background())
 
 	require.NoError(t, err)
-	assert.Equal(t, 2, tr.CountSent("REGISTER"))
-	assert.Contains(t, tr.LastSent("REGISTER").Header("Authorization"), "nonce=\"abc123\"")
+	assert.Equal(t, 1, tr.CountSent("REGISTER"))
+	assert.Equal(t, PhoneStateRegistered, r.State())
 }
 
 func TestRegistry_FiresOnRegistered(t *testing.T) {

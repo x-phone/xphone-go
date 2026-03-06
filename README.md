@@ -66,6 +66,8 @@ func main() {
 
 ### Make an outbound call
 
+`Dial` accepts a full SIP URI (`"sip:1002@pbx.example.com"`) or just the user part (`"1002"`), in which case the configured host is used.
+
 ```go
 call, err := phone.Dial(ctx, "sip:1002@pbx.example.com",
     xphone.WithCallerID("Support"),

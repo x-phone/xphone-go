@@ -110,6 +110,14 @@ func (c *call) startMedia() {
 	if timeout == 0 {
 		timeout = defaultMediaTimeout
 	}
+	jitterDepth := c.jitterDepth
+	if jitterDepth == 0 {
+		jitterDepth = defaultJitterDepth
+	}
+	pcmRate := c.pcmRate
+	if pcmRate == 0 {
+		pcmRate = defaultPCMRate
+	}
 	codec := c.codec
 	c.mediaDone = make(chan struct{})
 	c.mediaActive = true
@@ -117,8 +125,8 @@ func (c *call) startMedia() {
 	conn := c.rtpConn
 	c.mu.Unlock()
 
-	jb := media.NewJitterBuffer(defaultJitterDepth)
-	cp := media.NewCodecProcessor(int(codec), defaultPCMRate)
+	jb := media.NewJitterBuffer(jitterDepth)
+	cp := media.NewCodecProcessor(int(codec), pcmRate)
 
 	// Outbound RTP state for PCMWriter encode path.
 	var outSeq uint16

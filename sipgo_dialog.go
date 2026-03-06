@@ -11,6 +11,9 @@ import (
 
 const contentTypeSDP = "application/sdp"
 
+// sipRequestTimeout is the deadline for SIP dialog operations (BYE, re-INVITE, REFER).
+const sipRequestTimeout = 5 * time.Second
+
 // dialogSession is the minimal session interface shared by both UAC and UAS.
 type dialogSession interface {
 	Bye(ctx context.Context) error
@@ -28,25 +31,29 @@ type dialogBase struct {
 }
 
 func (d *dialogBase) SendBye() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), sipRequestTimeout)
 	defer cancel()
 	return d.sess.Bye(ctx)
 }
 
 func (d *dialogBase) SendReInvite(sdpBody []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), sipRequestTimeout)
+	defer cancel()
 	req := sip.NewRequest(sip.INVITE, d.invite.Recipient)
 	if len(sdpBody) > 0 {
 		req.AppendHeader(sip.NewHeader("Content-Type", contentTypeSDP))
 	}
 	req.SetBody(sdpBody)
-	_, err := d.sess.Do(context.Background(), req)
+	_, err := d.sess.Do(ctx, req)
 	return err
 }
 
 func (d *dialogBase) SendRefer(target string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), sipRequestTimeout)
+	defer cancel()
 	req := sip.NewRequest(sip.REFER, d.invite.Recipient)
 	req.AppendHeader(sip.NewHeader("Refer-To", target))
-	_, err := d.sess.Do(context.Background(), req)
+	_, err := d.sess.Do(ctx, req)
 	return err
 }
 

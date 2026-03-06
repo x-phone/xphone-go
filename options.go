@@ -103,12 +103,42 @@ type acceptOptions struct{}
 type PhoneOption func(*Config)
 
 // New creates a new Phone with the given options.
+// Unset fields receive sensible defaults.
 func New(opts ...PhoneOption) Phone {
 	cfg := Config{}
 	for _, fn := range opts {
 		fn(&cfg)
 	}
+	applyDefaults(&cfg)
 	return newPhone(cfg)
+}
+
+// applyDefaults fills zero-value Config fields with sensible defaults.
+func applyDefaults(cfg *Config) {
+	if cfg.Transport == "" {
+		cfg.Transport = "udp"
+	}
+	if cfg.Port == 0 {
+		cfg.Port = 5060
+	}
+	if cfg.RegisterExpiry == 0 {
+		cfg.RegisterExpiry = 60 * time.Second
+	}
+	if cfg.RegisterRetry == 0 {
+		cfg.RegisterRetry = 1 * time.Second
+	}
+	if cfg.RegisterMaxRetry == 0 {
+		cfg.RegisterMaxRetry = 3
+	}
+	if cfg.MediaTimeout == 0 {
+		cfg.MediaTimeout = 30 * time.Second
+	}
+	if cfg.JitterBuffer == 0 {
+		cfg.JitterBuffer = 50 * time.Millisecond
+	}
+	if cfg.PCMRate == 0 {
+		cfg.PCMRate = 8000
+	}
 }
 
 // WithCredentials sets the SIP username, password, and host.

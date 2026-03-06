@@ -2,9 +2,7 @@ package xphone
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 )
@@ -116,7 +114,8 @@ func (r *registry) State() PhoneState {
 	return r.state
 }
 
-// register attempts to send a REGISTER request, handling 401 auth challenges.
+// register sends REGISTER requests with retries.
+// Auth challenges (401/407) are handled by the transport layer (sipUA uses DoDigestAuth).
 // Retries up to RegisterMaxRetry times with RegisterRetry delay between attempts.
 // On success, transitions to Registered and fires OnRegistered.
 // On exhausting retries, fires OnError(ErrRegistrationFailed).
@@ -130,22 +129,9 @@ func (r *registry) register(ctx context.Context) error {
 			}
 		}
 
-		code, header, err := r.tr.SendRequest(ctx, "REGISTER", nil)
+		code, _, err := r.tr.SendRequest(ctx, "REGISTER", nil)
 		if err != nil {
 			continue
-		}
-
-		// Handle 401 Unauthorized: extract nonce from WWW-Authenticate and retry
-		// with an Authorization header containing the digest credentials.
-		if code == 401 {
-			nonce := extractNonce(header)
-			authHeaders := map[string]string{
-				"Authorization": fmt.Sprintf(`Digest nonce="%s"`, nonce),
-			}
-			code, _, err = r.tr.SendRequest(ctx, "REGISTER", authHeaders)
-			if err != nil {
-				continue
-			}
 		}
 
 		if code == 200 {
@@ -232,21 +218,4 @@ func (r *registry) loop(ctx context.Context) {
 			r.tr.SendKeepalive()
 		}
 	}
-}
-
-// extractNonce parses a nonce value from a WWW-Authenticate header.
-// Example input: `WWW-Authenticate: Digest nonce="abc123"`
-// Returns the nonce string, or empty if not found.
-func extractNonce(header string) string {
-	const prefix = `nonce="`
-	idx := strings.Index(header, prefix)
-	if idx < 0 {
-		return ""
-	}
-	start := idx + len(prefix)
-	end := strings.Index(header[start:], `"`)
-	if end < 0 {
-		return header[start:]
-	}
-	return header[start : start+end]
 }

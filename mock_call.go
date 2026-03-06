@@ -17,6 +17,9 @@ type MockCall struct {
 	callID      string
 	state       CallState
 	direction   Direction
+	from        string
+	to          string
+	fromName    string
 	remoteURI   string
 	remoteIP    string
 	remotePort  int
@@ -70,6 +73,24 @@ func (c *MockCall) Direction() Direction {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.direction
+}
+
+func (c *MockCall) From() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.from
+}
+
+func (c *MockCall) To() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.to
+}
+
+func (c *MockCall) FromName() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fromName
 }
 
 func (c *MockCall) RemoteURI() string {

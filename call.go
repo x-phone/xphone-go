@@ -83,6 +83,9 @@ type Call interface {
 	ID() string
 	CallID() string
 	Direction() Direction
+	From() string
+	To() string
+	FromName() string
 	RemoteURI() string
 	RemoteIP() string
 	RemotePort() int
@@ -218,13 +221,73 @@ func (c *call) RemoteURI() string {
 	if len(vals) == 0 {
 		return ""
 	}
-	v := vals[0]
-	start := strings.Index(v, "<")
-	end := strings.Index(v, ">")
-	if start >= 0 && end > start {
-		return v[start+1 : end]
+	return sipHeaderURI(vals[0])
+}
+
+func (c *call) From() string {
+	vals := c.dlg.Header("From")
+	if len(vals) == 0 {
+		return ""
 	}
-	return v
+	return sipHeaderUser(vals[0])
+}
+
+func (c *call) To() string {
+	vals := c.dlg.Header("To")
+	if len(vals) == 0 {
+		return ""
+	}
+	return sipHeaderUser(vals[0])
+}
+
+func (c *call) FromName() string {
+	vals := c.dlg.Header("From")
+	if len(vals) == 0 {
+		return ""
+	}
+	return sipHeaderDisplayName(vals[0])
+}
+
+// sipHeaderURI extracts the SIP URI from a header value.
+// e.g. `"Alice" <sip:1001@host>;tag=xyz` → `sip:1001@host`
+func sipHeaderURI(val string) string {
+	start := strings.Index(val, "<")
+	end := strings.Index(val, ">")
+	if start >= 0 && end > start {
+		return val[start+1 : end]
+	}
+	return val
+}
+
+// sipHeaderUser extracts the user part from a SIP header value.
+// e.g. `"Alice" <sip:+15551234567@host>;tag=xyz` → `+15551234567`
+func sipHeaderUser(val string) string {
+	uri := sipHeaderURI(val)
+	// Strip scheme (sip:, sips:)
+	if i := strings.Index(uri, ":"); i >= 0 {
+		uri = uri[i+1:]
+	}
+	// Strip host (@host:port;params)
+	if i := strings.Index(uri, "@"); i >= 0 {
+		uri = uri[:i]
+	}
+	return uri
+}
+
+// sipHeaderDisplayName extracts the display name from a SIP header value.
+// e.g. `"Alice" <sip:1001@host>` → `Alice`
+// e.g. `Alice <sip:1001@host>` → `Alice`
+func sipHeaderDisplayName(val string) string {
+	lt := strings.Index(val, "<")
+	if lt <= 0 {
+		return ""
+	}
+	name := strings.TrimSpace(val[:lt])
+	// Strip surrounding quotes
+	if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
+		name = name[1 : len(name)-1]
+	}
+	return name
 }
 
 func (c *call) RemoteIP() string {

@@ -199,6 +199,73 @@ func TestCall_RemoteURI_StripsDisplayName(t *testing.T) {
 	assert.Equal(t, "sip:alice@example.com", c.RemoteURI())
 }
 
+// ==========================================================================
+// From / To / FromName
+// ==========================================================================
+
+func TestCall_From_ExtractsUserPart(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"From": {"\"Alice\" <sip:+15551234567@pbx.example.com>;tag=abc"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "+15551234567", c.From())
+}
+
+func TestCall_From_Extension(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"From": {"<sip:1001@10.200.1.2>"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "1001", c.From())
+}
+
+func TestCall_From_EmptyWhenNoHeader(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.Equal(t, "", c.From())
+}
+
+func TestCall_To_ExtractsUserPart(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"To": {"<sip:1002@pbx.example.com>"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "1002", c.To())
+}
+
+func TestCall_To_EmptyWhenNoHeader(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.Equal(t, "", c.To())
+}
+
+func TestCall_FromName_QuotedDisplayName(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"From": {"\"Alice Smith\" <sip:alice@example.com>"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "Alice Smith", c.FromName())
+}
+
+func TestCall_FromName_UnquotedDisplayName(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"From": {"Alice <sip:alice@example.com>"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "Alice", c.FromName())
+}
+
+func TestCall_FromName_EmptyWhenNoDisplayName(t *testing.T) {
+	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
+		"From": {"<sip:1001@pbx.example.com>"},
+	})
+	c := newInboundCall(dialog)
+	assert.Equal(t, "", c.FromName())
+}
+
+func TestCall_FromName_EmptyWhenNoHeader(t *testing.T) {
+	c := newInboundCall(testutil.NewMockDialog())
+	assert.Equal(t, "", c.FromName())
+}
+
 func TestCall_RemoteIP_FromRemoteSDP(t *testing.T) {
 	c := newInboundCall(testutil.NewMockDialog())
 	c.remoteSDP = testSDP("192.168.1.200", 5004, "sendrecv", 0)

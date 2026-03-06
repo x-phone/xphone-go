@@ -1,6 +1,10 @@
 # xphone
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/x-phone/xphone-go.svg)](https://pkg.go.dev/github.com/x-phone/xphone-go)
+[![Go Report Card](https://goreportcard.com/badge/github.com/x-phone/xphone-go)](https://goreportcard.com/report/github.com/x-phone/xphone-go)
+[![CI](https://github.com/x-phone/xphone-go/actions/workflows/ci.yml/badge.svg)](https://github.com/x-phone/xphone-go/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/x-phone/xphone-go)](https://github.com/x-phone/xphone-go)
 
 A Go library for embedding SIP telephony into any application. xphone wraps a SIP user agent and exposes an event-driven API for managing concurrent VoIP calls — handling SIP signaling, registration, RTP media, codecs, and call control so you don't have to.
 

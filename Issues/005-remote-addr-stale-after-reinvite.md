@@ -1,11 +1,15 @@
 # remoteAddr not updated after re-INVITE changes remote SDP
 
+## Status: RESOLVED
+
 ## Problem
 
-`call.remoteAddr` is set in `Accept()` and `Dial()` but not updated in `simulateReInvite()` (call.go), even though `remoteSDP` is updated there. If a re-INVITE changes the remote RTP endpoint (e.g., call transfer or address change), the media goroutine continues sending to the stale `remoteAddr` because it captures the value once at startup.
+`call.remoteAddr` was set in `Accept()` and `Dial()` but not updated in `simulateReInvite()`, even though `remoteSDP` was updated there. The media goroutine captured `remoteAddr` once at startup and continued sending to the stale address.
 
-Additionally, `RemoteIP()`/`RemotePort()` re-parse `remoteSDP` on every call while the media pipeline uses the cached `remoteAddr` — these two sources of truth can diverge.
+Additionally, `RemoteIP()`/`RemotePort()` re-parsed `remoteSDP` on every call while the media pipeline used the cached `remoteAddr` — two sources of truth that could diverge.
 
-## Proposed fix
+## Fix
 
-Update `remoteAddr` in `simulateReInvite()` when `remoteSDP` changes. Consider caching remote IP/port fields instead of re-parsing SDP in the accessor methods.
+- `simulateReInvite()` now calls `setRemoteEndpoint()` which updates `remoteAddr`, `remoteIP`, and `remotePort` atomically
+- Media goroutine reads `c.remoteAddr` under lock on each send instead of capturing once at startup
+- `RemoteIP()`/`RemotePort()` use cached fields with SDP-parse fallback for test compatibility

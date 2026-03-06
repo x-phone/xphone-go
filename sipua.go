@@ -20,7 +20,8 @@ type sipUA struct {
 	server *sipgo.Server
 	dc     *sipgo.DialogClientCache // outbound dialog management
 	ds     *sipgo.DialogServerCache // inbound dialog management
-	cfg    Config                   // immutable after newSipUA returns
+	cfg     Config  // immutable after newSipUA returns
+	localIP string  // cached localIPFor(cfg.Host), immutable after construction
 
 	dropHandler     func()
 	incomingHandler func(from, to string)
@@ -76,12 +77,13 @@ func newSipUA(cfg Config) (*sipUA, error) {
 	ds := sipgo.NewDialogServerCache(client, contactHDR)
 
 	return &sipUA{
-		ua:     ua,
-		client: client,
-		server: server,
-		dc:     dc,
-		ds:     ds,
-		cfg:    cfg,
+		ua:      ua,
+		client:  client,
+		server:  server,
+		dc:      dc,
+		ds:      ds,
+		cfg:     cfg,
+		localIP: contactIP,
 	}, nil
 }
 
@@ -96,8 +98,8 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 		Port:   s.cfg.Port,
 	}
 
-	// Build SDP offer with real local IP and an allocated RTP port.
-	ip := localIPFor(s.cfg.Host)
+	// Build SDP offer with cached local IP and an allocated RTP port.
+	ip := s.localIP
 	rtpConn, err := listenRTPPort(s.cfg.RTPPortMin, s.cfg.RTPPortMax)
 	if err != nil {
 		return nil, fmt.Errorf("xphone: allocate RTP port: %w", err)
@@ -108,7 +110,7 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 	// Create the dialog session and send INVITE.
 	// Content-Type must be set explicitly — sipgo doesn't add it automatically,
 	// and without it Asterisk treats the body as non-SDP (late offer).
-	contentType := sip.NewHeader("Content-Type", "application/sdp")
+	contentType := sip.NewHeader("Content-Type", contentTypeSDP)
 	sess, err := s.dc.Invite(ctx, recipient, []byte(sdpOffer), contentType)
 	if err != nil {
 		rtpConn.Close()
@@ -149,9 +151,11 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 
 	ok = true
 	return &sipgoDialogUAC{
-		sess:     sess,
-		invite:   sess.InviteRequest,
-		response: sess.InviteResponse,
+		dialogBase: dialogBase{
+			sess:     sess,
+			invite:   sess.InviteRequest,
+			response: sess.InviteResponse,
+		},
 		cancelFn: waitCancel,
 		rtpConn:  rtpConn,
 	}, nil
@@ -180,8 +184,10 @@ func (s *sipUA) startServer() {
 		}
 
 		dlg := &sipgoDialogUAS{
-			sess:   sess,
-			invite: req,
+			dialogBase: dialogBase{
+				sess:   sess,
+				invite: req,
+			},
 		}
 
 		// Extract SDP body from INVITE.

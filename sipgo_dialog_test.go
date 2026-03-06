@@ -81,9 +81,11 @@ func testDialogUAC(sess *mockClientSession) *sipgoDialogUAC {
 	inv := testInviteRequest()
 	resp := testInviteResponse(inv)
 	return &sipgoDialogUAC{
-		sess:     sess,
-		invite:   inv,
-		response: resp,
+		dialogBase: dialogBase{
+			sess:     sess,
+			invite:   inv,
+			response: resp,
+		},
 	}
 }
 

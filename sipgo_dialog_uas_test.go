@@ -102,9 +102,11 @@ func testDialogUAS(sess *mockServerSession) *sipgoDialogUAS {
 	inv := testServerInviteRequest()
 	resp := testServerInviteResponse(inv)
 	return &sipgoDialogUAS{
-		sess:     sess,
-		invite:   inv,
-		response: resp,
+		dialogBase: dialogBase{
+			sess:     sess,
+			invite:   inv,
+			response: resp,
+		},
 	}
 }
 

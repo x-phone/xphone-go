@@ -115,7 +115,6 @@ func (c *call) startMedia() {
 	c.mediaActive = true
 	done := c.mediaDone
 	conn := c.rtpConn
-	remoteAddr := c.remoteAddr
 	c.mu.Unlock()
 
 	jb := media.NewJitterBuffer(defaultJitterDepth)
@@ -176,6 +175,7 @@ func (c *call) startMedia() {
 				rtpWriterUsed = true
 				c.mu.Lock()
 				muted := c.muted
+				dst := c.remoteAddr
 				c.mu.Unlock()
 				if muted {
 					continue
@@ -183,9 +183,9 @@ func (c *call) startMedia() {
 				if c.sentRTP != nil {
 					sendDropOldest(c.sentRTP, pkt)
 				}
-				if conn != nil && remoteAddr != nil {
+				if conn != nil && dst != nil {
 					if data, err := pkt.Marshal(); err == nil {
-						conn.WriteTo(data, remoteAddr)
+						conn.WriteTo(data, dst)
 					}
 				}
 
@@ -195,6 +195,7 @@ func (c *call) startMedia() {
 				}
 				c.mu.Lock()
 				muted := c.muted
+				dst := c.remoteAddr
 				c.mu.Unlock()
 				if muted {
 					continue
@@ -215,9 +216,9 @@ func (c *call) startMedia() {
 				if c.sentRTP != nil {
 					sendDropOldest(c.sentRTP, outPkt)
 				}
-				if conn != nil && remoteAddr != nil {
+				if conn != nil && dst != nil {
 					if data, err := outPkt.Marshal(); err == nil {
-						conn.WriteTo(data, remoteAddr)
+						conn.WriteTo(data, dst)
 					}
 				}
 

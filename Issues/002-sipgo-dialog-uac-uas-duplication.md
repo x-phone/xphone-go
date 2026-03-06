@@ -1,12 +1,11 @@
 # UAC and UAS dialog implementations have 6 duplicated method pairs
 
+## Status: RESOLVED
+
 ## Problem
 
-In `sipgo_dialog.go`, `sipgoDialogUAC` and `sipgoDialogUAS` share nearly identical implementations for 6 methods:
-- `SendReInvite`, `SendRefer`, `CallID`, `OnNotify`, `Header`, `Headers`
+`sipgoDialogUAC` and `sipgoDialogUAS` shared nearly identical implementations for 6 methods: `SendReInvite`, `SendRefer`, `CallID`, `OnNotify`, `Header`, `Headers`, and `SendBye`.
 
-Only `Respond`, `SendBye`, and `SendCancel` differ because the underlying session types differ (`clientSession` vs `serverSession`).
+## Fix
 
-## Proposed fix
-
-Extract a shared base struct holding `mu`, `invite`, `response`, `onNotify` and the common methods. Embed it in both UAC and UAS types. Only the differing methods remain on the concrete types.
+Extracted `dialogBase` struct with shared fields (`mu`, `sess`, `invite`, `response`, `onNotify`) and all 7 common methods. Both UAC and UAS embed `dialogBase`. Only `Respond` and `SendCancel` remain on the concrete types (they differ between UAC and UAS).

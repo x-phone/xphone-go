@@ -30,6 +30,7 @@ type phone struct {
 	logger   *slog.Logger
 	tr       sipTransport
 	reg      *registry
+	localIP  string // cached localIPFor(cfg.Host), set at construction
 	state    PhoneState
 	incoming func(Call)
 	calls    map[string]*call // active calls keyed by dialog ID (Call-ID)
@@ -48,10 +49,11 @@ type phone struct {
 
 func newPhone(cfg Config) *phone {
 	return &phone{
-		cfg:    cfg,
-		logger: resolveLogger(cfg.Logger),
-		state:  PhoneStateDisconnected,
-		calls:  make(map[string]*call),
+		cfg:     cfg,
+		logger:  resolveLogger(cfg.Logger),
+		localIP: localIPFor(cfg.Host),
+		state:   PhoneStateDisconnected,
+		calls:   make(map[string]*call),
 	}
 }
 
@@ -242,7 +244,7 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 		if uac.rtpConn != nil {
 			c.rtpConn = uac.rtpConn
 			c.rtpPort = uac.rtpConn.LocalAddr().(*net.UDPAddr).Port
-			c.localIP = localIPFor(p.cfg.Host)
+			c.localIP = p.localIP
 			uac.rtpConn = nil // transfer ownership
 		}
 		if uac.invite != nil {
@@ -254,7 +256,7 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 				c.remoteSDP = string(body)
 				if sess, parseErr := sdp.Parse(c.remoteSDP); parseErr == nil {
 					c.negotiateCodec(sess)
-					c.remoteAddr = remoteAddrFromSession(sess)
+					c.setRemoteEndpoint(sess)
 				}
 			}
 		}
@@ -318,6 +320,7 @@ func (p *phone) handleDialogInvite(dlg dialog, from, to, sdpBody string) {
 	c := newInboundCall(dlg)
 	c.logger = p.logger
 	c.sipHost = p.cfg.Host
+	c.localIP = p.localIP
 	c.rtpPortMin = p.cfg.RTPPortMin
 	c.rtpPortMax = p.cfg.RTPPortMax
 	c.remoteSDP = sdpBody

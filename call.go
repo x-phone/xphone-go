@@ -150,6 +150,8 @@ type call struct {
 	rtpPortMax int            // maximum RTP port (0 = OS-assigned)
 	rtpConn    net.PacketConn // bound UDP socket to keep port reserved
 	remoteAddr net.Addr       // remote RTP endpoint (from remote SDP)
+	remoteIP   string         // cached remote IP (from remote SDP)
+	remotePort int            // cached remote port (from remote SDP)
 
 	localSDP  string
 	remoteSDP string
@@ -228,33 +230,35 @@ func (c *call) RemoteURI() string {
 	return v
 }
 
-// remoteSession parses the remote SDP under lock and returns the session.
-// Returns nil if no remote SDP is set or parsing fails.
-func (c *call) remoteSession() *sdp.Session {
-	c.mu.Lock()
-	raw := c.remoteSDP
-	c.mu.Unlock()
-	if raw == "" {
-		return nil
-	}
-	sess, err := sdp.Parse(raw)
-	if err != nil {
-		return nil
-	}
-	return sess
-}
-
 func (c *call) RemoteIP() string {
-	sess := c.remoteSession()
-	if sess == nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.remoteIP != "" {
+		return c.remoteIP
+	}
+	// Fallback: parse remoteSDP for callers that set it directly.
+	if c.remoteSDP == "" {
+		return ""
+	}
+	sess, err := sdp.Parse(c.remoteSDP)
+	if err != nil {
 		return ""
 	}
 	return sess.Connection
 }
 
 func (c *call) RemotePort() int {
-	sess := c.remoteSession()
-	if sess == nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.remotePort != 0 {
+		return c.remotePort
+	}
+	// Fallback: parse remoteSDP for callers that set it directly.
+	if c.remoteSDP == "" {
+		return 0
+	}
+	sess, err := sdp.Parse(c.remoteSDP)
+	if err != nil {
 		return 0
 	}
 	if len(sess.Media) > 0 {
@@ -340,6 +344,16 @@ func parseRemoteAddr(rawSDP string) net.Addr {
 		return nil
 	}
 	return remoteAddrFromSession(sess)
+}
+
+// setRemoteEndpoint updates remoteAddr, remoteIP, and remotePort from a parsed SDP session.
+// Must be called with c.mu held.
+func (c *call) setRemoteEndpoint(sess *sdp.Session) {
+	c.remoteAddr = remoteAddrFromSession(sess)
+	if len(sess.Media) > 0 {
+		c.remoteIP = sess.Connection
+		c.remotePort = sess.Media[0].Port
+	}
 }
 
 // listenRTPPort allocates a UDP socket for RTP. If min/max are both > 0,
@@ -474,7 +488,7 @@ func (c *call) Accept(opts ...AcceptOption) error {
 		if sess, err := sdp.Parse(c.remoteSDP); err == nil {
 			c.negotiateCodec(sess)
 			c.localSDP = c.buildAnswerSDP(sess, sdp.DirSendRecv)
-			c.remoteAddr = remoteAddrFromSession(sess)
+			c.setRemoteEndpoint(sess)
 		} else {
 			c.localSDP = c.buildLocalSDP(sdp.DirSendRecv)
 		}
@@ -772,6 +786,7 @@ func (c *call) simulateReInvite(rawSDP string) {
 		return
 	}
 	c.remoteSDP = rawSDP
+	c.setRemoteEndpoint(sess)
 
 	dir := sess.Dir()
 	var holdFn, resumeFn, stateFn func()

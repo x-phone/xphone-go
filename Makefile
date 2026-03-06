@@ -1,4 +1,4 @@
-.PHONY: fmt vet build test test-race lint tidy check
+.PHONY: fmt vet build test test-race lint tidy check install-sipcli
 
 fmt:
 	gofmt -s -w .
@@ -20,6 +20,9 @@ lint:
 
 tidy:
 	go mod tidy
+
+install-sipcli:
+	cd examples/sipcli && go build -o $(HOME)/bin/sipcli .
 
 # Full verification gate — run before committing.
 check: fmt build test vet test-race

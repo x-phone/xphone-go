@@ -80,7 +80,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.callStatus = "no active call"
 	case msgCallRef:
 		m.call = msg.call
-		wireCallEvents(msg.call)
 	}
 	return m, nil
 }
@@ -265,6 +264,8 @@ func (m model) cmdDial(target string) tea.Cmd {
 		if err != nil {
 			return msgLog(fmt.Sprintf("[error] dial failed: %s", err))
 		}
+		// Wire events before sending ref so no events are missed.
+		wireCallEvents(call)
 		return msgCallRef{call: call}
 	}
 }
@@ -285,6 +286,9 @@ func wirePhoneEvents(phone xphone.Phone) {
 		prog.Send(msgLog(fmt.Sprintf("[error] %s", err)))
 	})
 	phone.OnIncoming(func(call xphone.Call) {
+		// Wire call events immediately so no events are missed.
+		wireCallEvents(call)
+
 		from := call.From()
 		if name := call.FromName(); name != "" {
 			from = fmt.Sprintf("%s (%s)", name, from)

@@ -134,15 +134,39 @@ func BuildOffer(ip string, port int, codecs []int, direction string) string {
 	return b.String()
 }
 
+// BuildAnswer creates an SDP answer string that only includes codecs
+// present in both localPrefs and remoteOffer (in local preference order).
+// This complies with RFC 3264: the answer must be a subset of the offer.
+func BuildAnswer(ip string, port int, localPrefs []int, remoteOffer []int, direction string) string {
+	common := intersectCodecs(localPrefs, remoteOffer)
+	if len(common) == 0 {
+		// Fallback: include all local prefs (shouldn't happen in practice).
+		common = localPrefs
+	}
+	return BuildOffer(ip, port, common, direction)
+}
+
+// intersectCodecs returns codecs present in both lists, in localPrefs order.
+func intersectCodecs(localPrefs []int, remote []int) []int {
+	set := make(map[int]bool, len(remote))
+	for _, c := range remote {
+		set[c] = true
+	}
+	var out []int
+	for _, c := range localPrefs {
+		if set[c] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // NegotiateCodec finds the first common codec between local preferences and
 // remote offer. Returns -1 if no common codec found.
 func NegotiateCodec(localPrefs []int, remoteOffer []int) int {
-	for _, lc := range localPrefs {
-		for _, rc := range remoteOffer {
-			if lc == rc {
-				return lc
-			}
-		}
+	common := intersectCodecs(localPrefs, remoteOffer)
+	if len(common) == 0 {
+		return -1
 	}
-	return -1
+	return common[0]
 }

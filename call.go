@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log/slog"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,6 +13,29 @@ import (
 	"github.com/pion/rtp"
 	"github.com/x-phone/xphone-go/internal/sdp"
 )
+
+// localIPFor discovers the local IP address used to reach the given host
+// by making a connectionless UDP "dial" (no packets are sent).
+// If the result is loopback (e.g. when host is 127.0.0.1 in Docker setups),
+// it falls back to the outbound interface IP via a public DNS dial.
+func localIPFor(host string) string {
+	conn, err := net.Dial("udp", net.JoinHostPort(host, "5060"))
+	if err != nil {
+		return "127.0.0.1"
+	}
+	defer conn.Close()
+	ip := conn.LocalAddr().(*net.UDPAddr).IP
+	if !ip.IsLoopback() {
+		return ip.String()
+	}
+	// Loopback detected — find a non-loopback IP via outbound interface.
+	conn2, err := net.Dial("udp", "8.8.8.8:53")
+	if err != nil {
+		return ip.String()
+	}
+	defer conn2.Close()
+	return conn2.LocalAddr().(*net.UDPAddr).IP.String()
+}
 
 // resolveLogger returns l if non-nil, otherwise slog.Default().
 func resolveLogger(l *slog.Logger) *slog.Logger {
@@ -118,6 +142,11 @@ type call struct {
 	onUnmuteFn  func()
 
 	muted bool
+
+	sipHost string         // SIP server host (for local IP detection)
+	localIP string         // cached local IP (set by ensureRTPPort)
+	rtpPort int            // allocated RTP port for SDP
+	rtpConn net.PacketConn // bound UDP socket to keep port reserved
 
 	localSDP  string
 	remoteSDP string
@@ -287,10 +316,37 @@ func defaultCodecPrefs() []int {
 	return []int{8, 0, 9, 111}
 }
 
-// buildLocalSDP creates an SDP offer with placeholder address/port.
-// When real RTP port allocation is wired in, only this method needs to change.
+// ensureRTPPort lazily allocates a UDP socket and caches the local IP and
+// RTP port. Must be called with c.mu held.
+func (c *call) ensureRTPPort() {
+	if c.localIP == "" {
+		c.localIP = localIPFor(c.sipHost)
+	}
+	if c.rtpPort == 0 {
+		conn, err := net.ListenPacket("udp", ":0")
+		if err == nil {
+			c.rtpPort = conn.LocalAddr().(*net.UDPAddr).Port
+			c.rtpConn = conn
+		}
+	}
+}
+
+// buildLocalSDP creates an SDP offer with the call's allocated RTP address/port.
+// Must be called with c.mu held.
 func (c *call) buildLocalSDP(direction string) string {
-	return sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), direction)
+	c.ensureRTPPort()
+	return sdp.BuildOffer(c.localIP, c.rtpPort, defaultCodecPrefs(), direction)
+}
+
+// buildAnswerSDP creates an SDP answer that only includes codecs from the
+// remote offer (RFC 3264 compliance). Must be called with c.mu held.
+func (c *call) buildAnswerSDP(remote *sdp.Session, direction string) string {
+	c.ensureRTPPort()
+	var remoteCodecs []int
+	if len(remote.Media) > 0 {
+		remoteCodecs = remote.Media[0].Codecs
+	}
+	return sdp.BuildAnswer(c.localIP, c.rtpPort, defaultCodecPrefs(), remoteCodecs, direction)
 }
 
 // negotiateCodec updates c.codec from a parsed remote SDP session.
@@ -339,6 +395,10 @@ func (c *call) fireOnState(state CallState) {
 // fireOnEnded dispatches both the public OnEnded and internal onEndedInternal callbacks.
 // Must be called with c.mu held.
 func (c *call) fireOnEnded(reason EndReason) {
+	if c.rtpConn != nil {
+		c.rtpConn.Close()
+		c.rtpConn = nil
+	}
 	if c.onEndedInternal != nil {
 		fn := c.onEndedInternal
 		go fn(reason)
@@ -355,13 +415,20 @@ func (c *call) Accept(opts ...AcceptOption) error {
 	if c.state != StateRinging {
 		return ErrInvalidState
 	}
-	c.localSDP = c.buildLocalSDP(sdp.DirSendRecv)
+	// Build SDP answer: if we have the remote offer, restrict to offered codecs.
 	if c.remoteSDP != "" {
 		if sess, err := sdp.Parse(c.remoteSDP); err == nil {
 			c.negotiateCodec(sess)
+			c.localSDP = c.buildAnswerSDP(sess, sdp.DirSendRecv)
+		} else {
+			c.localSDP = c.buildLocalSDP(sdp.DirSendRecv)
 		}
+	} else {
+		c.localSDP = c.buildLocalSDP(sdp.DirSendRecv)
 	}
-	c.dlg.Respond(200, "OK", []byte(c.localSDP))
+	if err := c.dlg.Respond(200, "OK", []byte(c.localSDP)); err != nil {
+		c.logger.Error("failed to send 200 OK", "err", err)
+	}
 	c.state = StateActive
 	c.startTime = time.Now()
 	c.startSessionTimer()

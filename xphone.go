@@ -3,6 +3,7 @@ package xphone
 import (
 	"context"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 )
@@ -141,9 +142,10 @@ func (p *phone) Connect(ctx context.Context) error {
 	p.dialFn = tr.dial
 	p.mu.Unlock()
 
-	// Wire inbound INVITE handler for sipgo path.
+	// Wire inbound INVITE and BYE handlers for sipgo path.
 	tr.mu.Lock()
 	tr.onDialogInvite = p.handleDialogInvite
+	tr.onDialogBye = p.handleDialogBye
 	tr.mu.Unlock()
 	tr.startServer()
 
@@ -232,6 +234,15 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 	// Create the call with the real dialog and replay responses.
 	c := newOutboundCall(dlg, opts...)
 	c.logger = p.logger
+	c.sipHost = p.cfg.Host
+	// Transfer RTP socket ownership from the dialog to the call so that
+	// fireOnEnded cleans it up regardless of how the call terminates.
+	if uac, ok := dlg.(*sipgoDialogUAC); ok && uac.rtpConn != nil {
+		c.rtpConn = uac.rtpConn
+		c.rtpPort = uac.rtpConn.LocalAddr().(*net.UDPAddr).Port
+		c.localIP = localIPFor(p.cfg.Host)
+		uac.rtpConn = nil // transfer ownership
+	}
 	p.trackCall(c)
 	c.onEndedInternal = func(_ EndReason) {
 		p.untrackCall(c.CallID())
@@ -281,12 +292,11 @@ func (p *phone) findCall(dialogID string) *call {
 // handleDialogInvite is called by sipUA's OnInvite handler when an inbound
 // INVITE arrives via sipgo. It creates an inbound call with the real dialog,
 // sends 100 Trying + 180 Ringing, and fires OnIncoming.
-func (p *phone) handleDialogInvite(dlg dialog, from, to string) {
-	// Auto-send 100 Trying.
-	dlg.Respond(100, "Trying", nil)
-
+func (p *phone) handleDialogInvite(dlg dialog, from, to, sdpBody string) {
 	c := newInboundCall(dlg)
 	c.logger = p.logger
+	c.sipHost = p.cfg.Host
+	c.remoteSDP = sdpBody
 	p.trackCall(c)
 	c.onEndedInternal = func(_ EndReason) {
 		p.untrackCall(c.CallID())
@@ -294,15 +304,26 @@ func (p *phone) handleDialogInvite(dlg dialog, from, to string) {
 
 	p.logger.Info("incoming call", "from", from, "to", to)
 
+	// Auto-send 180 Ringing before presenting the call.
+	if err := dlg.Respond(180, "Ringing", nil); err != nil {
+		p.logger.Error("failed to send 180 Ringing", "err", err)
+	}
+
 	p.mu.Lock()
 	fn := p.incoming
 	p.mu.Unlock()
 	if fn != nil {
 		fn(c)
 	}
+}
 
-	// Auto-send 180 Ringing.
-	dlg.Respond(180, "Ringing", nil)
+// handleDialogBye is called by sipUA's OnBye handler when a BYE is received
+// for a server-side dialog. It looks up the call by Call-ID and fires simulateBye.
+func (p *phone) handleDialogBye(callID string) {
+	c := p.findCall(callID)
+	if c != nil {
+		c.simulateBye()
+	}
 }
 
 // handleIncoming is called by the mock transport when an incoming INVITE arrives.

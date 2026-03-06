@@ -12,6 +12,8 @@ services:
     container_name: xphone-asterisk
     entrypoint: ["/scripts/entrypoint.sh"]
     command: ["-f", "-T", "-U", "asterisk", "-n"]
+    environment:
+      - EXTERNAL_IP=127.0.0.1
     tty: true
     stdin_open: true
     ports:

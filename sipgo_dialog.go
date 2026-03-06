@@ -2,6 +2,7 @@ package xphone
 
 import (
 	"context"
+	"net"
 	"sync"
 
 	"github.com/emiago/sipgo/sip"
@@ -28,6 +29,7 @@ type sipgoDialogUAC struct {
 	response *sip.Response      // immutable after construction
 	cancelFn context.CancelFunc // cancels the WaitAnswer context
 	onNotify func(int)
+	rtpConn  net.PacketConn // bound RTP socket from dial; ownership transferred to call
 }
 
 func (d *sipgoDialogUAC) Respond(code int, reason string, body []byte) error {
@@ -145,7 +147,13 @@ type sipgoDialogUAS struct {
 }
 
 func (d *sipgoDialogUAS) Respond(code int, reason string, body []byte) error {
-	return d.sess.Respond(code, reason, body)
+	var headers []sip.Header
+	// All bodies in xphone are SDP. If non-SDP bodies are needed in the
+	// future, the dialog interface should accept a content type parameter.
+	if len(body) > 0 {
+		headers = append(headers, sip.NewHeader("Content-Type", "application/sdp"))
+	}
+	return d.sess.Respond(code, reason, body, headers...)
 }
 
 func (d *sipgoDialogUAS) SendBye() error {

@@ -3,6 +3,7 @@ package xphone
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 
 	"github.com/emiago/sipgo"
@@ -26,7 +27,11 @@ type sipUA struct {
 
 	// onDialogInvite is called for inbound INVITEs with a fully-constructed
 	// sipgoDialogUAS. Set by phone.Connect() before startServer().
-	onDialogInvite func(dlg dialog, from, to string)
+	onDialogInvite func(dlg dialog, from, to, sdpBody string)
+
+	// onDialogBye is called when an inbound BYE is received for a server dialog.
+	// The phone uses this to transition the call to StateEnded.
+	onDialogBye func(callID string)
 }
 
 // newSipUA creates a sipgo-backed SIP transport.
@@ -43,7 +48,8 @@ func newSipUA(cfg Config) (*sipUA, error) {
 	}
 
 	ua, err := sipgo.NewUA(
-		sipgo.WithUserAgent("xphone"),
+		sipgo.WithUserAgent(cfg.Username),
+		sipgo.WithUserAgentHostname(cfg.Host),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("xphone: create UA: %w", err)
@@ -89,12 +95,19 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 		Port:   s.cfg.Port,
 	}
 
-	// Build SDP offer.
-	sdpOffer := sdp.BuildOffer("0.0.0.0", 0, defaultCodecPrefs(), sdp.DirSendRecv)
+	// Build SDP offer with real local IP and an allocated RTP port.
+	ip := localIPFor(s.cfg.Host)
+	rtpConn, err := net.ListenPacket("udp", ":0")
+	if err != nil {
+		return nil, fmt.Errorf("xphone: allocate RTP port: %w", err)
+	}
+	rtpPort := rtpConn.LocalAddr().(*net.UDPAddr).Port
+	sdpOffer := sdp.BuildOffer(ip, rtpPort, defaultCodecPrefs(), sdp.DirSendRecv)
 
 	// Create the dialog session and send INVITE.
 	sess, err := s.dc.Invite(ctx, recipient, []byte(sdpOffer))
 	if err != nil {
+		rtpConn.Close()
 		return nil, fmt.Errorf("xphone: invite: %w", err)
 	}
 
@@ -103,6 +116,7 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 	ok := false
 	defer func() {
 		if !ok {
+			rtpConn.Close()
 			waitCancel()
 			sess.Close()
 		}
@@ -135,6 +149,7 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 		invite:   sess.InviteRequest,
 		response: sess.InviteResponse,
 		cancelFn: waitCancel,
+		rtpConn:  rtpConn,
 	}, nil
 }
 
@@ -146,6 +161,9 @@ func (s *sipUA) startServer() {
 		if err != nil {
 			return
 		}
+
+		// Send 100 Trying immediately to stop INVITE retransmissions.
+		sess.Respond(100, "Trying", nil)
 
 		// Extract From/To.
 		from := ""
@@ -162,11 +180,28 @@ func (s *sipUA) startServer() {
 			invite: req,
 		}
 
+		// Extract SDP body from INVITE.
+		sdpBody := string(req.Body())
+
 		s.mu.Lock()
 		fn := s.onDialogInvite
 		s.mu.Unlock()
 		if fn != nil {
-			go fn(dlg, from, to)
+			// Dispatch call handling in a goroutine so the user's OnIncoming
+			// callback isn't blocked by the SIP server handler.
+			go fn(dlg, from, to, sdpBody)
+
+			// Wait until the dialog reaches Confirmed (ACK received after 200 OK)
+			// or Ended. sipgo's Server calls tx.TerminateGracefully() after this
+			// handler returns. For UDP, that blocks for timer_l (32s). By waiting
+			// for Confirmed and then calling tx.Terminate(), we avoid the delay.
+			stateCh := sess.StateRead()
+			for state := range stateCh {
+				if state >= sip.DialogStateConfirmed {
+					break
+				}
+			}
+			tx.Terminate()
 		}
 	})
 
@@ -175,11 +210,37 @@ func (s *sipUA) startServer() {
 	})
 
 	s.server.OnBye(func(req *sip.Request, tx sip.ServerTransaction) {
-		s.ds.ReadBye(req, tx)
+		// Try server dialogs first, then client dialogs.
+		err := s.ds.ReadBye(req, tx)
+		if err != nil {
+			err = s.dc.ReadBye(req, tx)
+		}
+		if err != nil {
+			// Respond 200 OK even if dialog not found, to stop retransmissions.
+			res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+			tx.Respond(res)
+			return
+		}
+		// Notify the call that a BYE was received.
+		callID := ""
+		if h := req.CallID(); h != nil {
+			callID = h.Value()
+		}
+		s.mu.Lock()
+		fn := s.onDialogBye
+		s.mu.Unlock()
+		if fn != nil && callID != "" {
+			go fn(callID)
+		}
 	})
 
 	s.server.OnCancel(func(req *sip.Request, tx sip.ServerTransaction) {
 		// Respond 200 OK to the CANCEL request.
+		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+		tx.Respond(res)
+	})
+
+	s.server.OnOptions(func(req *sip.Request, tx sip.ServerTransaction) {
 		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
 		tx.Respond(res)
 	})
@@ -233,12 +294,16 @@ func (s *sipUA) SendRequest(ctx context.Context, method string, headers map[stri
 		return 0, "", err
 	}
 
-	// For 401, return WWW-Authenticate header value so caller can handle auth.
-	if res.StatusCode == 401 {
-		if h := res.GetHeader("WWW-Authenticate"); h != nil {
-			return 401, h.Value(), nil
+	// Handle 401/407 with digest authentication automatically.
+	if res.StatusCode == 401 || res.StatusCode == 407 {
+		authRes, err := s.client.DoDigestAuth(ctx, req, res, sipgo.DigestAuth{
+			Username: s.cfg.Username,
+			Password: s.cfg.Password,
+		})
+		if err != nil {
+			return 0, "", err
 		}
-		return 401, "", nil
+		return authRes.StatusCode, authRes.Reason, nil
 	}
 
 	return res.StatusCode, res.Reason, nil

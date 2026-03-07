@@ -89,6 +89,7 @@ type Call interface {
 	To() string
 	FromName() string
 	RemoteURI() string
+	RemoteDID() string
 	RemoteIP() string
 	RemotePort() int
 	State() CallState
@@ -102,6 +103,7 @@ type Call interface {
 	Accept(opts ...AcceptOption) error
 	Reject(code int, reason string) error
 	End() error
+	MediaSessionActive() bool
 	Hold() error
 	Resume() error
 	Mute() error
@@ -230,6 +232,15 @@ func (c *call) RemoteURI() string {
 		return ""
 	}
 	return sipHeaderURI(vals[0])
+}
+
+// RemoteDID returns the remote party's DID/extension.
+// For inbound calls this is the From user; for outbound calls it's the To user.
+func (c *call) RemoteDID() string {
+	if c.Direction() == DirectionInbound {
+		return c.From()
+	}
+	return c.To()
 }
 
 func (c *call) From() string {
@@ -913,7 +924,7 @@ func (c *call) simulateReInvite(rawSDP string) {
 	}
 }
 
-func (c *call) mediaSessionActive() bool {
+func (c *call) MediaSessionActive() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.mediaActive

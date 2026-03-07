@@ -114,7 +114,7 @@ func TestCall_183WithoutEarlyMediaRTPChannelsRemainClosed(t *testing.T) {
 	call := newOutboundCall(testutil.NewMockDialog())
 	call.simulateResponse(183, "Session Progress")
 	// channels exist but no RTP session is live yet
-	assert.False(t, call.mediaSessionActive())
+	assert.False(t, call.MediaSessionActive())
 }
 
 // --- OnMedia event ---

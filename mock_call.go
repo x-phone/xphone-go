@@ -13,24 +13,25 @@ import (
 type MockCall struct {
 	mu sync.Mutex
 
-	id         string
-	callID     string
-	state      CallState
-	direction  Direction
-	from       string
-	to         string
-	fromName   string
-	remoteURI  string
-	remoteIP   string
-	remotePort int
-	codec      Codec
-	localSDP   string
-	remoteSDP  string
-	startTime  time.Time
-	muted      bool
-	sentDTMF   []string
-	transferTo string
-	headers    map[string][]string
+	id          string
+	callID      string
+	state       CallState
+	direction   Direction
+	from        string
+	to          string
+	fromName    string
+	remoteURI   string
+	remoteIP    string
+	remotePort  int
+	codec       Codec
+	localSDP    string
+	remoteSDP   string
+	startTime   time.Time
+	muted       bool
+	mediaActive bool
+	sentDTMF    []string
+	transferTo  string
+	headers     map[string][]string
 
 	onDTMFFn     func(string)
 	onHoldFn     func()
@@ -102,6 +103,16 @@ func (c *MockCall) RemoteURI() string {
 	return c.remoteURI
 }
 
+func (c *MockCall) RemoteDID() string {
+	c.mu.Lock()
+	dir := c.direction
+	c.mu.Unlock()
+	if dir == DirectionInbound {
+		return c.From()
+	}
+	return c.To()
+}
+
 func (c *MockCall) RemoteIP() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -118,6 +129,12 @@ func (c *MockCall) State() CallState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.state
+}
+
+func (c *MockCall) MediaSessionActive() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mediaActive
 }
 
 func (c *MockCall) Codec() Codec {
@@ -473,6 +490,12 @@ func (c *MockCall) SetStartTime(t time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.startTime = t
+}
+
+func (c *MockCall) SetMediaSessionActive(active bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.mediaActive = active
 }
 
 func (c *MockCall) SetHeader(name, value string) {

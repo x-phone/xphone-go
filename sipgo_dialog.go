@@ -63,6 +63,15 @@ func (d *dialogBase) OnNotify(fn func(code int)) {
 	d.onNotify = fn
 }
 
+func (d *dialogBase) FireNotify(code int) {
+	d.mu.Lock()
+	fn := d.onNotify
+	d.mu.Unlock()
+	if fn != nil {
+		fn(code)
+	}
+}
+
 func (d *dialogBase) CallID() string {
 	if h := d.invite.CallID(); h != nil {
 		return h.Value()

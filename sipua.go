@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -59,6 +60,10 @@ type sipUA struct {
 	// onDialogBye is called when an inbound BYE is received for a server dialog.
 	// The phone uses this to transition the call to StateEnded.
 	onDialogBye func(callID string)
+
+	// onDialogNotify is called when an inbound NOTIFY is received (REFER progress).
+	// The phone uses this to fire the dialog's OnNotify callback.
+	onDialogNotify func(callID string, code int)
 }
 
 // newSipUA creates a sipgo-backed SIP transport.
@@ -285,6 +290,30 @@ func (s *sipUA) startServer() {
 		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
 		tx.Respond(res)
 	})
+
+	s.server.OnNotify(func(req *sip.Request, tx sip.ServerTransaction) {
+		// Always respond 200 OK to NOTIFY.
+		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+		tx.Respond(res)
+
+		// Parse status code from sipfrag body (e.g. "SIP/2.0 200 OK").
+		code := parseSipfragStatus(string(req.Body()))
+		if code <= 0 {
+			return
+		}
+
+		callID := ""
+		if h := req.CallID(); h != nil {
+			callID = h.Value()
+		}
+
+		s.mu.Lock()
+		fn := s.onDialogNotify
+		s.mu.Unlock()
+		if fn != nil && callID != "" {
+			go fn(callID, code)
+		}
+	})
 }
 
 // --- sipTransport interface ---
@@ -383,6 +412,28 @@ func (s *sipUA) Close() error {
 	s.server.Close()
 	s.client.Close()
 	return s.ua.Close()
+}
+
+// parseSipfragStatus extracts the status code from a message/sipfrag body.
+// Example: "SIP/2.0 200 OK" → 200
+func parseSipfragStatus(body string) int {
+	line := body
+	if i := strings.Index(body, "\n"); i >= 0 {
+		line = body[:i]
+	}
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "SIP/") {
+		return 0
+	}
+	parts := strings.SplitN(line, " ", 3)
+	if len(parts) < 2 {
+		return 0
+	}
+	code, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0
+	}
+	return code
 }
 
 // Ensure sipUA satisfies sipTransport at compile time.

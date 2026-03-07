@@ -172,10 +172,11 @@ func (p *phone) Connect(ctx context.Context) error {
 	p.dialFn = tr.dial
 	p.mu.Unlock()
 
-	// Wire inbound INVITE and BYE handlers for sipgo path.
+	// Wire inbound INVITE, BYE, and NOTIFY handlers for sipgo path.
 	tr.mu.Lock()
 	tr.onDialogInvite = p.handleDialogInvite
 	tr.onDialogBye = p.handleDialogBye
+	tr.onDialogNotify = p.handleDialogNotify
 	tr.mu.Unlock()
 	tr.startServer()
 
@@ -386,6 +387,15 @@ func (p *phone) handleDialogBye(callID string) {
 	}
 }
 
+// handleDialogNotify is called by sipUA's OnNotify handler when a NOTIFY is received.
+// It looks up the call by Call-ID and fires the dialog's OnNotify callback.
+func (p *phone) handleDialogNotify(callID string, code int) {
+	c := p.findCall(callID)
+	if c != nil {
+		c.dlg.FireNotify(code)
+	}
+}
+
 // handleIncoming is called by the mock transport when an incoming INVITE arrives.
 // It auto-sends 100 Trying via the transport, creates an inbound call, fires
 // OnIncoming, and auto-sends 180 Ringing via the transport.
@@ -526,6 +536,15 @@ func (d *phoneDialog) OnNotify(fn func(code int)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.onNotify = fn
+}
+
+func (d *phoneDialog) FireNotify(code int) {
+	d.mu.Lock()
+	fn := d.onNotify
+	d.mu.Unlock()
+	if fn != nil {
+		fn(code)
+	}
 }
 
 func (d *phoneDialog) CallID() string {

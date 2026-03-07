@@ -341,3 +341,176 @@ func TestPhone_OnErrorBeforeConnect(t *testing.T) {
 		t.Fatal("OnError set before Connect never fired")
 	}
 }
+
+// --- Phone-level call callbacks ---
+
+func TestPhone_OnCallStateFiresOnIncoming(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	p := newPhone(testConfig())
+
+	type stateEvent struct {
+		callID string
+		state  CallState
+	}
+	ch := make(chan stateEvent, 8)
+	p.OnCallState(func(c Call, s CallState) { ch <- stateEvent{c.ID(), s} })
+	p.connectWithTransport(tr)
+
+	incoming := make(chan Call, 1)
+	p.OnIncoming(func(c Call) { incoming <- c })
+	tr.SimulateInvite("sip:1001@pbx", "sip:1002@pbx")
+
+	var c Call
+	select {
+	case c = <-incoming:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("OnIncoming never fired")
+	}
+
+	// Accept the call — should trigger OnCallState with StateActive.
+	require.NoError(t, c.Accept())
+
+	select {
+	case ev := <-ch:
+		assert.Equal(t, c.ID(), ev.callID)
+		assert.Equal(t, StateActive, ev.state)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnCallState never fired")
+	}
+}
+
+func TestPhone_OnCallEndedFiresOnHangup(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	p := newPhone(testConfig())
+
+	type endEvent struct {
+		callID string
+		reason EndReason
+	}
+	ch := make(chan endEvent, 1)
+	p.OnCallEnded(func(c Call, r EndReason) { ch <- endEvent{c.ID(), r} })
+	p.connectWithTransport(tr)
+
+	incoming := make(chan Call, 1)
+	p.OnIncoming(func(c Call) { incoming <- c })
+	tr.SimulateInvite("sip:1001@pbx", "sip:1002@pbx")
+
+	c := <-incoming
+	require.NoError(t, c.Accept())
+	require.NoError(t, c.End())
+
+	select {
+	case ev := <-ch:
+		assert.Equal(t, c.ID(), ev.callID)
+		assert.Equal(t, EndedByLocal, ev.reason)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnCallEnded never fired")
+	}
+}
+
+func TestPhone_OnCallStateFiresOnDial(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+	tr.OnInvite(func() {
+		tr.RespondWith(180, "Ringing")
+		tr.RespondWith(200, "OK")
+	})
+
+	p := newPhone(testConfig())
+
+	type stateEvent struct {
+		callID string
+		state  CallState
+	}
+	ch := make(chan stateEvent, 8)
+	p.OnCallState(func(c Call, s CallState) { ch <- stateEvent{c.ID(), s} })
+	p.connectWithTransport(tr)
+
+	c, err := p.Dial(context.Background(), "sip:1002@pbx")
+	require.NoError(t, err)
+
+	// Collect state events — we should see RemoteRinging and Active.
+	// Callbacks fire via goroutines so arrival order is not guaranteed.
+	var states []CallState
+	timeout := time.After(200 * time.Millisecond)
+	for len(states) < 2 {
+		select {
+		case ev := <-ch:
+			assert.Equal(t, c.ID(), ev.callID)
+			states = append(states, ev.state)
+		case <-timeout:
+			t.Fatalf("expected 2 state events, got %d: %v", len(states), states)
+		}
+	}
+	assert.Contains(t, states, StateRemoteRinging)
+	assert.Contains(t, states, StateActive)
+}
+
+func TestPhone_OnCallStateCoexistsWithPerCallOnState(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	p := newPhone(testConfig())
+
+	phoneCh := make(chan CallState, 4)
+	p.OnCallState(func(_ Call, s CallState) { phoneCh <- s })
+	p.connectWithTransport(tr)
+
+	incoming := make(chan Call, 1)
+	p.OnIncoming(func(c Call) { incoming <- c })
+	tr.SimulateInvite("sip:1001@pbx", "sip:1002@pbx")
+
+	c := <-incoming
+
+	// User also sets a per-call callback — both should fire.
+	perCallCh := make(chan CallState, 4)
+	c.OnState(func(s CallState) { perCallCh <- s })
+
+	require.NoError(t, c.Accept())
+
+	select {
+	case s := <-phoneCh:
+		assert.Equal(t, StateActive, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("phone-level OnCallState never fired")
+	}
+	select {
+	case s := <-perCallCh:
+		assert.Equal(t, StateActive, s)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("per-call OnState never fired")
+	}
+}
+
+// --- FindCall ---
+
+func TestPhone_FindCallReturnsActiveCall(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	incoming := make(chan Call, 1)
+	p.OnIncoming(func(c Call) { incoming <- c })
+	tr.SimulateInvite("sip:1001@pbx", "sip:1002@pbx")
+
+	c := <-incoming
+	found := p.FindCall(c.CallID())
+	require.NotNil(t, found)
+	assert.Equal(t, c.ID(), found.ID())
+}
+
+func TestPhone_FindCallReturnsNilForUnknown(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	assert.Nil(t, p.FindCall("nonexistent"))
+}

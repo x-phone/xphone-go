@@ -135,15 +135,18 @@ type call struct {
 	startTime time.Time
 	logger    *slog.Logger
 
-	onEndedFn       func(EndReason)
-	onEndedInternal func(EndReason) // internal hook for call tracking; not overwritten by OnEnded
-	onMediaFn       func()
-	onStateFn       func(CallState)
-	onDTMFFn        func(string)
-	onHoldFn        func()
-	onResumeFn      func()
-	onMuteFn        func()
-	onUnmuteFn      func()
+	onEndedFn      func(EndReason)
+	onEndedCleanup func(EndReason) // internal: call tracking (untrackCall)
+	onStatePhone   func(CallState) // internal: phone-level OnCallState
+	onEndedPhone   func(EndReason) // internal: phone-level OnCallEnded
+	onDTMFPhone    func(string)    // internal: phone-level OnCallDTMF
+	onMediaFn      func()
+	onStateFn      func(CallState)
+	onDTMFFn       func(string)
+	onHoldFn       func()
+	onResumeFn     func()
+	onMuteFn       func()
+	onUnmuteFn     func()
 
 	muted bool
 
@@ -520,16 +523,20 @@ func (c *call) startSessionTimer() {
 	})
 }
 
-// fireOnState dispatches the OnState callback outside the lock.
-// Must be called with c.mu held. Copies the function pointer and fires via goroutine.
+// fireOnState dispatches both the phone-level and public OnState callbacks.
+// Must be called with c.mu held. Copies function pointers and fires via goroutines.
 func (c *call) fireOnState(state CallState) {
+	if c.onStatePhone != nil {
+		fn := c.onStatePhone
+		go fn(state)
+	}
 	if c.onStateFn != nil {
 		fn := c.onStateFn
 		go fn(state)
 	}
 }
 
-// fireOnEnded dispatches both the public OnEnded and internal onEndedInternal callbacks.
+// fireOnEnded dispatches the cleanup, phone-level, and public OnEnded callbacks.
 // Must be called with c.mu held.
 func (c *call) fireOnEnded(reason EndReason) {
 	// Stop media pipeline goroutine.
@@ -546,8 +553,12 @@ func (c *call) fireOnEnded(reason EndReason) {
 		c.rtpConn.Close()
 		c.rtpConn = nil
 	}
-	if c.onEndedInternal != nil {
-		fn := c.onEndedInternal
+	if c.onEndedCleanup != nil {
+		fn := c.onEndedCleanup
+		go fn(reason)
+	}
+	if c.onEndedPhone != nil {
+		fn := c.onEndedPhone
 		go fn(reason)
 	}
 	if c.onEndedFn != nil {
@@ -877,32 +888,23 @@ func (c *call) simulateReInvite(rawSDP string) {
 	c.setRemoteEndpoint(sess)
 
 	dir := sess.Dir()
-	var holdFn, resumeFn, stateFn func()
+	var holdFn, resumeFn func()
 
 	switch {
 	case dir == sdp.DirSendOnly && c.state == StateActive:
 		c.state = StateOnHold
 		holdFn = c.onHoldFn
-		if c.onStateFn != nil {
-			onState := c.onStateFn
-			stateFn = func() { onState(StateOnHold) }
-		}
+		c.fireOnState(StateOnHold)
 	case dir == sdp.DirSendRecv && c.state == StateOnHold:
 		c.state = StateActive
 		resumeFn = c.onResumeFn
-		if c.onStateFn != nil {
-			onState := c.onStateFn
-			stateFn = func() { onState(StateActive) }
-		}
+		c.fireOnState(StateActive)
 	}
 
 	c.negotiateCodec(sess)
 
 	c.mu.Unlock()
 
-	if stateFn != nil {
-		go stateFn()
-	}
 	if holdFn != nil {
 		go holdFn()
 	}

@@ -15,13 +15,18 @@ type MockPhone struct {
 	onRegisteredFn func()
 	onUnregFn      func()
 	onErrorFn      func(error)
+	onCallStateFn  func(Call, CallState)
+	onCallEndedFn  func(Call, EndReason)
+	onCallDTMFFn   func(Call, string)
 	lastCall       Call
+	calls          map[string]Call
 }
 
 // NewMockPhone creates a new MockPhone in the Disconnected state.
 func NewMockPhone() *MockPhone {
 	return &MockPhone{
 		state: PhoneStateDisconnected,
+		calls: make(map[string]Call),
 	}
 }
 
@@ -67,6 +72,8 @@ func (p *MockPhone) Dial(_ context.Context, target string, opts ...DialOption) (
 	c.direction = DirectionOutbound
 	c.remoteURI = target
 	p.lastCall = c
+	p.calls[c.CallID()] = c
+	p.wireCallCallbacks(c)
 	p.mu.Unlock()
 
 	return c, nil
@@ -96,6 +103,52 @@ func (p *MockPhone) OnError(fn func(error)) {
 	p.onErrorFn = fn
 }
 
+func (p *MockPhone) OnCallState(fn func(Call, CallState)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onCallStateFn = fn
+}
+
+func (p *MockPhone) OnCallEnded(fn func(Call, EndReason)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onCallEndedFn = fn
+}
+
+func (p *MockPhone) OnCallDTMF(fn func(Call, string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onCallDTMFFn = fn
+}
+
+// wireCallCallbacks hooks phone-level call callbacks onto a MockCall's
+// internal fields so they coexist with user-set per-call callbacks.
+// Must be called with p.mu held.
+func (p *MockPhone) wireCallCallbacks(c *MockCall) {
+	if p.onCallStateFn != nil {
+		fn := p.onCallStateFn
+		c.onStatePhone = func(state CallState) { fn(c, state) }
+	}
+	if p.onCallEndedFn != nil {
+		fn := p.onCallEndedFn
+		c.onEndedPhone = func(reason EndReason) { fn(c, reason) }
+	}
+	if p.onCallDTMFFn != nil {
+		fn := p.onCallDTMFFn
+		c.onDTMFPhone = func(digit string) { fn(c, digit) }
+	}
+}
+
+func (p *MockPhone) FindCall(callID string) Call {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c, ok := p.calls[callID]
+	if !ok {
+		return nil
+	}
+	return c
+}
+
 func (p *MockPhone) State() PhoneState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -111,6 +164,8 @@ func (p *MockPhone) SimulateIncoming(from string) {
 
 	p.mu.Lock()
 	p.lastCall = c
+	p.calls[c.CallID()] = c
+	p.wireCallCallbacks(c)
 	fn := p.onIncomingFn
 	p.mu.Unlock()
 

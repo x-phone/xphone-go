@@ -23,6 +23,10 @@ type Phone interface {
 	OnRegistered(func())
 	OnUnregistered(func())
 	OnError(func(err error))
+	OnCallState(func(call Call, state CallState))
+	OnCallEnded(func(call Call, reason EndReason))
+	OnCallDTMF(func(call Call, digit string))
+	FindCall(callID string) Call
 	State() PhoneState
 }
 
@@ -50,6 +54,11 @@ type phone struct {
 	onRegisteredFn   func()
 	onUnregisteredFn func()
 	onErrorFn        func(error)
+
+	// Phone-level call callbacks — auto-wired to every new call.
+	onCallStateFn func(Call, CallState)
+	onCallEndedFn func(Call, EndReason)
+	onCallDTMFFn  func(Call, string)
 }
 
 // codecPrefsToInts converts []Codec to []int for SDP/negotiation.
@@ -72,6 +81,24 @@ func newPhone(cfg Config) *phone {
 		codecPrefs: codecPrefsToInts(cfg.CodecPrefs),
 		state:      PhoneStateDisconnected,
 		calls:      make(map[string]*call),
+	}
+}
+
+// wireCallCallbacks hooks phone-level call callbacks (OnCallState, OnCallEnded,
+// OnCallDTMF) onto a call's internal callback fields so they coexist with
+// user-set per-call callbacks. Must be called with p.mu held.
+func (p *phone) wireCallCallbacks(c *call) {
+	if p.onCallStateFn != nil {
+		fn := p.onCallStateFn
+		c.onStatePhone = func(state CallState) { fn(c, state) }
+	}
+	if p.onCallEndedFn != nil {
+		fn := p.onCallEndedFn
+		c.onEndedPhone = func(reason EndReason) { fn(c, reason) }
+	}
+	if p.onCallDTMFFn != nil {
+		fn := p.onCallDTMFFn
+		c.onDTMFPhone = func(digit string) { fn(c, digit) }
 	}
 }
 
@@ -291,10 +318,7 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 			}
 		}
 	}
-	p.trackCall(c)
-	c.onEndedInternal = func(_ EndReason) {
-		p.untrackCall(c.CallID())
-	}
+	p.registerCall(c)
 	for _, r := range responses {
 		c.simulateResponse(r.code, r.reason)
 	}
@@ -322,11 +346,16 @@ func (p *phone) classifyDialError(ctx, dialCtx context.Context, err error) error
 	return err
 }
 
-// trackCall adds a call to the active calls map under lock.
-func (p *phone) trackCall(c *call) {
+// registerCall adds a call to the active calls map, wires phone-level
+// callbacks, and sets up automatic cleanup on call end.
+func (p *phone) registerCall(c *call) {
+	c.onEndedCleanup = func(_ EndReason) {
+		p.untrackCall(c.CallID())
+	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.calls[c.CallID()] = c
+	p.wireCallCallbacks(c)
+	p.mu.Unlock()
 }
 
 // untrackCall removes a call from the active calls map under lock.
@@ -336,11 +365,20 @@ func (p *phone) untrackCall(dialogID string) {
 	delete(p.calls, dialogID)
 }
 
-// findCall looks up an active call by dialog ID under lock.
-func (p *phone) findCall(dialogID string) *call {
+// findCall looks up an active call by Call-ID under lock (internal use).
+func (p *phone) findCall(callID string) *call {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.calls[dialogID]
+	return p.calls[callID]
+}
+
+// FindCall returns an active call by its SIP Call-ID, or nil if not found.
+func (p *phone) FindCall(callID string) Call {
+	c := p.findCall(callID)
+	if c == nil {
+		return nil
+	}
+	return c
 }
 
 // handleDialogInvite is called by sipUA's OnInvite handler when an inbound
@@ -355,10 +393,7 @@ func (p *phone) handleDialogInvite(dlg dialog, from, to, sdpBody string) {
 	c.rtpPortMax = p.cfg.RTPPortMax
 	p.applyCallConfig(c)
 	c.remoteSDP = sdpBody
-	p.trackCall(c)
-	c.onEndedInternal = func(_ EndReason) {
-		p.untrackCall(c.CallID())
-	}
+	p.registerCall(c)
 
 	p.logger.Info("incoming call", "from", from, "to", to)
 	if sdpBody != "" {
@@ -408,16 +443,13 @@ func (p *phone) handleIncoming(from, to string) {
 	dlg := newPhoneDialog()
 	c := newInboundCall(dlg)
 	c.logger = p.logger
-	p.trackCall(c)
-	c.onEndedInternal = func(_ EndReason) {
-		p.untrackCall(c.CallID())
-	}
-
-	p.logger.Info("incoming call", "from", from, "to", to)
+	p.registerCall(c)
 
 	p.mu.Lock()
 	fn := p.incoming
 	p.mu.Unlock()
+
+	p.logger.Info("incoming call", "from", from, "to", to)
 	if fn != nil {
 		fn(c)
 	}
@@ -459,6 +491,24 @@ func (p *phone) OnError(fn func(error)) {
 	if reg != nil {
 		reg.OnError(fn)
 	}
+}
+
+func (p *phone) OnCallState(fn func(Call, CallState)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onCallStateFn = fn
+}
+
+func (p *phone) OnCallEnded(fn func(Call, EndReason)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onCallEndedFn = fn
+}
+
+func (p *phone) OnCallDTMF(fn func(Call, string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onCallDTMFFn = fn
 }
 
 func (p *phone) State() PhoneState {

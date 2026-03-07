@@ -32,14 +32,17 @@ type MockCall struct {
 	transferTo string
 	headers    map[string][]string
 
-	onDTMFFn   func(string)
-	onHoldFn   func()
-	onResumeFn func()
-	onMuteFn   func()
-	onUnmuteFn func()
-	onMediaFn  func()
-	onStateFn  func(CallState)
-	onEndedFn  func(EndReason)
+	onDTMFFn     func(string)
+	onHoldFn     func()
+	onResumeFn   func()
+	onMuteFn     func()
+	onUnmuteFn   func()
+	onMediaFn    func()
+	onStateFn    func(CallState)
+	onEndedFn    func(EndReason)
+	onStatePhone func(CallState) // internal: phone-level OnCallState
+	onEndedPhone func(EndReason) // internal: phone-level OnCallEnded
+	onDTMFPhone  func(string)    // internal: phone-level OnCallDTMF
 
 	rtpRawReader chan *rtp.Packet
 	rtpReader    chan *rtp.Packet
@@ -184,8 +187,12 @@ func (c *MockCall) Accept(opts ...AcceptOption) error {
 	}
 	c.state = StateActive
 	c.startTime = time.Now()
+	phoneFn := c.onStatePhone
 	fn := c.onStateFn
 	c.mu.Unlock()
+	if phoneFn != nil {
+		phoneFn(StateActive)
+	}
 	if fn != nil {
 		fn(StateActive)
 	}
@@ -199,11 +206,19 @@ func (c *MockCall) Reject(code int, reason string) error {
 		return ErrInvalidState
 	}
 	c.state = StateEnded
+	statePhoneFn := c.onStatePhone
 	stateFn := c.onStateFn
+	endPhoneFn := c.onEndedPhone
 	endFn := c.onEndedFn
 	c.mu.Unlock()
+	if statePhoneFn != nil {
+		statePhoneFn(StateEnded)
+	}
 	if stateFn != nil {
 		stateFn(StateEnded)
+	}
+	if endPhoneFn != nil {
+		endPhoneFn(EndedByRejected)
 	}
 	if endFn != nil {
 		endFn(EndedByRejected)
@@ -224,11 +239,19 @@ func (c *MockCall) End() error {
 		return ErrInvalidState
 	}
 	c.state = StateEnded
+	statePhoneFn := c.onStatePhone
 	stateFn := c.onStateFn
+	endPhoneFn := c.onEndedPhone
 	endFn := c.onEndedFn
 	c.mu.Unlock()
+	if statePhoneFn != nil {
+		statePhoneFn(StateEnded)
+	}
 	if stateFn != nil {
 		stateFn(StateEnded)
+	}
+	if endPhoneFn != nil {
+		endPhoneFn(reason)
 	}
 	if endFn != nil {
 		endFn(reason)
@@ -243,9 +266,13 @@ func (c *MockCall) Hold() error {
 		return ErrInvalidState
 	}
 	c.state = StateOnHold
+	statePhoneFn := c.onStatePhone
 	stateFn := c.onStateFn
 	holdFn := c.onHoldFn
 	c.mu.Unlock()
+	if statePhoneFn != nil {
+		statePhoneFn(StateOnHold)
+	}
 	if stateFn != nil {
 		stateFn(StateOnHold)
 	}
@@ -262,9 +289,13 @@ func (c *MockCall) Resume() error {
 		return ErrInvalidState
 	}
 	c.state = StateActive
+	statePhoneFn := c.onStatePhone
 	stateFn := c.onStateFn
 	resumeFn := c.onResumeFn
 	c.mu.Unlock()
+	if statePhoneFn != nil {
+		statePhoneFn(StateActive)
+	}
 	if stateFn != nil {
 		stateFn(StateActive)
 	}
@@ -470,11 +501,15 @@ func (c *MockCall) LastTransferTarget() string {
 	return c.transferTo
 }
 
-// SimulateDTMF fires the OnDTMF callback with the given digit.
+// SimulateDTMF fires both the phone-level and per-call OnDTMF callbacks.
 func (c *MockCall) SimulateDTMF(digit string) {
 	c.mu.Lock()
+	phoneFn := c.onDTMFPhone
 	fn := c.onDTMFFn
 	c.mu.Unlock()
+	if phoneFn != nil {
+		phoneFn(digit)
+	}
 	if fn != nil {
 		fn(digit)
 	}

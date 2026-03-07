@@ -125,3 +125,95 @@ func TestMockPhone_LastCall(t *testing.T) {
 	c, _ := p.Dial(context.Background(), "sip:1002@pbx")
 	assert.Equal(t, c.ID(), p.LastCall().ID())
 }
+
+// --- Phone-level call callbacks on MockPhone ---
+
+func TestMockPhone_OnCallStateFiresOnDial(t *testing.T) {
+	p := NewMockPhone()
+	p.Connect(context.Background())
+
+	type stateEvent struct {
+		callID string
+		state  CallState
+	}
+	ch := make(chan stateEvent, 4)
+	p.OnCallState(func(c Call, s CallState) { ch <- stateEvent{c.ID(), s} })
+
+	c, err := p.Dial(context.Background(), "sip:1002@pbx")
+	require.NoError(t, err)
+
+	// Hold the call to trigger a state change.
+	require.NoError(t, c.Hold())
+
+	select {
+	case ev := <-ch:
+		assert.Equal(t, c.ID(), ev.callID)
+		assert.Equal(t, StateOnHold, ev.state)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("OnCallState never fired")
+	}
+}
+
+func TestMockPhone_OnCallEndedFiresOnEnd(t *testing.T) {
+	p := NewMockPhone()
+	p.Connect(context.Background())
+
+	type endEvent struct {
+		callID string
+		reason EndReason
+	}
+	ch := make(chan endEvent, 1)
+	p.OnCallEnded(func(c Call, r EndReason) { ch <- endEvent{c.ID(), r} })
+
+	c, _ := p.Dial(context.Background(), "sip:1002@pbx")
+	require.NoError(t, c.End())
+
+	select {
+	case ev := <-ch:
+		assert.Equal(t, c.ID(), ev.callID)
+		assert.Equal(t, EndedByLocal, ev.reason)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("OnCallEnded never fired")
+	}
+}
+
+func TestMockPhone_OnCallDTMFFiresOnIncoming(t *testing.T) {
+	p := NewMockPhone()
+	p.Connect(context.Background())
+
+	type dtmfEvent struct {
+		callID string
+		digit  string
+	}
+	ch := make(chan dtmfEvent, 1)
+	p.OnCallDTMF(func(c Call, d string) { ch <- dtmfEvent{c.ID(), d} })
+
+	p.SimulateIncoming("sip:1001@pbx")
+	mc := p.LastCall().(*MockCall)
+	mc.SimulateDTMF("5")
+
+	select {
+	case ev := <-ch:
+		assert.Equal(t, mc.ID(), ev.callID)
+		assert.Equal(t, "5", ev.digit)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("OnCallDTMF never fired")
+	}
+}
+
+// --- FindCall ---
+
+func TestMockPhone_FindCall(t *testing.T) {
+	p := NewMockPhone()
+	p.Connect(context.Background())
+
+	c, _ := p.Dial(context.Background(), "sip:1002@pbx")
+	found := p.FindCall(c.CallID())
+	require.NotNil(t, found)
+	assert.Equal(t, c.ID(), found.ID())
+}
+
+func TestMockPhone_FindCallReturnsNilForUnknown(t *testing.T) {
+	p := NewMockPhone()
+	assert.Nil(t, p.FindCall("nonexistent"))
+}

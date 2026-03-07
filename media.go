@@ -179,7 +179,11 @@ func (c *call) startMedia() {
 						lastDTMFSeen = true
 						c.mu.Lock()
 						fn := c.onDTMFFn
+						fnPhone := c.onDTMFPhone
 						c.mu.Unlock()
+						if fnPhone != nil {
+							go fnPhone(ev.Digit)
+						}
 						if fn != nil {
 							go fn(ev.Digit)
 						}

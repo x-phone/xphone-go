@@ -70,6 +70,8 @@ type dialog interface {
 	SendRefer(target string) error
 	// OnNotify registers a callback for NOTIFY events (REFER progress).
 	OnNotify(fn func(code int))
+	// FireNotify fires the on_notify callback with the given status code.
+	FireNotify(code int)
 	// CallID returns the SIP Call-ID.
 	CallID() string
 	// Header returns values for a SIP header (case-insensitive).

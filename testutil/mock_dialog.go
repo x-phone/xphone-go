@@ -106,6 +106,16 @@ func (d *MockDialog) OnNotify(fn func(code int)) {
 	d.onNotify = fn
 }
 
+// FireNotify fires the on_notify callback with the given status code.
+func (d *MockDialog) FireNotify(code int) {
+	d.mu.Lock()
+	fn := d.onNotify
+	d.mu.Unlock()
+	if fn != nil {
+		fn(code)
+	}
+}
+
 // CallID returns the SIP Call-ID.
 func (d *MockDialog) CallID() string {
 	d.mu.Lock()

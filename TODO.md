@@ -6,13 +6,6 @@
   Each callback fires via `go fn()`. Consider a single dispatch goroutine
   per call to reduce GC pressure under hundreds of concurrent calls.
 
-## Correctness
-
-- [ ] **Media timeout fully suspended during hold** — `media.go:286`
-  If the network drops while a call is on hold, the call stays in OnHold
-  forever. Consider extending (not suspending) the timer during hold
-  (e.g., 5 minutes).
-
 ## Other
 
 - [ ] SIP INFO DTMF

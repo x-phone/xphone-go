@@ -187,15 +187,18 @@ go func() {
 | Mute / Unmute | Done |
 | G.711 u-law (PCMU), G.711 A-law (PCMA) | Done |
 | G.722 wideband codec | Done |
+| Opus codec (optional, requires libopus) | Done |
 | PCM audio frames (`[]int16`) and raw RTP access | Done |
 | Jitter buffer | Done |
 | SRTP (encrypted media, AES_CM_128_HMAC_SHA1_80) | Done |
+| SRTP replay protection (RFC 3711) | Done |
+| RTCP Sender/Receiver Reports (RFC 3550) | Done |
+| 302 redirect following | Done |
 | TCP and TLS SIP transport | Done |
 | Early media (183 Session Progress) | Done |
 | STUN NAT traversal (RFC 5389) | Done |
 | MockPhone & MockCall for unit testing | Done |
 | Attended transfer | Planned |
-| Opus codec | Planned |
 
 ---
 
@@ -206,7 +209,7 @@ phone := xphone.New(
     xphone.WithCredentials("1001", "secret", "pbx.example.com"),
     xphone.WithTransport("udp", nil),                      // "udp" | "tcp" | "tls"
     xphone.WithRTPPorts(10000, 20000),                      // RTP port range
-    xphone.WithCodecs(xphone.CodecPCMU, xphone.CodecG722), // codec preference
+    xphone.WithCodecs(xphone.CodecOpus, xphone.CodecPCMU),  // codec preference (Opus requires -tags opus)
     xphone.WithJitterBuffer(50 * time.Millisecond),
     xphone.WithMediaTimeout(30 * time.Second),
     xphone.WithNATKeepalive(25 * time.Second),
@@ -237,6 +240,42 @@ Common public STUN servers:
 - `stun.l.google.com:19302`
 - `stun1.l.google.com:19302`
 - `stun.cloudflare.com:3478`
+
+---
+
+## Opus Codec
+
+Opus support is optional and requires CGO + libopus. The default build is CGO-free.
+
+### Install libopus
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install libopus-dev libopusfile-dev
+
+# macOS
+brew install opus opusfile
+```
+
+### Build with Opus
+
+```bash
+go build -tags opus ./...
+go test -tags opus ./...
+```
+
+### Usage
+
+```go
+phone := xphone.New(
+    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
+    xphone.WithCodecs(xphone.CodecOpus, xphone.CodecPCMU), // prefer Opus, fall back to PCMU
+)
+```
+
+Opus runs at 8kHz natively — no resampling needed. PCM frames remain `[]int16`, mono, 160 samples (20ms), same as G.711. RTP timestamps use 48kHz clock per RFC 7587.
+
+Without the `opus` build tag, `CodecOpus` is accepted in configuration but will not be negotiated (the codec processor returns nil, so SDP negotiation falls through to the next preferred codec).
 
 ---
 
@@ -489,6 +528,8 @@ If no logger is provided, `slog.Default()` is used. The library logs registratio
 | SIP Signaling | [sipgo](https://github.com/emiago/sipgo) |
 | RTP / SRTP | [pion/rtp](https://github.com/pion/rtp) + built-in SRTP (AES_CM_128_HMAC_SHA1_80) |
 | G.711 / G.722 | Built-in (PCMU, PCMA) + [gotranspile/g722](https://github.com/gotranspile/g722) |
+| Opus | [hraban/opus](https://github.com/hraban/opus) (optional, build tag `opus`) |
+| RTCP | Built-in (RFC 3550 SR/RR) |
 | Jitter Buffer | Built-in |
 | STUN | Built-in (RFC 5389) |
 | TUI (sipcli) | [bubbletea](https://github.com/charmbracelet/bubbletea) + [lipgloss](https://github.com/charmbracelet/lipgloss) |
@@ -501,11 +542,11 @@ This library is actively developed but not yet feature-complete. The gaps below 
 
 ### Security
 
-**SRTP is implemented but not yet hardened.** The `AES_CM_128_HMAC_SHA1_80` cipher suite is supported with SDES key exchange. Replay protection, key material zeroization, SRTCP encryption, and per-SSRC crypto state tracking are not yet implemented. DTLS-SRTP key exchange is not supported (SDES only). Evaluate accordingly for high-security environments.
+**SRTP uses SDES key exchange only.** The `AES_CM_128_HMAC_SHA1_80` cipher suite is supported with replay protection (RFC 3711 sliding window). DTLS-SRTP key exchange is not supported. Key material zeroization and SRTCP encryption are not yet implemented.
 
 ### Codec coverage
 
-**Opus is not yet supported.** G.711 (PCMU/PCMA) and G.722 are implemented. Opus is the dominant codec in WebRTC and modern VoIP — its absence limits interoperability with those platforms.
+**Opus requires CGO and libopus.** Opus is supported but requires building with `-tags opus` and having `libopus-dev` installed. The default build is CGO-free. See [Opus Codec](#opus-codec) for details.
 
 **G.729 is not supported.** G.729 remains widely deployed in enterprise PBX environments (Cisco, Avaya, Mitel). If your SIP trunk or PBX requires G.729, xphone cannot currently interoperate with it.
 
@@ -516,8 +557,6 @@ This library is actively developed but not yet feature-complete. The gaps below 
 **Attended (consultative) transfer is not implemented.** Only blind transfer via REFER is supported. Attended transfer requires coordinating two simultaneous call legs with a REFER/Replaces header.
 
 **DTMF is RFC 4733 (RTP telephone-events) only.** Some legacy PBXes use SIP INFO (RFC 2976) for DTMF instead. If your system requires SIP INFO DTMF, tones may not be received.
-
-**No call forwarding (302).** Incoming 302 Moved Temporarily responses are not followed automatically.
 
 **No call parking.** Park/retrieve functionality (common in office deployments) is not implemented.
 
@@ -539,18 +578,14 @@ This library is actively developed but not yet feature-complete. The gaps below 
 
 **No video.** Only audio media (single `m=audio` line in SDP) is supported. H.264, VP8, and other video codecs are not implemented.
 
-**No RTCP.** RTP Control Protocol feedback (jitter reports, packet loss, round-trip time) is not sent or processed.
-
 ---
 
 ## Roadmap
 
-- SRTP hardening — replay protection, DTLS-SRTP, key zeroization
-- Opus codec
+- DTLS-SRTP key exchange
 - Attended (consultative) transfer
 - SIP INFO DTMF (RFC 2976) for legacy PBX compatibility
 - TURN relay and full ICE for symmetric NAT
-- RTCP support
 - MWI (voicemail notification)
 
 ---

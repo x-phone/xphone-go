@@ -1,29 +1,5 @@
 # TODO — xphone-go
 
-## v0.2.0 Features (parity with Rust roadmap)
-
-- [ ] **302 Redirect Following** — fixes real call failures with trunk providers
-  - Parse 3xx responses in INVITE flow
-  - Extract Contact header, re-INVITE to new target
-  - Max redirect hops (default 3) to prevent loops
-  - Branch: `feat/302-redirect`
-
-- [ ] **SRTP Replay Protection** — RFC 3711 §3.3.2
-  - Sliding window replay check
-  - Reject packets with duplicate or old sequence numbers
-  - Branch: `feat/srtp-replay`
-
-- [ ] **RTCP Basic** — sender/receiver reports for trunk compatibility
-  - SR/RR packets (RFC 3550)
-  - Packet loss, jitter, round-trip stats
-  - Periodic RTCP send from media goroutine
-  - Branch: `feat/rtcp`
-
-- [ ] **Opus Codec** — modern trunks/WebRTC need it
-  - Blocked: pion/opus is decode-only, no Go encoder without CGO
-  - 48kHz resampling bridge
-  - Branch: `feat/opus`
-
 ## Optimization
 
 - [ ] **Goroutine-per-callback (~8-16/call)** — `call.go:554-593`

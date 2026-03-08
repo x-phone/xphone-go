@@ -174,19 +174,20 @@ type call struct {
 	srtpIn       *srtp.Context // inbound SRTP decryption context
 	srtpOut      *srtp.Context // outbound SRTP encryption context
 
-	codec        Codec // negotiated codec (default CodecPCMU)
-	sessionTimer *time.Timer
-	mediaActive  bool
-	mediaTimeout time.Duration
-	mediaDone    chan struct{}
-	rtpInbound   chan *rtp.Packet
-	rtpReader    chan *rtp.Packet
-	rtpRawReader chan *rtp.Packet
-	rtpWriter    chan *rtp.Packet
-	pcmReader    chan []int16
-	pcmWriter    chan []int16
-	sentRTP      chan *rtp.Packet // test hook: outbound packets copied here
-	closeChOnce  sync.Once        // ensures output channels are closed exactly once
+	codec           Codec // negotiated codec (default CodecPCMU)
+	sessionTimer    *time.Timer
+	mediaActive     bool
+	mediaTimeout    time.Duration
+	mediaDone       chan struct{}
+	rtpInbound      chan *rtp.Packet
+	rtpReader       chan *rtp.Packet
+	rtpRawReader    chan *rtp.Packet
+	rtpWriter       chan *rtp.Packet
+	pcmReader       chan []int16
+	pcmWriter       chan []int16
+	sentRTP         chan *rtp.Packet   // test hook: outbound packets copied here
+	mediaTimerReset chan time.Duration // signals the media goroutine to reset the timeout
+	closeChOnce     sync.Once          // ensures output channels are closed exactly once
 }
 
 func newInboundCall(d dialog) *call {
@@ -719,6 +720,7 @@ func (c *call) Hold() error {
 	c.dlg.SendReInvite([]byte(c.localSDP))
 	c.state = StateOnHold
 	c.fireOnState(StateOnHold)
+	c.signalMediaTimerReset(defaultHoldMediaTimeout)
 	c.logger.Info("call hold", "id", c.id)
 	return nil
 }
@@ -733,6 +735,7 @@ func (c *call) Resume() error {
 	c.dlg.SendReInvite([]byte(c.localSDP))
 	c.state = StateActive
 	c.fireOnState(StateActive)
+	c.signalMediaTimerReset(c.effectiveMediaTimeout())
 	c.logger.Info("call resumed", "id", c.id)
 	return nil
 }
@@ -952,10 +955,12 @@ func (c *call) simulateReInvite(rawSDP string) {
 		c.state = StateOnHold
 		holdFn = c.onHoldFn
 		c.fireOnState(StateOnHold)
+		c.signalMediaTimerReset(defaultHoldMediaTimeout)
 	case dir == sdp.DirSendRecv && c.state == StateOnHold:
 		c.state = StateActive
 		resumeFn = c.onResumeFn
 		c.fireOnState(StateActive)
+		c.signalMediaTimerReset(c.effectiveMediaTimeout())
 	}
 
 	c.negotiateCodec(sess)

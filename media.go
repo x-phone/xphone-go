@@ -14,9 +14,10 @@ import (
 
 // Default media configuration values.
 const (
-	defaultMediaTimeout = 30 * time.Second
-	defaultJitterDepth  = 50 * time.Millisecond
-	defaultPCMRate      = 8000
+	defaultMediaTimeout     = 30 * time.Second
+	defaultHoldMediaTimeout = 5 * time.Minute
+	defaultJitterDepth      = 50 * time.Millisecond
+	defaultPCMRate          = 8000
 )
 
 // clonePacket returns a deep copy of an RTP packet so taps are independent.
@@ -121,10 +122,7 @@ func (c *call) startMedia() {
 		c.mu.Unlock()
 		return // already running
 	}
-	timeout := c.mediaTimeout
-	if timeout == 0 {
-		timeout = defaultMediaTimeout
-	}
+	timeout := c.effectiveMediaTimeout()
 	jitterDepth := c.jitterDepth
 	if jitterDepth == 0 {
 		jitterDepth = defaultJitterDepth
@@ -135,6 +133,7 @@ func (c *call) startMedia() {
 	}
 	codec := c.codec
 	c.mediaDone = make(chan struct{})
+	c.mediaTimerReset = make(chan time.Duration, 1)
 	c.mediaActive = true
 	done := c.mediaDone
 	conn := c.rtpConn
@@ -222,14 +221,14 @@ func (c *call) startMedia() {
 			defer rtcpTicker.Stop()
 		}
 
-		resetTimer := func() {
+		resetTimer := func(d time.Duration) {
 			if !mediaTimer.Stop() {
 				select {
 				case <-mediaTimer.C:
 				default:
 				}
 			}
-			mediaTimer.Reset(timeout)
+			mediaTimer.Reset(d)
 		}
 
 		for {
@@ -262,13 +261,13 @@ func (c *call) startMedia() {
 							go fn(ev.Digit)
 						}
 					}
-					resetTimer()
+					resetTimer(timeout)
 					continue
 				}
 
 				rtcpStats.RecordRTPReceived(pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC, rtpClockRate)
 				jb.Push(pkt)
-				resetTimer()
+				resetTimer(timeout)
 				c.drainJB(jb, cp)
 
 			case <-jitterTick.C:
@@ -355,13 +354,11 @@ func (c *call) startMedia() {
 					rtcpStats.ProcessIncomingSR(pkt.NTPSec, pkt.NTPFrac)
 				}
 
+			case d := <-c.mediaTimerReset:
+				resetTimer(d)
+
 			case <-mediaTimer.C:
 				c.mu.Lock()
-				if c.state == StateOnHold {
-					c.mu.Unlock()
-					mediaTimer.Reset(timeout)
-					continue
-				}
 				c.state = StateEnded
 				c.fireOnState(StateEnded)
 				c.logger.Warn("media timeout", "id", c.id)
@@ -388,7 +385,25 @@ func (c *call) stopMedia() {
 	c.mediaActive = false
 }
 
-// resetMediaTimer resets the media timeout timer. Called on each received
-// RTP packet. Timer is managed inside the media goroutine.
-func (c *call) resetMediaTimer() {
+// effectiveMediaTimeout returns the configured media timeout or the default.
+func (c *call) effectiveMediaTimeout() time.Duration {
+	if c.mediaTimeout > 0 {
+		return c.mediaTimeout
+	}
+	return defaultMediaTimeout
+}
+
+// signalMediaTimerReset sends a timer reset request to the media goroutine.
+// Non-blocking: drops the signal if the channel is full (media goroutine will
+// pick it up on the next iteration).
+func (c *call) signalMediaTimerReset(d time.Duration) {
+	if c.mediaTimerReset == nil {
+		return
+	}
+	// Drain any pending signal so the latest value always wins.
+	select {
+	case <-c.mediaTimerReset:
+	default:
+	}
+	c.mediaTimerReset <- d
 }

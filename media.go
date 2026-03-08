@@ -82,10 +82,6 @@ func (c *call) startRTPReader() {
 		return
 	}
 
-	c.mu.Lock()
-	srtpIn := c.srtpIn
-	c.mu.Unlock()
-
 	go func() {
 		buf := make([]byte, 1500)
 		for {
@@ -97,7 +93,10 @@ func (c *call) startRTPReader() {
 			cp := make([]byte, n)
 			copy(cp, buf[:n])
 
-			// SRTP decrypt before unmarshal.
+			// Re-read srtpIn each iteration so a re-INVITE key change takes effect.
+			c.mu.Lock()
+			srtpIn := c.srtpIn
+			c.mu.Unlock()
 			if srtpIn != nil {
 				cp, err = srtpIn.Unprotect(cp)
 				if err != nil {
@@ -135,7 +134,6 @@ func (c *call) startMedia() {
 		pcmRate = defaultPCMRate
 	}
 	codec := c.codec
-	srtpOut := c.srtpOut
 	c.mediaDone = make(chan struct{})
 	c.mediaActive = true
 	done := c.mediaDone
@@ -284,6 +282,7 @@ func (c *call) startMedia() {
 				c.mu.Lock()
 				muted := c.muted
 				dst := c.remoteAddr
+				srtpOut := c.srtpOut
 				c.mu.Unlock()
 				if muted {
 					continue
@@ -311,6 +310,7 @@ func (c *call) startMedia() {
 				c.mu.Lock()
 				muted := c.muted
 				dst := c.remoteAddr
+				srtpOut := c.srtpOut
 				c.mu.Unlock()
 				if muted {
 					continue

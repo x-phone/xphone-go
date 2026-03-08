@@ -8,10 +8,6 @@
 
 ## Correctness
 
-- [ ] **`startRTPReader` captures stale `srtpIn` after re-INVITE** — `media.go:74`
-  SRTP context is captured once at startup. If a re-INVITE changes keys,
-  the RTP reader continues using the old context.
-
 - [ ] **Media timeout fully suspended during hold** — `media.go:286`
   If the network drops while a call is on hold, the call stays in OnHold
   forever. Consider extending (not suspending) the timer during hold

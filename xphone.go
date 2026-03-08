@@ -242,6 +242,7 @@ func (p *phone) Connect(ctx context.Context) error {
 	tr.mu.Lock()
 	tr.onDialogInvite = p.handleDialogInvite
 	tr.onDialogBye = p.handleDialogBye
+	tr.onDialogCancel = p.handleDialogCancel
 	tr.onDialogNotify = p.handleDialogNotify
 	tr.mu.Unlock()
 	tr.startServer()
@@ -489,6 +490,15 @@ func (p *phone) handleDialogBye(callID string) {
 	c := p.findCall(callID)
 	if c != nil {
 		c.simulateBye()
+	}
+}
+
+// handleDialogCancel is called by sipUA's OnCancel handler when a CANCEL is received
+// for a ringing inbound call. It ends the call with EndedByCancelled.
+func (p *phone) handleDialogCancel(callID string) {
+	c := p.findCall(callID)
+	if c != nil {
+		c.simulateCancel()
 	}
 }
 

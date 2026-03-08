@@ -255,10 +255,12 @@ func (c *call) startMedia() {
 						fnPhone := c.onDTMFPhone
 						c.mu.Unlock()
 						if fnPhone != nil {
-							go fnPhone(ev.Digit)
+							digit := ev.Digit
+							c.dispatch(func() { fnPhone(digit) })
 						}
 						if fn != nil {
-							go fn(ev.Digit)
+							digit := ev.Digit
+							c.dispatch(func() { fn(digit) })
 						}
 					}
 					resetTimer(timeout)

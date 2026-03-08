@@ -134,7 +134,7 @@ func TestLogger_CallAccept(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.Logger = logger
-	c := newInboundCallWithLogger(cfg.Logger)
+	c := newInboundCallWithLogger(t, cfg.Logger)
 	c.Accept()
 
 	assert.Contains(t, buf.String(), "call accepted")
@@ -145,7 +145,7 @@ func TestLogger_CallReject(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.Logger = logger
-	c := newInboundCallWithLogger(cfg.Logger)
+	c := newInboundCallWithLogger(t, cfg.Logger)
 	c.Reject(486, "Busy Here")
 
 	assert.Contains(t, buf.String(), "call rejected")
@@ -156,7 +156,7 @@ func TestLogger_CallEnd(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.Logger = logger
-	c := newInboundCallWithLogger(cfg.Logger)
+	c := newInboundCallWithLogger(t, cfg.Logger)
 	c.Accept()
 	c.End()
 
@@ -166,7 +166,7 @@ func TestLogger_CallEnd(t *testing.T) {
 func TestLogger_CallHoldResume(t *testing.T) {
 	logger, buf := newTestLogger()
 
-	c := newInboundCallWithLogger(logger)
+	c := newInboundCallWithLogger(t, logger)
 	c.Accept()
 	c.Hold()
 	c.Resume()
@@ -179,7 +179,7 @@ func TestLogger_CallHoldResume(t *testing.T) {
 func TestLogger_MediaTimeout(t *testing.T) {
 	logger, buf := newTestLogger()
 
-	c := newInboundCallWithLogger(logger)
+	c := newInboundCallWithLogger(t, logger)
 	c.mediaTimeout = 30 * time.Millisecond
 
 	done := make(chan struct{})
@@ -204,9 +204,11 @@ func TestLogger_MediaTimeout(t *testing.T) {
 // Helpers
 // ==========================================================================
 
-func newInboundCallWithLogger(logger *slog.Logger) *call {
+func newInboundCallWithLogger(t *testing.T, logger *slog.Logger) *call {
+	t.Helper()
 	dlg := testutil.NewMockDialog()
 	c := newInboundCall(dlg)
+	t.Cleanup(c.cleanup)
 	c.logger = resolveLogger(logger)
 	return c
 }

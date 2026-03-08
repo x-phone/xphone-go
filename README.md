@@ -8,6 +8,8 @@
 
 A Go library for embedding SIP telephony into any application. xphone wraps a SIP user agent and exposes an event-driven API for managing concurrent VoIP calls — handling SIP signaling, registration, RTP media, codecs, and call control so you don't have to.
 
+> **xphone** is also available in [Rust](https://github.com/x-phone/xphone-rust).
+
 ## Features
 
 - **SIP registration** with auth, keepalive, and automatic reconnect

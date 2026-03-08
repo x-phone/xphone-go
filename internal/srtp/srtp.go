@@ -31,6 +31,91 @@ const (
 	CryptoSuite = "AES_CM_128_HMAC_SHA1_80"
 )
 
+// replayWindowSize is the number of packets tracked by the sliding window.
+// Covers ~2.5 seconds of audio at 50 packets/second.
+// Must not exceed 128 (bitmap is uint128).
+const replayWindowSize = 128
+
+// Compile-time assert: replayWindowSize <= 128.
+const _ = uint(128 - replayWindowSize)
+
+// replayWindow implements sliding-window replay protection per RFC 3711 §3.3.2.
+// Tracks the highest accepted packet index and a bitmask of which of the
+// previous replayWindowSize packets have been received.
+type replayWindow struct {
+	top         uint64  // highest accepted 48-bit packet index
+	bitmap      uint128 // bit 0 = top, bit 1 = top-1, etc.
+	initialized bool
+}
+
+// uint128 represents a 128-bit unsigned integer as two 64-bit halves.
+type uint128 struct {
+	hi, lo uint64
+}
+
+func (u uint128) bit(n uint64) uint64 {
+	if n < 64 {
+		return (u.lo >> n) & 1
+	}
+	return (u.hi >> (n - 64)) & 1
+}
+
+func (u uint128) setBit(n uint64) uint128 {
+	if n < 64 {
+		return uint128{u.hi, u.lo | (1 << n)}
+	}
+	return uint128{u.hi | (1 << (n - 64)), u.lo}
+}
+
+func (u uint128) shl(n uint64) uint128 {
+	if n >= 128 {
+		return uint128{}
+	}
+	if n >= 64 {
+		return uint128{u.lo << (n - 64), 0}
+	}
+	return uint128{(u.hi << n) | (u.lo >> (64 - n)), u.lo << n}
+}
+
+// isReplay returns true if the packet should be rejected (duplicate or too old).
+func (w *replayWindow) isReplay(index uint64) bool {
+	if !w.initialized {
+		return false
+	}
+	if index > w.top {
+		return false
+	}
+	delta := w.top - index
+	if delta >= replayWindowSize {
+		return true
+	}
+	return w.bitmap.bit(delta) == 1
+}
+
+// accept marks a packet index as received. Call only after successful authentication.
+func (w *replayWindow) accept(index uint64) {
+	if !w.initialized {
+		w.top = index
+		w.bitmap = uint128{0, 1}
+		w.initialized = true
+		return
+	}
+	if index > w.top {
+		shift := index - w.top
+		if shift >= replayWindowSize {
+			w.bitmap = uint128{0, 1}
+		} else {
+			w.bitmap = w.bitmap.shl(shift).setBit(0)
+		}
+		w.top = index
+	} else {
+		delta := w.top - index
+		if delta < replayWindowSize {
+			w.bitmap = w.bitmap.setBit(delta)
+		}
+	}
+}
+
 // Context holds the derived session keys for one direction of SRTP.
 type Context struct {
 	sessionSalt [14]byte // session salt
@@ -40,6 +125,8 @@ type Context struct {
 	roc            uint32 // rollover counter
 	lastSeq        uint16
 	seqInitialized bool
+
+	replay replayWindow // replay protection (used by Unprotect only)
 }
 
 // New derives session keys from master key (16 bytes) and master salt (14 bytes).
@@ -139,16 +226,27 @@ func (c *Context) Unprotect(srtpPacket []byte) ([]byte, error) {
 	estimatedROC := c.estimateROC(seq)
 	index := (uint64(estimatedROC) << 16) | uint64(seq)
 
+	// Replay check (RFC 3711 §3.3.2) — cheap, before expensive HMAC.
+	if c.replay.isReplay(index) {
+		return nil, fmt.Errorf("srtp: replay detected")
+	}
+
 	// Verify auth tag.
 	expectedTag := c.computeAuthTag(authPortion, estimatedROC)
 	if subtle.ConstantTimeCompare(receivedTag, expectedTag[:]) != 1 {
 		return nil, fmt.Errorf("srtp: authentication failed")
 	}
 
-	// Auth verified — commit ROC update.
-	c.roc = estimatedROC
-	c.lastSeq = seq
-	c.seqInitialized = true
+	// Auth verified — commit replay window and ROC/seq state.
+	// Only advance ROC/lastSeq when this packet's index exceeds the current
+	// highest (RFC 3711 §3.3.1: s_l tracks the highest received index).
+	c.replay.accept(index)
+	currentHighest := (uint64(c.roc) << 16) | uint64(c.lastSeq)
+	if !c.seqInitialized || index > currentHighest {
+		c.roc = estimatedROC
+		c.lastSeq = seq
+		c.seqInitialized = true
+	}
 
 	// Decrypt payload.
 	rtp := make([]byte, authOffset)

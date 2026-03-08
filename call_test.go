@@ -12,22 +12,44 @@ import (
 	"github.com/x-phone/xphone-go/testutil"
 )
 
+// testInboundCall creates an inbound call with automatic cleanup.
+func testInboundCall(t *testing.T, d ...dialog) *call {
+	t.Helper()
+	var dlg dialog
+	if len(d) > 0 {
+		dlg = d[0]
+	} else {
+		dlg = testutil.NewMockDialog()
+	}
+	c := newInboundCall(dlg)
+	t.Cleanup(c.cleanup)
+	return c
+}
+
+// testOutboundCall creates an outbound call with automatic cleanup.
+func testOutboundCall(t *testing.T, d dialog, opts ...DialOption) *call {
+	t.Helper()
+	c := newOutboundCall(d, opts...)
+	t.Cleanup(c.cleanup)
+	return c
+}
+
 // --- Inbound: basic state transitions ---
 
 func TestCall_InboundInitialStateIsRinging(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	assert.Equal(t, StateRinging, call.State())
 }
 
 func TestCall_AcceptTransitionsToActive(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	require.NoError(t, call.Accept())
 	assert.Equal(t, StateActive, call.State())
 }
 
 func TestCall_AcceptSendsSDPAnswer(t *testing.T) {
 	dialog := testutil.NewMockDialog()
-	call := newInboundCall(dialog)
+	call := testInboundCall(t, dialog)
 	call.Accept()
 	assert.Equal(t, 200, dialog.LastResponseCode())
 	assert.NotEmpty(t, dialog.LastResponseBody())
@@ -35,20 +57,20 @@ func TestCall_AcceptSendsSDPAnswer(t *testing.T) {
 
 func TestCall_RejectSendsCorrectSIPCode(t *testing.T) {
 	dialog := testutil.NewMockDialog()
-	call := newInboundCall(dialog)
+	call := testInboundCall(t, dialog)
 	call.Reject(486, "Busy Here")
 	assert.Equal(t, 486, dialog.LastResponseCode())
 	assert.Equal(t, "Busy Here", dialog.LastResponseReason())
 }
 
 func TestCall_RejectTransitionsToEnded(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	call.Reject(486, "Busy Here")
 	assert.Equal(t, StateEnded, call.State())
 }
 
 func TestCall_RejectFiresEndedByRejected(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	ended := make(chan EndReason, 1)
 	call.OnEnded(func(r EndReason) { ended <- r })
 	call.Reject(486, "Busy Here")
@@ -56,13 +78,13 @@ func TestCall_RejectFiresEndedByRejected(t *testing.T) {
 }
 
 func TestCall_CannotAcceptAfterRejected(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	call.Reject(486, "Busy Here")
 	assert.ErrorIs(t, call.Accept(), ErrInvalidState)
 }
 
 func TestCall_CannotRejectAfterAccepted(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	call.Accept()
 	assert.ErrorIs(t, call.Reject(486, "Busy Here"), ErrInvalidState)
 }
@@ -70,18 +92,18 @@ func TestCall_CannotRejectAfterAccepted(t *testing.T) {
 // --- Outbound: state transitions ---
 
 func TestCall_OutboundInitialStateIsDialing(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog())
+	call := testOutboundCall(t, testutil.NewMockDialog())
 	assert.Equal(t, StateDialing, call.State())
 }
 
 func TestCall_OutboundTransitionsOnRemoteRinging(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog())
+	call := testOutboundCall(t, testutil.NewMockDialog())
 	call.simulateResponse(180, "Ringing")
 	assert.Equal(t, StateRemoteRinging, call.State())
 }
 
 func TestCall_OutboundTransitionsToActiveOn200(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog())
+	call := testOutboundCall(t, testutil.NewMockDialog())
 	call.simulateResponse(180, "Ringing")
 	call.simulateResponse(200, "OK")
 	assert.Equal(t, StateActive, call.State())
@@ -90,13 +112,13 @@ func TestCall_OutboundTransitionsToActiveOn200(t *testing.T) {
 // --- 183 / EarlyMedia gating ---
 
 func TestCall_183WithEarlyMediaOptionTransitionsToEarlyMedia(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog(), WithEarlyMedia())
+	call := testOutboundCall(t, testutil.NewMockDialog(), WithEarlyMedia())
 	call.simulateResponse(183, "Session Progress")
 	assert.Equal(t, StateEarlyMedia, call.State())
 }
 
 func TestCall_183WithoutEarlyMediaOptionStaysRemoteRinging(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog()) // no WithEarlyMedia
+	call := testOutboundCall(t, testutil.NewMockDialog()) // no WithEarlyMedia
 	call.simulateResponse(180, "Ringing")
 	call.simulateResponse(183, "Session Progress")
 	// 183 received but option not set — state must not change to EarlyMedia
@@ -104,14 +126,14 @@ func TestCall_183WithoutEarlyMediaOptionStaysRemoteRinging(t *testing.T) {
 }
 
 func TestCall_183WithEarlyMediaOpensRTPChannels(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog(), WithEarlyMedia())
+	call := testOutboundCall(t, testutil.NewMockDialog(), WithEarlyMedia())
 	call.simulateResponse(183, "Session Progress")
 	assert.NotNil(t, call.RTPReader())
 	assert.NotNil(t, call.PCMReader())
 }
 
 func TestCall_183WithoutEarlyMediaRTPChannelsRemainClosed(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog())
+	call := testOutboundCall(t, testutil.NewMockDialog())
 	call.simulateResponse(183, "Session Progress")
 	// channels exist but no RTP session is live yet
 	assert.False(t, call.MediaSessionActive())
@@ -120,7 +142,7 @@ func TestCall_183WithoutEarlyMediaRTPChannelsRemainClosed(t *testing.T) {
 // --- OnMedia event ---
 
 func TestCall_OnMediaFiresAfter200OK(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog())
+	call := testOutboundCall(t, testutil.NewMockDialog())
 	mediaReady := make(chan struct{}, 1)
 	call.OnMedia(func() { mediaReady <- struct{}{} })
 
@@ -134,7 +156,7 @@ func TestCall_OnMediaFiresAfter200OK(t *testing.T) {
 }
 
 func TestCall_OnMediaFiresOn183WhenEarlyMediaEnabled(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog(), WithEarlyMedia())
+	call := testOutboundCall(t, testutil.NewMockDialog(), WithEarlyMedia())
 	mediaReady := make(chan struct{}, 1)
 	call.OnMedia(func() { mediaReady <- struct{}{} })
 
@@ -148,7 +170,7 @@ func TestCall_OnMediaFiresOn183WhenEarlyMediaEnabled(t *testing.T) {
 }
 
 func TestCall_OnMediaDoesNotFireOn183WithoutEarlyMediaOption(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog())
+	call := testOutboundCall(t, testutil.NewMockDialog())
 	fired := false
 	call.OnMedia(func() { fired = true })
 
@@ -162,7 +184,7 @@ func TestCall_OnMediaDoesNotFireOn183WithoutEarlyMediaOption(t *testing.T) {
 
 func TestCall_EndBeforeAnswerSendsCancel(t *testing.T) {
 	dialog := testutil.NewMockDialog()
-	call := newOutboundCall(dialog)
+	call := testOutboundCall(t, dialog)
 	call.simulateResponse(180, "Ringing")
 
 	call.End()
@@ -172,7 +194,7 @@ func TestCall_EndBeforeAnswerSendsCancel(t *testing.T) {
 }
 
 func TestCall_EndBeforeAnswerFiresEndedByCancelled(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog())
+	call := testOutboundCall(t, testutil.NewMockDialog())
 	call.simulateResponse(180, "Ringing")
 
 	ended := make(chan EndReason, 1)
@@ -184,7 +206,7 @@ func TestCall_EndBeforeAnswerFiresEndedByCancelled(t *testing.T) {
 
 func TestCall_EndWhileActiveSendsBye(t *testing.T) {
 	dialog := testutil.NewMockDialog()
-	call := newOutboundCall(dialog)
+	call := testOutboundCall(t, dialog)
 	call.simulateResponse(200, "OK")
 
 	call.End()
@@ -194,7 +216,7 @@ func TestCall_EndWhileActiveSendsBye(t *testing.T) {
 }
 
 func TestCall_EndWhileActiveFiresEndedByLocal(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog())
+	call := testOutboundCall(t, testutil.NewMockDialog())
 	call.simulateResponse(200, "OK")
 
 	ended := make(chan EndReason, 1)
@@ -206,7 +228,7 @@ func TestCall_EndWhileActiveFiresEndedByLocal(t *testing.T) {
 
 func TestCall_EndWhileOnHoldSendsBye(t *testing.T) {
 	dialog := testutil.NewMockDialog()
-	call := newOutboundCall(dialog)
+	call := testOutboundCall(t, dialog)
 	call.simulateResponse(200, "OK")
 	call.Hold()
 
@@ -216,7 +238,7 @@ func TestCall_EndWhileOnHoldSendsBye(t *testing.T) {
 }
 
 func TestCall_RemoteByeFiresEndedByRemote(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	call.Accept()
 
 	ended := make(chan EndReason, 1)
@@ -227,7 +249,7 @@ func TestCall_RemoteByeFiresEndedByRemote(t *testing.T) {
 }
 
 func TestCall_EndOnAlreadyEndedCallReturnsInvalidState(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	call.Accept()
 	call.End()
 	assert.ErrorIs(t, call.End(), ErrInvalidState)
@@ -296,7 +318,7 @@ func TestCall_EarlierOfCtxAndDialOptionWins(t *testing.T) {
 
 func TestCall_HoldSendsReInviteWithSendOnly(t *testing.T) {
 	dialog := testutil.NewMockDialog()
-	call := newInboundCall(dialog)
+	call := testInboundCall(t, dialog)
 	call.Accept()
 	call.Hold()
 
@@ -304,7 +326,7 @@ func TestCall_HoldSendsReInviteWithSendOnly(t *testing.T) {
 }
 
 func TestCall_HoldTransitionsToOnHold(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	call.Accept()
 	call.Hold()
 	assert.Equal(t, StateOnHold, call.State())
@@ -312,7 +334,7 @@ func TestCall_HoldTransitionsToOnHold(t *testing.T) {
 
 func TestCall_ResumeFromHoldSendsReInviteWithSendRecv(t *testing.T) {
 	dialog := testutil.NewMockDialog()
-	call := newInboundCall(dialog)
+	call := testInboundCall(t, dialog)
 	call.Accept()
 	call.Hold()
 	call.Resume()
@@ -321,7 +343,7 @@ func TestCall_ResumeFromHoldSendsReInviteWithSendRecv(t *testing.T) {
 }
 
 func TestCall_ResumeFromHoldTransitionsToActive(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	call.Accept()
 	call.Hold()
 	call.Resume()
@@ -329,21 +351,21 @@ func TestCall_ResumeFromHoldTransitionsToActive(t *testing.T) {
 }
 
 func TestCall_HoldWhenNotActiveReturnsInvalidState(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	assert.ErrorIs(t, call.Hold(), ErrInvalidState)
 }
 
 // --- Identity & Headers ---
 
 func TestCall_IDIsUniquePerCall(t *testing.T) {
-	c1 := newInboundCall(testutil.NewMockDialog())
-	c2 := newInboundCall(testutil.NewMockDialog())
+	c1 := testInboundCall(t)
+	c2 := testInboundCall(t)
 	assert.NotEqual(t, c1.ID(), c2.ID())
 }
 
 func TestCall_CallIDMatchesSIPHeader(t *testing.T) {
 	dialog := testutil.NewMockDialogWithCallID("test-call-id-xyz")
-	call := newInboundCall(dialog)
+	call := testInboundCall(t, dialog)
 	assert.Equal(t, "test-call-id-xyz", call.CallID())
 }
 
@@ -351,7 +373,7 @@ func TestCall_HeadersReturnsCopy(t *testing.T) {
 	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
 		"X-Custom": {"value1"},
 	})
-	call := newInboundCall(dialog)
+	call := testInboundCall(t, dialog)
 
 	headers := call.Headers()
 	headers["X-Custom"] = []string{"mutated"}
@@ -363,7 +385,7 @@ func TestCall_HeaderCaseInsensitive(t *testing.T) {
 	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
 		"P-Asserted-Identity": {"sip:1001@pbx"},
 	})
-	call := newInboundCall(dialog)
+	call := testInboundCall(t, dialog)
 	assert.Equal(t, []string{"sip:1001@pbx"}, call.Header("p-asserted-identity"))
 }
 
@@ -371,40 +393,40 @@ func TestCall_HeadersSupportsMultipleValues(t *testing.T) {
 	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
 		"Route": {"sip:proxy1@pbx", "sip:proxy2@pbx"},
 	})
-	call := newInboundCall(dialog)
+	call := testInboundCall(t, dialog)
 	assert.Equal(t, []string{"sip:proxy1@pbx", "sip:proxy2@pbx"}, call.Header("Route"))
 }
 
 func TestCall_DirectionInbound(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	assert.Equal(t, DirectionInbound, call.Direction())
 }
 
 func TestCall_DirectionOutbound(t *testing.T) {
-	call := newOutboundCall(testutil.NewMockDialog())
+	call := testOutboundCall(t, testutil.NewMockDialog())
 	assert.Equal(t, DirectionOutbound, call.Direction())
 }
 
 // --- Timing ---
 
 func TestCall_StartTimeZeroBeforeActive(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	assert.True(t, call.StartTime().IsZero())
 }
 
 func TestCall_StartTimeSetOnActive(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	call.Accept()
 	assert.False(t, call.StartTime().IsZero())
 }
 
 func TestCall_DurationZeroBeforeActive(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	assert.Equal(t, time.Duration(0), call.Duration())
 }
 
 func TestCall_DurationGrowsWhileActive(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	call.Accept()
 	time.Sleep(30 * time.Millisecond)
 	assert.Greater(t, call.Duration(), 20*time.Millisecond)
@@ -414,7 +436,7 @@ func TestCall_DurationGrowsWhileActive(t *testing.T) {
 
 func TestCall_BlindTransferSendsRefer(t *testing.T) {
 	dialog := testutil.NewMockDialog()
-	call := newInboundCall(dialog)
+	call := testInboundCall(t, dialog)
 	call.Accept()
 
 	err := call.BlindTransfer("sip:1003@pbx")
@@ -426,7 +448,7 @@ func TestCall_BlindTransferSendsRefer(t *testing.T) {
 
 func TestCall_BlindTransferFiresEndedByTransfer(t *testing.T) {
 	dialog := testutil.NewMockDialog()
-	call := newInboundCall(dialog)
+	call := testInboundCall(t, dialog)
 	call.Accept()
 
 	ended := make(chan EndReason, 1)
@@ -439,7 +461,7 @@ func TestCall_BlindTransferFiresEndedByTransfer(t *testing.T) {
 }
 
 func TestCall_BlindTransferWhenNotActiveReturnsInvalidState(t *testing.T) {
-	call := newInboundCall(testutil.NewMockDialog())
+	call := testInboundCall(t)
 	assert.ErrorIs(t, call.BlindTransfer("sip:1003@pbx"), ErrInvalidState)
 }
 
@@ -451,17 +473,17 @@ func testSDP(ip string, port int, dir string, codecs ...int) string {
 }
 
 func TestCall_LocalSDPEmptyBeforeActive(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	assert.Equal(t, "", c.LocalSDP())
 }
 
 func TestCall_RemoteSDPEmptyBeforeActive(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	assert.Equal(t, "", c.RemoteSDP())
 }
 
 func TestCall_LocalSDPPopulatedAfterAccept(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	assert.Contains(t, c.LocalSDP(), "v=0")
 }
@@ -471,7 +493,7 @@ func TestCall_CodecNegotiatedFromSDP(t *testing.T) {
 	// local preference order (default or config-driven). With local prefs
 	// favouring PCMA over PCMU, the negotiated codec should be CodecPCMA.
 	remoteSDP := testSDP("192.168.1.200", 5004, "sendrecv", 0, 8)
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.remoteSDP = remoteSDP
 	c.Accept()
 	assert.Equal(t, CodecPCMA, c.Codec())
@@ -479,7 +501,7 @@ func TestCall_CodecNegotiatedFromSDP(t *testing.T) {
 
 func TestCall_HoldSendsSDPWithSendOnly(t *testing.T) {
 	dialog := testutil.NewMockDialog()
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	c.Accept()
 	c.Hold()
 
@@ -491,7 +513,7 @@ func TestCall_HoldSendsSDPWithSendOnly(t *testing.T) {
 
 func TestCall_ResumeSendsSDPWithSendRecv(t *testing.T) {
 	dialog := testutil.NewMockDialog()
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	c.Accept()
 	c.Hold()
 	c.Resume()
@@ -505,7 +527,7 @@ func TestCall_ResumeSendsSDPWithSendRecv(t *testing.T) {
 // --- Re-INVITE handling ---
 
 func TestCall_InboundReInviteHold(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	holdSDP := testSDP("192.168.1.200", 5004, "sendonly", 0)
 	c.simulateReInvite(holdSDP)
@@ -513,7 +535,7 @@ func TestCall_InboundReInviteHold(t *testing.T) {
 }
 
 func TestCall_InboundReInviteResume(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	c.simulateReInvite(testSDP("192.168.1.200", 5004, "sendonly", 0))
 	c.simulateReInvite(testSDP("192.168.1.200", 5004, "sendrecv", 0))
@@ -521,7 +543,7 @@ func TestCall_InboundReInviteResume(t *testing.T) {
 }
 
 func TestCall_OnHoldCallbackFires(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	held := make(chan struct{}, 1)
 	c.OnHold(func() { held <- struct{}{} })
@@ -535,7 +557,7 @@ func TestCall_OnHoldCallbackFires(t *testing.T) {
 }
 
 func TestCall_OnResumeCallbackFires(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	resumed := make(chan struct{}, 1)
 	c.OnResume(func() { resumed <- struct{}{} })
@@ -550,7 +572,7 @@ func TestCall_OnResumeCallbackFires(t *testing.T) {
 }
 
 func TestCall_ReInviteCodecChange(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	g722SDP := testSDP("192.168.1.200", 5004, "sendrecv", 9)
 	c.simulateReInvite(g722SDP)
@@ -558,7 +580,7 @@ func TestCall_ReInviteCodecChange(t *testing.T) {
 }
 
 func TestCall_ReInviteOnEndedCallIgnored(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	c.End()
 	holdSDP := testSDP("192.168.1.200", 5004, "sendonly", 0)
@@ -569,7 +591,7 @@ func TestCall_ReInviteOnEndedCallIgnored(t *testing.T) {
 // --- DTMF call-level ---
 
 func TestCall_SendDTMF_ProducesRTPPackets(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	err := c.SendDTMF("5")
@@ -588,18 +610,18 @@ func TestCall_SendDTMF_ProducesRTPPackets(t *testing.T) {
 }
 
 func TestCall_SendDTMF_InvalidDigitReturnsError(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	assert.ErrorIs(t, c.SendDTMF("X"), ErrInvalidDTMFDigit)
 }
 
 func TestCall_SendDTMF_WhenNotActiveReturnsError(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	assert.ErrorIs(t, c.SendDTMF("1"), ErrInvalidState)
 }
 
 func TestCall_OnDTMF_FiresOnInboundPacket(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	got := make(chan string, 1)
@@ -621,7 +643,7 @@ func TestCall_OnDTMF_FiresOnInboundPacket(t *testing.T) {
 }
 
 func TestCall_OnDTMF_NilCallbackNoPanic(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	// No OnDTMF callback registered — should not panic.
@@ -638,7 +660,7 @@ func TestCall_OnDTMF_NilCallbackNoPanic(t *testing.T) {
 
 func TestCall_SessionTimer_SendsRefreshReInvite(t *testing.T) {
 	dialog := testutil.NewMockDialogWithSessionExpires(1)
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	c.Accept()
 
 	// Session timer should fire around 500ms (half of Session-Expires).
@@ -648,7 +670,7 @@ func TestCall_SessionTimer_SendsRefreshReInvite(t *testing.T) {
 
 func TestCall_SessionTimer_NoHeaderNoTimer(t *testing.T) {
 	dialog := testutil.NewMockDialog()
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	c.Accept()
 
 	time.Sleep(100 * time.Millisecond)
@@ -657,7 +679,7 @@ func TestCall_SessionTimer_NoHeaderNoTimer(t *testing.T) {
 
 func TestCall_SessionTimer_CancelledOnEnd(t *testing.T) {
 	dialog := testutil.NewMockDialogWithSessionExpires(1)
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	c.Accept()
 	c.End()
 
@@ -668,44 +690,44 @@ func TestCall_SessionTimer_CancelledOnEnd(t *testing.T) {
 // --- Mute / Unmute state ---
 
 func TestCall_Mute_WhenNotActiveReturnsError(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	assert.ErrorIs(t, c.Mute(), ErrInvalidState)
 }
 
 func TestCall_Unmute_WhenNotActiveReturnsError(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	assert.ErrorIs(t, c.Unmute(), ErrInvalidState)
 }
 
 func TestCall_Mute_WhenAlreadyMutedReturnsError(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	require.NoError(t, c.Mute())
 	assert.ErrorIs(t, c.Mute(), ErrAlreadyMuted)
 }
 
 func TestCall_Unmute_WhenNotMutedReturnsError(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	assert.ErrorIs(t, c.Unmute(), ErrNotMuted)
 }
 
 func TestCall_Mute_WhenOnHoldReturnsError(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	c.Hold()
 	assert.ErrorIs(t, c.Mute(), ErrInvalidState)
 }
 
 func TestCall_Unmute_WhenEndedReturnsError(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	c.End()
 	assert.ErrorIs(t, c.Unmute(), ErrInvalidState)
 }
 
 func TestCall_OnMute_CallbackFires(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 
 	fired := make(chan struct{}, 1)
@@ -721,7 +743,7 @@ func TestCall_OnMute_CallbackFires(t *testing.T) {
 }
 
 func TestCall_OnUnmute_CallbackFires(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 
 	fired := make(chan struct{}, 1)
@@ -743,12 +765,12 @@ func TestCall_RemoteURI_FromDialogHeader(t *testing.T) {
 	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
 		"From": {"<sip:1001@pbx.example.com>"},
 	})
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	assert.Equal(t, "sip:1001@pbx.example.com", c.RemoteURI())
 }
 
 func TestCall_RemoteURI_EmptyWhenNoFromHeader(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	assert.Equal(t, "", c.RemoteURI())
 }
 
@@ -756,7 +778,7 @@ func TestCall_RemoteURI_StripsDisplayName(t *testing.T) {
 	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
 		"From": {"\"Alice\" <sip:alice@example.com>"},
 	})
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	assert.Equal(t, "sip:alice@example.com", c.RemoteURI())
 }
 
@@ -766,7 +788,7 @@ func TestCall_From_ExtractsUserPart(t *testing.T) {
 	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
 		"From": {"\"Alice\" <sip:+15551234567@pbx.example.com>;tag=abc"},
 	})
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	assert.Equal(t, "+15551234567", c.From())
 }
 
@@ -774,12 +796,12 @@ func TestCall_From_Extension(t *testing.T) {
 	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
 		"From": {"<sip:1001@10.200.1.2>"},
 	})
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	assert.Equal(t, "1001", c.From())
 }
 
 func TestCall_From_EmptyWhenNoHeader(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	assert.Equal(t, "", c.From())
 }
 
@@ -787,12 +809,12 @@ func TestCall_To_ExtractsUserPart(t *testing.T) {
 	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
 		"To": {"<sip:1002@pbx.example.com>"},
 	})
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	assert.Equal(t, "1002", c.To())
 }
 
 func TestCall_To_EmptyWhenNoHeader(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	assert.Equal(t, "", c.To())
 }
 
@@ -800,7 +822,7 @@ func TestCall_FromName_QuotedDisplayName(t *testing.T) {
 	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
 		"From": {"\"Alice Smith\" <sip:alice@example.com>"},
 	})
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	assert.Equal(t, "Alice Smith", c.FromName())
 }
 
@@ -808,7 +830,7 @@ func TestCall_FromName_UnquotedDisplayName(t *testing.T) {
 	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
 		"From": {"Alice <sip:alice@example.com>"},
 	})
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	assert.Equal(t, "Alice", c.FromName())
 }
 
@@ -816,39 +838,39 @@ func TestCall_FromName_EmptyWhenNoDisplayName(t *testing.T) {
 	dialog := testutil.NewMockDialogWithHeaders(map[string][]string{
 		"From": {"<sip:1001@pbx.example.com>"},
 	})
-	c := newInboundCall(dialog)
+	c := testInboundCall(t, dialog)
 	assert.Equal(t, "", c.FromName())
 }
 
 func TestCall_FromName_EmptyWhenNoHeader(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	assert.Equal(t, "", c.FromName())
 }
 
 func TestCall_RemoteIP_FromRemoteSDP(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.remoteSDP = testSDP("192.168.1.200", 5004, "sendrecv", 0)
 	assert.Equal(t, "192.168.1.200", c.RemoteIP())
 }
 
 func TestCall_RemoteIP_EmptyBeforeSDP(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	assert.Equal(t, "", c.RemoteIP())
 }
 
 func TestCall_RemotePort_FromRemoteSDP(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.remoteSDP = testSDP("192.168.1.200", 5004, "sendrecv", 0)
 	assert.Equal(t, 5004, c.RemotePort())
 }
 
 func TestCall_RemotePort_ZeroBeforeSDP(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	assert.Equal(t, 0, c.RemotePort())
 }
 
 func TestCall_RemoteMedia_UpdatesAfterReInvite(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	c.remoteSDP = testSDP("192.168.1.100", 5000, "sendrecv", 0)
 	assert.Equal(t, "192.168.1.100", c.RemoteIP())
@@ -862,7 +884,7 @@ func TestCall_RemoteMedia_UpdatesAfterReInvite(t *testing.T) {
 // --- OnState callback ---
 
 func TestCall_OnState_FiresOnAccept(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	states := make(chan CallState, 10)
 	c.OnState(func(s CallState) { states <- s })
 
@@ -877,7 +899,7 @@ func TestCall_OnState_FiresOnAccept(t *testing.T) {
 }
 
 func TestCall_OnState_FiresOnReject(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	states := make(chan CallState, 10)
 	c.OnState(func(s CallState) { states <- s })
 
@@ -892,7 +914,7 @@ func TestCall_OnState_FiresOnReject(t *testing.T) {
 }
 
 func TestCall_OnState_FiresOnEnd(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 
 	states := make(chan CallState, 10)
@@ -909,7 +931,7 @@ func TestCall_OnState_FiresOnEnd(t *testing.T) {
 }
 
 func TestCall_OnState_FiresOnHold(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 
 	states := make(chan CallState, 10)
@@ -926,7 +948,7 @@ func TestCall_OnState_FiresOnHold(t *testing.T) {
 }
 
 func TestCall_OnState_FiresOnResume(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 	c.Hold()
 
@@ -944,7 +966,7 @@ func TestCall_OnState_FiresOnResume(t *testing.T) {
 }
 
 func TestCall_OnState_FiresOnRemoteBye(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 
 	states := make(chan CallState, 10)
@@ -961,7 +983,7 @@ func TestCall_OnState_FiresOnRemoteBye(t *testing.T) {
 }
 
 func TestCall_OnState_FiresOnOutboundRinging(t *testing.T) {
-	c := newOutboundCall(testutil.NewMockDialog())
+	c := testOutboundCall(t, testutil.NewMockDialog())
 	states := make(chan CallState, 10)
 	c.OnState(func(s CallState) { states <- s })
 
@@ -976,7 +998,7 @@ func TestCall_OnState_FiresOnOutboundRinging(t *testing.T) {
 }
 
 func TestCall_OnState_FiresOnOutbound200(t *testing.T) {
-	c := newOutboundCall(testutil.NewMockDialog())
+	c := testOutboundCall(t, testutil.NewMockDialog())
 	states := make(chan CallState, 10)
 	c.OnState(func(s CallState) { states <- s })
 
@@ -991,7 +1013,7 @@ func TestCall_OnState_FiresOnOutbound200(t *testing.T) {
 }
 
 func TestCall_OnState_FiresOnEarlyMedia(t *testing.T) {
-	c := newOutboundCall(testutil.NewMockDialog(), WithEarlyMedia())
+	c := testOutboundCall(t, testutil.NewMockDialog(), WithEarlyMedia())
 	states := make(chan CallState, 10)
 	c.OnState(func(s CallState) { states <- s })
 
@@ -1006,7 +1028,7 @@ func TestCall_OnState_FiresOnEarlyMedia(t *testing.T) {
 }
 
 func TestCall_OnState_DoesNotFireOnMute(t *testing.T) {
-	c := newInboundCall(testutil.NewMockDialog())
+	c := testInboundCall(t)
 	c.Accept()
 
 	states := make(chan CallState, 10)
@@ -1025,7 +1047,7 @@ func TestCall_OnState_DoesNotFireOnMute(t *testing.T) {
 }
 
 func TestCall_OnState_TracksFullLifecycle(t *testing.T) {
-	c := newOutboundCall(testutil.NewMockDialog())
+	c := testOutboundCall(t, testutil.NewMockDialog())
 	states := make(chan CallState, 10)
 	c.OnState(func(s CallState) { states <- s })
 

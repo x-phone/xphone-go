@@ -187,11 +187,13 @@ type call struct {
 	pcmWriter       chan []int16
 	sentRTP         chan *rtp.Packet   // test hook: outbound packets copied here
 	mediaTimerReset chan time.Duration // signals the media goroutine to reset the timeout
+	callbackCh      chan func()        // single dispatch goroutine for all callbacks
+	callbackOnce    sync.Once          // ensures callbackCh is closed exactly once
 	closeChOnce     sync.Once          // ensures output channels are closed exactly once
 }
 
 func newInboundCall(d dialog) *call {
-	return &call{
+	c := &call{
 		id:           newCallID(),
 		dlg:          d,
 		state:        StateRinging,
@@ -203,12 +205,15 @@ func newInboundCall(d dialog) *call {
 		rtpWriter:    make(chan *rtp.Packet, 256),
 		pcmReader:    make(chan []int16, 256),
 		pcmWriter:    make(chan []int16, 256),
+		callbackCh:   make(chan func(), 16),
 	}
+	go c.runCallbackDispatcher()
+	return c
 }
 
 func newOutboundCall(d dialog, dialOpts ...DialOption) *call {
 	opts := applyDialOptions(dialOpts)
-	return &call{
+	c := &call{
 		id:           newCallID(),
 		dlg:          d,
 		state:        StateDialing,
@@ -221,7 +226,10 @@ func newOutboundCall(d dialog, dialOpts ...DialOption) *call {
 		rtpWriter:    make(chan *rtp.Packet, 256),
 		pcmReader:    make(chan []int16, 256),
 		pcmWriter:    make(chan []int16, 256),
+		callbackCh:   make(chan func(), 16),
 	}
+	go c.runCallbackDispatcher()
+	return c
 }
 
 func (c *call) ID() string { return c.id }
@@ -552,16 +560,47 @@ func (c *call) startSessionTimer() {
 	})
 }
 
+// cleanup closes the callback dispatcher if it hasn't been closed yet.
+// Used in tests to prevent goroutine leaks from calls that never reach fireOnEnded.
+func (c *call) cleanup() {
+	c.callbackOnce.Do(func() { close(c.callbackCh) })
+}
+
+// runCallbackDispatcher is the single goroutine that executes all user-facing
+// callbacks for this call. It exits when callbackCh is closed.
+func (c *call) runCallbackDispatcher() {
+	for fn := range c.callbackCh {
+		fn()
+	}
+}
+
+// dispatch enqueues fn on the callback dispatcher goroutine.
+// Falls back to a new goroutine if the channel is full or already closed
+// (race between late callbacks and fireOnEnded).
+func (c *call) dispatch(fn func()) {
+	defer func() {
+		if recover() != nil {
+			go fn()
+		}
+	}()
+	select {
+	case c.callbackCh <- fn:
+	default:
+		go fn()
+	}
+}
+
 // fireOnState dispatches both the phone-level and public OnState callbacks.
-// Must be called with c.mu held. Copies function pointers and fires via goroutines.
+// Must be called with c.mu held. Copies function pointers and dispatches via
+// the callback goroutine.
 func (c *call) fireOnState(state CallState) {
 	if c.onStatePhone != nil {
 		fn := c.onStatePhone
-		go fn(state)
+		c.dispatch(func() { fn(state) })
 	}
 	if c.onStateFn != nil {
 		fn := c.onStateFn
-		go fn(state)
+		c.dispatch(func() { fn(state) })
 	}
 }
 
@@ -600,16 +639,20 @@ func (c *call) fireOnEnded(reason EndReason) {
 	c.dlg.OnNotify(nil)
 	if c.onEndedCleanup != nil {
 		fn := c.onEndedCleanup
-		go fn(reason)
+		c.dispatch(func() { fn(reason) })
 	}
 	if c.onEndedPhone != nil {
 		fn := c.onEndedPhone
-		go fn(reason)
+		c.dispatch(func() { fn(reason) })
 	}
 	if c.onEndedFn != nil {
 		fn := c.onEndedFn
-		go fn(reason)
+		c.dispatch(func() { fn(reason) })
 	}
+	// Close the dispatch channel — the dispatcher goroutine exits after
+	// draining the remaining callbacks. Once-guard prevents double-close if
+	// fireOnEnded is reached from multiple paths.
+	c.callbackOnce.Do(func() { close(c.callbackCh) })
 }
 
 // closeOutputChannels closes the consumer-facing channels exactly once.
@@ -658,7 +701,7 @@ func (c *call) Accept(opts ...AcceptOption) error {
 		c.startRTPReader()
 	}
 	if onMediaFn != nil {
-		go onMediaFn()
+		c.dispatch(onMediaFn)
 	}
 	return nil
 }
@@ -681,6 +724,16 @@ func (c *call) End() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch c.state {
+	case StateRinging:
+		// Inbound call not yet accepted — reject with 487.
+		if err := c.dlg.Respond(487, "Request Terminated", nil); err != nil {
+			c.logger.Error("failed to send 487", "id", c.id, "err", err)
+		}
+		c.state = StateEnded
+		c.fireOnState(StateEnded)
+		c.logger.Info("call ended", "id", c.id, "reason", "cancelled")
+		c.fireOnEnded(EndedByCancelled)
+		return nil
 	case StateDialing, StateRemoteRinging, StateEarlyMedia:
 		if err := c.dlg.SendCancel(); err != nil {
 			c.logger.Error("failed to send CANCEL", "id", c.id, "err", err)
@@ -754,7 +807,7 @@ func (c *call) Mute() error {
 	fn := c.onMuteFn
 	c.mu.Unlock()
 	if fn != nil {
-		go fn()
+		c.dispatch(fn)
 	}
 	return nil
 }
@@ -773,7 +826,7 @@ func (c *call) Unmute() error {
 	fn := c.onUnmuteFn
 	c.mu.Unlock()
 	if fn != nil {
-		go fn()
+		c.dispatch(fn)
 	}
 	return nil
 }
@@ -905,7 +958,7 @@ func (c *call) simulateResponse(code int, reason string) {
 				c.fireOnState(StateEarlyMedia)
 				if c.onMediaFn != nil {
 					fn := c.onMediaFn
-					go fn()
+					c.dispatch(fn)
 				}
 			}
 		}
@@ -918,7 +971,7 @@ func (c *call) simulateResponse(code int, reason string) {
 			c.fireOnState(StateActive)
 			if c.onMediaFn != nil {
 				fn := c.onMediaFn
-				go fn()
+				c.dispatch(fn)
 			}
 		}
 	}
@@ -930,6 +983,18 @@ func (c *call) simulateBye() {
 	c.state = StateEnded
 	c.fireOnState(StateEnded)
 	c.fireOnEnded(EndedByRemote)
+}
+
+func (c *call) simulateCancel() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state != StateRinging {
+		return
+	}
+	c.state = StateEnded
+	c.fireOnState(StateEnded)
+	c.logger.Info("call ended", "id", c.id, "reason", "cancelled")
+	c.fireOnEnded(EndedByCancelled)
 }
 
 func (c *call) simulateReInvite(rawSDP string) {
@@ -968,10 +1033,10 @@ func (c *call) simulateReInvite(rawSDP string) {
 	c.mu.Unlock()
 
 	if holdFn != nil {
-		go holdFn()
+		c.dispatch(holdFn)
 	}
 	if resumeFn != nil {
-		go resumeFn()
+		c.dispatch(resumeFn)
 	}
 }
 

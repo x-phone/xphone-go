@@ -74,6 +74,10 @@ type sipUA struct {
 	// The phone uses this to transition the call to StateEnded.
 	onDialogBye func(callID string)
 
+	// onDialogCancel is called when an inbound CANCEL is received for a ringing call.
+	// The phone uses this to transition the call to StateEnded.
+	onDialogCancel func(callID string)
+
 	// onDialogNotify is called when an inbound NOTIFY is received (REFER progress).
 	// The phone uses this to fire the dialog's OnNotify callback.
 	onDialogNotify func(callID string, code int)
@@ -347,6 +351,17 @@ func (s *sipUA) startServer() {
 		// Respond 200 OK to the CANCEL request.
 		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
 		tx.Respond(res)
+
+		var callID string
+		if h := req.CallID(); h != nil {
+			callID = h.Value()
+		}
+		s.mu.Lock()
+		fn := s.onDialogCancel
+		s.mu.Unlock()
+		if fn != nil && callID != "" {
+			go fn(callID)
+		}
 	})
 
 	s.server.OnOptions(func(req *sip.Request, tx sip.ServerTransaction) {

@@ -13,8 +13,10 @@ import (
 
 // activeCall creates an inbound call in StateActive with media pipeline ready.
 // sentRTP is initialized so tests can observe outbound packets.
-func activeCall() *call {
+func activeCall(t *testing.T) *call {
+	t.Helper()
 	c := newInboundCall(testutil.NewMockDialog())
+	t.Cleanup(c.cleanup)
 	c.sentRTP = make(chan *rtp.Packet, 256)
 	c.Accept()
 	c.startMedia()
@@ -22,8 +24,10 @@ func activeCall() *call {
 }
 
 // activeCallWithCodec creates an active call configured for a specific codec.
-func activeCallWithCodec(codec Codec) *call {
+func activeCallWithCodec(t *testing.T, codec Codec) *call {
+	t.Helper()
 	c := newInboundCall(testutil.NewMockDialog())
+	t.Cleanup(c.cleanup)
 	c.sentRTP = make(chan *rtp.Packet, 256)
 	c.codec = codec
 	c.Accept()
@@ -34,7 +38,7 @@ func activeCallWithCodec(codec Codec) *call {
 // --- RTP pipeline tests ---
 
 func TestMediaPipeline_RTPRawReaderPreJitter(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	// Inject packets in wire order: seq 1, 3, 2.
@@ -54,7 +58,7 @@ func TestMediaPipeline_RTPRawReaderPreJitter(t *testing.T) {
 }
 
 func TestMediaPipeline_RTPReaderPostJitter(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	// Inject out-of-order packets.
@@ -74,7 +78,7 @@ func TestMediaPipeline_RTPReaderPostJitter(t *testing.T) {
 }
 
 func TestMediaPipeline_TapIndependence(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	// Inject a single packet (PCMU payload so PCMReader also gets decoded audio).
@@ -106,7 +110,7 @@ func TestMediaPipeline_TapIndependence(t *testing.T) {
 }
 
 func TestMediaPipeline_OutboundMutex(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	// Write an RTP packet and wait for it to be forwarded, ensuring
@@ -139,7 +143,7 @@ func TestMediaPipeline_OutboundMutex(t *testing.T) {
 }
 
 func TestMediaPipeline_RTPWriterPassthrough(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	// Write a packet with intentionally wrong timestamps — library must
@@ -170,6 +174,7 @@ func TestMediaPipeline_RTPWriterPassthrough(t *testing.T) {
 func TestMediaPipeline_PCMWriterOverflow(t *testing.T) {
 	// Test raw channel overflow behavior without the media goroutine racing.
 	c := newInboundCall(testutil.NewMockDialog())
+	t.Cleanup(c.cleanup)
 	// Don't start media — test channel overflow in isolation.
 
 	// Write 300 distinguishable frames into PCMWriter (buffered 256).
@@ -203,7 +208,7 @@ func TestMediaPipeline_PCMWriterOverflow(t *testing.T) {
 }
 
 func TestMediaPipeline_ChannelOverflow(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	// Saturate RTPRawReader channel (buffered 256).
@@ -232,6 +237,7 @@ func TestMediaPipeline_ChannelOverflow(t *testing.T) {
 
 func TestMediaPipeline_MediaTimeout(t *testing.T) {
 	c := newInboundCall(testutil.NewMockDialog())
+	t.Cleanup(c.cleanup)
 	c.mediaTimeout = 50 * time.Millisecond // short timeout for test
 	ended := make(chan EndReason, 1)
 	c.OnEnded(func(r EndReason) { ended <- r })
@@ -250,6 +256,7 @@ func TestMediaPipeline_MediaTimeout(t *testing.T) {
 
 func TestMediaPipeline_MediaTimeoutSuspendedOnHold(t *testing.T) {
 	c := newInboundCall(testutil.NewMockDialog())
+	t.Cleanup(c.cleanup)
 	c.mediaTimeout = 50 * time.Millisecond
 	ended := make(chan EndReason, 1)
 	c.OnEnded(func(r EndReason) { ended <- r })
@@ -283,7 +290,7 @@ func TestMediaPipeline_MediaTimeoutSuspendedOnHold(t *testing.T) {
 // --- Codec dispatch integration tests ---
 
 func TestMediaPipeline_CodecDispatch_PCMU(t *testing.T) {
-	c := activeCall() // default codec is PCMU
+	c := activeCall(t) // default codec is PCMU
 	defer c.stopMedia()
 
 	// Inject mu-law payload (0xFF = silence).
@@ -310,7 +317,7 @@ func TestMediaPipeline_CodecDispatch_PCMU(t *testing.T) {
 }
 
 func TestMediaPipeline_CodecDispatch_PCMA(t *testing.T) {
-	c := activeCallWithCodec(CodecPCMA)
+	c := activeCallWithCodec(t, CodecPCMA)
 	defer c.stopMedia()
 
 	// Inject A-law payload (0xD5 = A-law silence).
@@ -338,7 +345,7 @@ func TestMediaPipeline_CodecDispatch_PCMA(t *testing.T) {
 }
 
 func TestMediaPipeline_PCMWriterEncode(t *testing.T) {
-	c := activeCall() // PCMU
+	c := activeCall(t) // PCMU
 	defer c.stopMedia()
 
 	// Write a PCM frame → should appear on sentRTP as mu-law encoded.
@@ -364,7 +371,7 @@ func TestMediaPipeline_PCMWriterEncode(t *testing.T) {
 }
 
 func TestMediaPipeline_PCMWriterSeqAndTimestamp(t *testing.T) {
-	c := activeCall() // PCMU
+	c := activeCall(t) // PCMU
 	defer c.stopMedia()
 
 	// Write two frames.
@@ -394,7 +401,7 @@ func TestMediaPipeline_PCMWriterSeqAndTimestamp(t *testing.T) {
 }
 
 func TestMediaPipeline_PCMWriterPayloadType_PCMA(t *testing.T) {
-	c := activeCallWithCodec(CodecPCMA)
+	c := activeCallWithCodec(t, CodecPCMA)
 	defer c.stopMedia()
 
 	frame := make([]int16, 160)
@@ -437,7 +444,7 @@ func drainPackets(ch <-chan *rtp.Packet) []*rtp.Packet {
 // --- Mute / Unmute media tests ---
 
 func TestCall_Mute_SuppressesOutboundPCM(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	require.NoError(t, c.Mute())
@@ -457,7 +464,7 @@ func TestCall_Mute_SuppressesOutboundPCM(t *testing.T) {
 }
 
 func TestCall_Mute_SuppressesOutboundRTPWriter(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	require.NoError(t, c.Mute())
@@ -474,7 +481,7 @@ func TestCall_Mute_SuppressesOutboundRTPWriter(t *testing.T) {
 }
 
 func TestCall_Unmute_RestoresOutboundPCM(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	require.NoError(t, c.Mute())
@@ -493,7 +500,7 @@ func TestCall_Unmute_RestoresOutboundPCM(t *testing.T) {
 }
 
 func TestCall_Unmute_RestoresOutboundRTPWriter(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	require.NoError(t, c.Mute())
@@ -511,7 +518,7 @@ func TestCall_Unmute_RestoresOutboundRTPWriter(t *testing.T) {
 }
 
 func TestCall_Mute_InboundStillFlows(t *testing.T) {
-	c := activeCall()
+	c := activeCall(t)
 	defer c.stopMedia()
 
 	require.NoError(t, c.Mute())

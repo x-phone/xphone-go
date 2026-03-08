@@ -2,11 +2,14 @@ package xphone
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/emiago/sipgo/sip"
 	"github.com/pion/rtp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,10 +40,10 @@ func pbxConfig(t *testing.T, pbx *fakepbx.FakePBX) Config {
 	}
 }
 
-// connectPBX creates a Phone connected and registered to the given FakePBX.
-func connectPBX(t *testing.T, pbx *fakepbx.FakePBX) Phone {
+// connectWithConfig creates a Phone, connects it, waits for registration, and
+// registers a cleanup. Shared by connectPBX and connectPBXNoAuth.
+func connectWithConfig(t *testing.T, cfg Config) Phone {
 	t.Helper()
-	cfg := pbxConfig(t, pbx)
 	p := newPhone(cfg)
 
 	registered := make(chan struct{}, 1)
@@ -65,6 +68,22 @@ func connectPBX(t *testing.T, pbx *fakepbx.FakePBX) Phone {
 
 	t.Cleanup(func() { p.Disconnect() })
 	return p
+}
+
+// connectPBX creates a Phone connected and registered to the given FakePBX.
+func connectPBX(t *testing.T, pbx *fakepbx.FakePBX) Phone {
+	t.Helper()
+	return connectWithConfig(t, pbxConfig(t, pbx))
+}
+
+// connectPBXNoAuth creates a Phone connected and registered to a FakePBX that
+// has no auth configured. Used by redirect tests to avoid auth-related INVITE
+// retries interfering with redirect counting.
+func connectPBXNoAuth(t *testing.T, pbx *fakepbx.FakePBX) Phone {
+	t.Helper()
+	cfg := pbxConfig(t, pbx)
+	cfg.Password = ""
+	return connectWithConfig(t, cfg)
 }
 
 // bindRTP allocates a UDP socket on loopback for use as the PBX's RTP endpoint.
@@ -418,5 +437,113 @@ func TestFakePBX_Provisionals(t *testing.T) {
 	// At this point the call should be Active.
 	c.OnState(func(s CallState) { states <- s })
 	assert.Equal(t, StateActive, c.State())
+	c.End()
+}
+
+// --- 302 Redirect Tests ---
+
+// F12: Dial target returns 302, xphone follows redirect to new target.
+func TestFakePBX_Dial302Redirect(t *testing.T) {
+	pbx := fakepbx.NewFakePBX(t)
+	_, rtpPort := bindRTP(t)
+
+	var inviteCount atomic.Int32
+	pbxAddr := pbx.Addr() // includes host:port
+	pbx.OnInvite(func(inv *fakepbx.Invite) {
+		n := inviteCount.Add(1)
+		if n == 1 {
+			// First INVITE → 302 redirect to different target.
+			inv.Respond(302, "Moved Temporarily",
+				sip.NewHeader("Contact", fmt.Sprintf("<sip:redirected@%s>", pbxAddr)))
+			return
+		}
+		// Second INVITE (after redirect) → answer.
+		inv.Trying()
+		inv.Ringing()
+		inv.Answer(fakepbx.SDP("127.0.0.1", rtpPort, fakepbx.PCMU))
+	})
+
+	p := connectPBXNoAuth(t, pbx)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, err := p.Dial(ctx, "9999")
+	require.NoError(t, err)
+	assert.Equal(t, StateActive, c.State())
+	assert.Equal(t, int32(2), inviteCount.Load(), "expected 2 INVITEs (original + redirect)")
+
+	c.End()
+}
+
+// F13: 302 redirect with no Contact header returns error.
+func TestFakePBX_Dial302NoContact(t *testing.T) {
+	pbx := fakepbx.NewFakePBX(t)
+
+	pbx.OnInvite(func(inv *fakepbx.Invite) {
+		// 302 with no Contact header.
+		inv.Respond(302, "Moved Temporarily")
+	})
+
+	p := connectPBXNoAuth(t, pbx)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := p.Dial(ctx, "9999")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no Contact")
+}
+
+// F14: Too many 302 redirects returns error.
+func TestFakePBX_Dial302TooManyRedirects(t *testing.T) {
+	pbx := fakepbx.NewFakePBX(t)
+
+	pbxAddr := pbx.Addr()
+	pbx.OnInvite(func(inv *fakepbx.Invite) {
+		// Always redirect — should hit the max limit.
+		inv.Respond(302, "Moved Temporarily",
+			sip.NewHeader("Contact", fmt.Sprintf("<sip:loop@%s>", pbxAddr)))
+	})
+
+	p := connectPBXNoAuth(t, pbx)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := p.Dial(ctx, "9999")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too many redirects")
+}
+
+// F15: 100 Trying then 302 redirect — redirect after provisional.
+func TestFakePBX_Dial302AfterProvisional(t *testing.T) {
+	pbx := fakepbx.NewFakePBX(t)
+	_, rtpPort := bindRTP(t)
+
+	var inviteCount atomic.Int32
+	pbxAddr := pbx.Addr()
+	pbx.OnInvite(func(inv *fakepbx.Invite) {
+		n := inviteCount.Add(1)
+		if n == 1 {
+			inv.Trying()
+			inv.Respond(302, "Moved Temporarily",
+				sip.NewHeader("Contact", fmt.Sprintf("<sip:target2@%s>", pbxAddr)))
+			return
+		}
+		inv.Trying()
+		inv.Ringing()
+		inv.Answer(fakepbx.SDP("127.0.0.1", rtpPort, fakepbx.PCMU))
+	})
+
+	p := connectPBXNoAuth(t, pbx)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, err := p.Dial(ctx, "9999")
+	require.NoError(t, err)
+	assert.Equal(t, StateActive, c.State())
+
 	c.End()
 }

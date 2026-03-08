@@ -2,6 +2,7 @@ package xphone
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -30,8 +31,19 @@ func parseSIPTarget(target, defaultHost string, defaultPort int) sip.Uri {
 		port := defaultPort
 		if at := strings.Index(rest, "@"); at >= 0 {
 			user = rest[:at]
-			host = rest[at+1:]
-			port = 0 // let sipgo resolve from the host part
+			hostPart := rest[at+1:]
+			// Strip URI parameters (;transport=udp, etc.)
+			if semi := strings.Index(hostPart, ";"); semi >= 0 {
+				hostPart = hostPart[:semi]
+			}
+			// Parse host:port if present.
+			if h, p, err := net.SplitHostPort(hostPart); err == nil {
+				host = h
+				port, _ = strconv.Atoi(p)
+			} else {
+				host = hostPart
+				port = 0 // let sipgo resolve via SRV/default
+			}
 		}
 		return sip.Uri{Scheme: scheme, User: user, Host: host, Port: port}
 	}
@@ -123,20 +135,43 @@ func newSipUA(cfg Config, contactIP string) (*sipUA, error) {
 	}, nil
 }
 
+// maxRedirects is the maximum number of 3xx redirect hops before giving up.
+const maxRedirects = 3
+
 // dial establishes an outbound SIP dialog using sipgo's dialog API.
 // It sends INVITE with SDP, waits for the answer (handling provisionals via
-// onResponse), sends ACK, and returns a sipgoDialogUAC.
+// onResponse and 3xx redirects), sends ACK, and returns a sipgoDialogUAC.
 //
 // target may be a full SIP URI ("sip:1002@pbx.example.com") or just the
 // user part ("1002"), in which case the configured Host and Port are used.
 func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code int, reason string)) (dialog, error) {
+	currentTarget := target
+	for redirects := 0; ; redirects++ {
+		dlg, redirectURI, err := s.dialOnce(ctx, currentTarget, onResponse)
+		if err != nil {
+			return nil, err
+		}
+		if redirectURI == "" {
+			return dlg, nil
+		}
+		// 3xx redirect — retry with the new target.
+		if redirects+1 > maxRedirects {
+			return nil, fmt.Errorf("xphone: too many redirects (max %d)", maxRedirects)
+		}
+		currentTarget = redirectURI
+	}
+}
+
+// dialOnce sends a single INVITE attempt. Returns (dialog, "", nil) on success,
+// or (nil, redirectURI, nil) on 3xx redirect.
+func (s *sipUA) dialOnce(ctx context.Context, target string, onResponse func(code int, reason string)) (dialog, string, error) {
 	recipient := parseSIPTarget(target, s.cfg.Host, s.cfg.Port)
 
 	// Build SDP offer with cached local IP and an allocated RTP port.
 	ip := s.localIP
 	rtpConn, err := listenRTPPort(s.cfg.RTPPortMin, s.cfg.RTPPortMax)
 	if err != nil {
-		return nil, fmt.Errorf("xphone: allocate RTP port: %w", err)
+		return nil, "", fmt.Errorf("xphone: allocate RTP port: %w", err)
 	}
 	rtpPort := rtpConn.LocalAddr().(*net.UDPAddr).Port
 	codecPT := codecPrefsToInts(s.cfg.CodecPrefs)
@@ -149,7 +184,7 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 		key, err := srtp.GenerateKeyingMaterial()
 		if err != nil {
 			rtpConn.Close()
-			return nil, fmt.Errorf("xphone: generate SRTP key: %w", err)
+			return nil, "", fmt.Errorf("xphone: generate SRTP key: %w", err)
 		}
 		srtpLocalKey = key
 		sdpOffer = sdp.BuildOfferSRTP(ip, rtpPort, codecPT, sdp.DirSendRecv, key)
@@ -164,7 +199,7 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 	sess, err := s.dc.Invite(ctx, recipient, []byte(sdpOffer), contentType)
 	if err != nil {
 		rtpConn.Close()
-		return nil, fmt.Errorf("xphone: invite: %w", err)
+		return nil, "", fmt.Errorf("xphone: invite: %w", err)
 	}
 
 	// Ensure cleanup on any error after Invite succeeds.
@@ -191,12 +226,25 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 		Password: s.cfg.Password,
 	})
 	if err != nil {
-		return nil, err
+		// Check for 3xx redirect.
+		var errResp *sipgo.ErrDialogResponse
+		if errors.As(err, &errResp) && errResp.Res.StatusCode >= 300 && errResp.Res.StatusCode < 400 {
+			contact := errResp.Res.Contact()
+			if contact == nil {
+				return nil, "", fmt.Errorf("xphone: %d redirect with no Contact header", errResp.Res.StatusCode)
+			}
+			newTarget := contact.Address.String()
+			if newTarget == "" {
+				return nil, "", fmt.Errorf("xphone: %d redirect with empty Contact URI", errResp.Res.StatusCode)
+			}
+			return nil, newTarget, nil
+		}
+		return nil, "", err
 	}
 
 	// ACK the 200 OK.
 	if err := sess.Ack(ctx); err != nil {
-		return nil, fmt.Errorf("xphone: ack: %w", err)
+		return nil, "", fmt.Errorf("xphone: ack: %w", err)
 	}
 
 	ok = true
@@ -209,7 +257,7 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 		cancelFn:     waitCancel,
 		rtpConn:      rtpConn,
 		srtpLocalKey: srtpLocalKey,
-	}, nil
+	}, "", nil
 }
 
 // startServer registers sipgo server handlers for inbound SIP requests.

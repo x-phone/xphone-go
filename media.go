@@ -163,6 +163,12 @@ func (c *call) startMedia() {
 	jb := media.NewJitterBuffer(jitterDepth)
 	cp := media.NewCodecProcessor(int(codec), pcmRate)
 
+	// Use codec RTP clock rate for RTCP jitter calculation (e.g. 48kHz for Opus).
+	rtpClockRate := uint32(pcmRate)
+	if cp != nil {
+		rtpClockRate = cp.ClockRate()
+	}
+
 	c.logger.Debug("media pipeline started",
 		"id", c.id, "codec", int(codec), "pcm_rate", pcmRate,
 		"jitter_depth", jitterDepth, "media_timeout", timeout,
@@ -262,7 +268,7 @@ func (c *call) startMedia() {
 					continue
 				}
 
-				rtcpStats.RecordRTPReceived(pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC, uint32(pcmRate))
+				rtcpStats.RecordRTPReceived(pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC, rtpClockRate)
 				jb.Push(pkt)
 				resetTimer()
 				c.drainJB(jb, cp)

@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/x-phone/xphone-go/internal/sdp"
+	"github.com/x-phone/xphone-go/internal/stun"
 )
 
 // Phone is the public interface for the xphone library.
@@ -184,9 +185,24 @@ func (p *phone) Connect(ctx context.Context) error {
 		return ErrAlreadyConnected
 	}
 	p.state = PhoneStateRegistering
+
+	// STUN discovery: if configured, try to discover our NAT-mapped IP.
+	// On success, override the localIP used for Contact headers and SDP.
+	// On failure, log a warning and keep the existing localIPFor() result.
+	if p.cfg.StunServer != "" {
+		ip, _, err := stun.MappedAddr(p.cfg.StunServer, stun.DefaultTimeout)
+		if err != nil {
+			p.logger.Warn("STUN discovery failed, using local IP", "err", err, "fallback", p.localIP)
+		} else {
+			p.logger.Info("STUN mapped address discovered", "ip", ip)
+			p.localIP = ip
+		}
+	}
+
+	contactIP := p.localIP
 	p.mu.Unlock()
 
-	tr, err := newSipUA(p.cfg)
+	tr, err := newSipUA(p.cfg, contactIP)
 	if err != nil {
 		p.mu.Lock()
 		p.state = PhoneStateDisconnected

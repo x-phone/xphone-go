@@ -21,6 +21,8 @@ type Config struct {
 
 	NATKeepaliveInterval time.Duration
 
+	StunServer string
+
 	RTPPortMin   int
 	RTPPortMax   int
 	CodecPrefs   []Codec
@@ -191,6 +193,16 @@ func WithMediaTimeout(d time.Duration) PhoneOption {
 func WithNATKeepalive(d time.Duration) PhoneOption {
 	return func(c *Config) {
 		c.NATKeepaliveInterval = d
+	}
+}
+
+// WithStunServer sets the STUN server for NAT-mapped address discovery.
+// Format: "host:port" (e.g. "stun.l.google.com:19302").
+// When set, the phone queries the STUN server during Connect() to discover
+// its public IP, which is then used in SIP Contact headers and SDP.
+func WithStunServer(server string) PhoneOption {
+	return func(c *Config) {
+		c.StunServer = server
 	}
 }
 

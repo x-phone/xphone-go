@@ -67,7 +67,9 @@ type sipUA struct {
 }
 
 // newSipUA creates a sipgo-backed SIP transport.
-func newSipUA(cfg Config) (*sipUA, error) {
+// contactIP is the IP to advertise in SIP Contact headers and Via.
+// Typically this is the result of STUN discovery or localIPFor().
+func newSipUA(cfg Config, contactIP string) (*sipUA, error) {
 	if cfg.Host == "" {
 		return nil, ErrHostRequired
 	}
@@ -90,7 +92,6 @@ func newSipUA(cfg Config) (*sipUA, error) {
 		return nil, fmt.Errorf("xphone: create UA: %w", err)
 	}
 
-	contactIP := localIPFor(cfg.Host)
 	client, err := sipgo.NewClient(ua, sipgo.WithClientHostname(contactIP))
 	if err != nil {
 		ua.Close()

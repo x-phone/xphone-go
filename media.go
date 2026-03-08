@@ -3,10 +3,13 @@ package xphone
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"net"
+	"strconv"
 	"time"
 
 	"github.com/pion/rtp"
 	"github.com/x-phone/xphone-go/internal/media"
+	"github.com/x-phone/xphone-go/internal/rtcp"
 )
 
 // Default media configuration values.
@@ -137,6 +140,24 @@ func (c *call) startMedia() {
 	c.mediaActive = true
 	done := c.mediaDone
 	conn := c.rtpConn
+
+	// Bind RTCP socket (RTP port + 1). Non-fatal if it fails.
+	if conn != nil && c.rtcpConn == nil {
+		rtpLocal := conn.LocalAddr().(*net.UDPAddr)
+		rtcpAddr := net.JoinHostPort(rtpLocal.IP.String(), strconv.Itoa(rtpLocal.Port+1))
+		if rc, err := net.ListenPacket("udp", rtcpAddr); err == nil {
+			c.rtcpConn = rc
+		} else {
+			c.logger.Warn("RTCP port bind failed, RTCP disabled", "rtcp_addr", rtcpAddr, "error", err)
+		}
+	}
+	rtcpConn := c.rtcpConn
+
+	// Compute remote RTCP address (remote RTP port + 1).
+	var rtcpRemoteAddr net.Addr
+	if c.remotePort > 0 && c.remoteIP != "" {
+		rtcpRemoteAddr, _ = net.ResolveUDPAddr("udp", net.JoinHostPort(c.remoteIP, strconv.Itoa(c.remotePort+1)))
+	}
 	c.mu.Unlock()
 
 	jb := media.NewJitterBuffer(jitterDepth)
@@ -156,6 +177,29 @@ func (c *call) startMedia() {
 	var lastDTMFTimestamp uint32 // dedup RFC 4733 redundant end events
 	var lastDTMFSeen bool
 
+	// Start RTCP reader goroutine if we have an RTCP socket.
+	rtcpInbound := make(chan []byte, 16)
+	if rtcpConn != nil {
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				n, _, err := rtcpConn.ReadFrom(buf)
+				if err != nil {
+					return // socket closed
+				}
+				if n < 8 {
+					continue
+				}
+				cp := make([]byte, n)
+				copy(cp, buf[:n])
+				select {
+				case rtcpInbound <- cp:
+				default: // drop if full
+				}
+			}
+		}()
+	}
+
 	go func() {
 		mediaTimer := time.NewTimer(timeout)
 		defer mediaTimer.Stop()
@@ -163,6 +207,16 @@ func (c *call) startMedia() {
 		defer jitterTick.Stop()
 		// Close output channels so consumers unblock on call end.
 		defer c.closeOutputChannels()
+
+		// RTCP state.
+		rtcpStats := rtcp.NewStats()
+		var rtcpTick <-chan time.Time
+		var rtcpTicker *time.Ticker
+		if rtcpConn != nil {
+			rtcpTicker = time.NewTicker(time.Duration(rtcp.IntervalSecs) * time.Second)
+			rtcpTick = rtcpTicker.C
+			defer rtcpTicker.Stop()
+		}
 
 		resetTimer := func() {
 			if !mediaTimer.Stop() {
@@ -208,6 +262,7 @@ func (c *call) startMedia() {
 					continue
 				}
 
+				rtcpStats.RecordRTPReceived(pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC, uint32(pcmRate))
 				jb.Push(pkt)
 				resetTimer()
 				c.drainJB(jb, cp)
@@ -227,6 +282,7 @@ func (c *call) startMedia() {
 				if muted {
 					continue
 				}
+				rtcpStats.RecordRTPSent(len(pkt.Payload), pkt.Timestamp)
 				if c.sentRTP != nil {
 					sendDropOldest(c.sentRTP, pkt)
 				}
@@ -266,6 +322,7 @@ func (c *call) startMedia() {
 				}
 				outSeq++
 				outTimestamp += cp.SamplesPerFrame()
+				rtcpStats.RecordRTPSent(len(outPkt.Payload), outPkt.Timestamp)
 				if c.sentRTP != nil {
 					sendDropOldest(c.sentRTP, outPkt)
 				}
@@ -279,6 +336,17 @@ func (c *call) startMedia() {
 						}
 						conn.WriteTo(data, dst)
 					}
+				}
+
+			case <-rtcpTick:
+				if rtcpConn != nil && rtcpRemoteAddr != nil {
+					sr := rtcp.BuildSR(outSSRC, rtcpStats)
+					rtcpConn.WriteTo(sr, rtcpRemoteAddr)
+				}
+
+			case data := <-rtcpInbound:
+				if pkt := rtcp.Parse(data); pkt != nil && pkt.IsSenderReport() {
+					rtcpStats.ProcessIncomingSR(pkt.NTPSec, pkt.NTPFrac)
 				}
 
 			case <-mediaTimer.C:

@@ -162,6 +162,7 @@ type call struct {
 	rtpPortMin  int            // minimum RTP port (0 = OS-assigned)
 	rtpPortMax  int            // maximum RTP port (0 = OS-assigned)
 	rtpConn     net.PacketConn // bound UDP socket to keep port reserved
+	rtcpConn    net.PacketConn // RTCP socket (RTP port + 1), nil if bind fails
 	remoteAddr  net.Addr       // remote RTP endpoint (from remote SDP)
 	remoteIP    string         // cached remote IP (from remote SDP)
 	remotePort  int            // cached remote port (from remote SDP)
@@ -580,7 +581,11 @@ func (c *call) fireOnEnded(reason EndReason) {
 		}
 		c.mediaActive = false
 	}
-	// Close RTP socket (also stops the RTP reader goroutine).
+	// Close RTP and RTCP sockets (also stops the RTP reader goroutine).
+	if c.rtcpConn != nil {
+		c.rtcpConn.Close()
+		c.rtcpConn = nil
+	}
 	if c.rtpConn != nil {
 		c.rtpConn.Close()
 		c.rtpConn = nil

@@ -239,6 +239,133 @@ func TestEmptyPayload(t *testing.T) {
 	assert.Equal(t, original, decrypted)
 }
 
+// --- Replay window unit tests ---
+
+func TestReplayWindowRejectsDuplicate(t *testing.T) {
+	var w replayWindow
+	assert.False(t, w.isReplay(100))
+	w.accept(100)
+	assert.True(t, w.isReplay(100)) // exact duplicate
+}
+
+func TestReplayWindowAcceptsNewPackets(t *testing.T) {
+	var w replayWindow
+	for i := uint64(0); i < 200; i++ {
+		assert.False(t, w.isReplay(i))
+		w.accept(i)
+	}
+}
+
+func TestReplayWindowRejectsOldPackets(t *testing.T) {
+	var w replayWindow
+	w.accept(200)
+	assert.True(t, w.isReplay(200-replayWindowSize)) // just outside window
+	assert.True(t, w.isReplay(0))                    // way too old
+}
+
+func TestReplayWindowAcceptsOutOfOrderWithinWindow(t *testing.T) {
+	var w replayWindow
+	for i := uint64(0); i <= 50; i++ {
+		w.accept(i)
+	}
+	// Jump ahead.
+	w.accept(100)
+	// Packets 51..99 are within window and not yet seen.
+	for i := uint64(51); i < 100; i++ {
+		assert.False(t, w.isReplay(i), "packet %d should not be a replay", i)
+		w.accept(i)
+	}
+	// All should now be replays.
+	for i := uint64(0); i <= 100; i++ {
+		assert.True(t, w.isReplay(i), "packet %d should be a replay", i)
+	}
+}
+
+func TestReplayWindowBoundary(t *testing.T) {
+	var w replayWindow
+	w.accept(replayWindowSize)     // top = 128
+	assert.False(t, w.isReplay(1)) // delta=127, within window
+	assert.True(t, w.isReplay(0))  // delta=128, too old
+}
+
+func TestReplayWindowLargeJump(t *testing.T) {
+	var w replayWindow
+	w.accept(0)
+	w.accept(1000)
+	assert.True(t, w.isReplay(1000))  // duplicate
+	assert.True(t, w.isReplay(0))     // way behind window
+	assert.False(t, w.isReplay(999))  // within window, not yet seen
+	assert.False(t, w.isReplay(1001)) // ahead of top
+}
+
+// --- SRTP replay integration tests ---
+
+func TestSRTPReplayDetected(t *testing.T) {
+	sender, receiver := testContext()
+
+	rtp := makeTestRTP(1, 160, 0x12345678, []byte("audio"))
+	protected, err := sender.Protect(rtp)
+	require.NoError(t, err)
+
+	// First unprotect succeeds.
+	_, err = receiver.Unprotect(protected)
+	require.NoError(t, err)
+
+	// Replay of the same packet is rejected.
+	_, err = receiver.Unprotect(protected)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "replay")
+}
+
+func TestSRTPOutOfOrderWithinWindowOK(t *testing.T) {
+	sender, receiver := testContext()
+
+	// Protect packets 1..=5.
+	protected := make([][]byte, 5)
+	for i := 0; i < 5; i++ {
+		seq := uint16(i + 1)
+		rtp := makeTestRTP(seq, uint32(seq)*160, 0xAABBCCDD, []byte{byte(seq)})
+		p, err := sender.Protect(rtp)
+		require.NoError(t, err)
+		protected[i] = p
+	}
+
+	// Receive out of order: 5, 3, 1, 2, 4.
+	for _, idx := range []int{4, 2, 0, 1, 3} {
+		_, err := receiver.Unprotect(protected[idx])
+		assert.NoError(t, err, "seq %d should succeed", idx+1)
+	}
+
+	// All should now be replays.
+	for i, pkt := range protected {
+		_, err := receiver.Unprotect(pkt)
+		assert.Error(t, err, "seq %d should be rejected as replay", i+1)
+	}
+}
+
+func TestSRTPOldPacketRejected(t *testing.T) {
+	sender, receiver := testContext()
+
+	// Protect and save packet with seq=1.
+	oldRTP := makeTestRTP(1, 160, 0x12345678, []byte("old"))
+	oldProtected, err := sender.Protect(oldRTP)
+	require.NoError(t, err)
+
+	// Send 200 more packets to push seq=1 out of the window.
+	for seq := uint16(2); seq < 202; seq++ {
+		rtp := makeTestRTP(seq, uint32(seq)*160, 0x12345678, []byte{byte(seq)})
+		p, err := sender.Protect(rtp)
+		require.NoError(t, err)
+		_, err = receiver.Unprotect(p)
+		require.NoError(t, err)
+	}
+
+	// Old packet (seq=1) is now behind the window.
+	_, err = receiver.Unprotect(oldProtected)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "replay")
+}
+
 func TestDeriveSessionKeyDeterministic(t *testing.T) {
 	var key [16]byte
 	var salt [14]byte

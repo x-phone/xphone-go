@@ -35,3 +35,24 @@ jobs:
         run: |
           gofmt -s -l . | tee /tmp/gofmt.out
           test ! -s /tmp/gofmt.out
+
+  test-opus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install libopus
+        run: sudo apt-get install -y libopus-dev libopusfile-dev
+
+      - name: Build with Opus
+        run: go build -tags opus ./...
+
+      - name: Test with Opus
+        run: go test -tags opus ./... -count=1
+
+      - name: Race detector with Opus
+        run: go test -tags opus -race ./... -count=1

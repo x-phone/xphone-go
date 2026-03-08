@@ -218,6 +218,9 @@ func buildSDP(ip string, port int, codecs []int, direction, profile, cryptoInlin
 			if c == 101 {
 				b.WriteString("a=fmtp:101 0-16\r\n")
 			}
+			if c == 111 {
+				b.WriteString("a=fmtp:111 minptime=20;useinbandfec=0\r\n")
+			}
 		}
 	}
 	if cryptoInlineKey != "" {

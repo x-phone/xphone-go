@@ -1,0 +1,259 @@
+package srtp
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/binary"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// makeTestRTP builds a minimal RTP packet (V=2, PT=0, no CSRC, no extension).
+func makeTestRTP(seq uint16, ts uint32, ssrc uint32, payload []byte) []byte {
+	pkt := make([]byte, 12+len(payload))
+	pkt[0] = 0x80 // V=2, P=0, X=0, CC=0
+	pkt[1] = 0    // PT=0
+	binary.BigEndian.PutUint16(pkt[2:4], seq)
+	binary.BigEndian.PutUint32(pkt[4:8], ts)
+	binary.BigEndian.PutUint32(pkt[8:12], ssrc)
+	copy(pkt[12:], payload)
+	return pkt
+}
+
+func testContext() (*Context, *Context) {
+	var key [16]byte
+	var salt [14]byte
+	rand.Read(key[:])
+	rand.Read(salt[:])
+	return New(key, salt), New(key, salt)
+}
+
+func TestProtectUnprotectRoundTrip(t *testing.T) {
+	sender, receiver := testContext()
+
+	payload := []byte("Hello, SRTP!")
+	rtp := makeTestRTP(1, 160, 0x12345678, payload)
+
+	srtp, err := sender.Protect(rtp)
+	require.NoError(t, err)
+	assert.Equal(t, len(rtp)+authTagLen, len(srtp))
+
+	// Encrypted payload should differ from original.
+	assert.NotEqual(t, payload, srtp[12:12+len(payload)])
+
+	// Decrypt.
+	decrypted, err := receiver.Unprotect(srtp)
+	require.NoError(t, err)
+	assert.Equal(t, rtp[:12], decrypted[:12]) // header preserved
+	assert.Equal(t, payload, decrypted[12:])  // payload restored
+}
+
+func TestMultiplePackets(t *testing.T) {
+	sender, receiver := testContext()
+
+	for seq := uint16(0); seq < 100; seq++ {
+		payload := make([]byte, 160)
+		for i := range payload {
+			payload[i] = byte(seq)
+		}
+		rtp := makeTestRTP(seq, uint32(seq)*160, 0xAABBCCDD, payload)
+		original := make([]byte, len(rtp))
+		copy(original, rtp)
+
+		srtp, err := sender.Protect(rtp)
+		require.NoError(t, err)
+
+		decrypted, err := receiver.Unprotect(srtp)
+		require.NoError(t, err)
+		assert.Equal(t, original, decrypted, "mismatch at seq=%d", seq)
+	}
+}
+
+func TestAuthenticationFailure(t *testing.T) {
+	sender, _ := testContext()
+
+	// Create a different receiver with different keys.
+	var key2 [16]byte
+	var salt2 [14]byte
+	rand.Read(key2[:])
+	rand.Read(salt2[:])
+	wrongReceiver := New(key2, salt2)
+
+	rtp := makeTestRTP(1, 160, 0x12345678, []byte("secret"))
+	srtp, err := sender.Protect(rtp)
+	require.NoError(t, err)
+
+	_, err = wrongReceiver.Unprotect(srtp)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "authentication failed")
+}
+
+func TestTamperedPacket(t *testing.T) {
+	sender, receiver := testContext()
+
+	rtp := makeTestRTP(1, 160, 0x12345678, []byte("secret data"))
+	srtp, err := sender.Protect(rtp)
+	require.NoError(t, err)
+
+	// Tamper with encrypted payload.
+	srtp[15] ^= 0xFF
+
+	_, err = receiver.Unprotect(srtp)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "authentication failed")
+}
+
+func TestPacketTooShort(t *testing.T) {
+	ctx := &Context{}
+	_, err := ctx.Unprotect(make([]byte, 5))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "too short")
+}
+
+func TestFromSDESInline(t *testing.T) {
+	// Generate a valid inline key.
+	buf := make([]byte, 30)
+	rand.Read(buf)
+	inline := base64.StdEncoding.EncodeToString(buf)
+
+	ctx, err := FromSDESInline(inline)
+	require.NoError(t, err)
+	assert.NotNil(t, ctx)
+
+	// Round-trip test.
+	rtp := makeTestRTP(42, 1000, 0xDEADBEEF, []byte("audio data here!"))
+	original := make([]byte, len(rtp))
+	copy(original, rtp)
+
+	ctx2, err := FromSDESInline(inline)
+	require.NoError(t, err)
+
+	srtp, err := ctx.Protect(rtp)
+	require.NoError(t, err)
+
+	decrypted, err := ctx2.Unprotect(srtp)
+	require.NoError(t, err)
+	assert.Equal(t, original, decrypted)
+}
+
+func TestFromSDESInlineInvalid(t *testing.T) {
+	_, err := FromSDESInline("not-valid-base64!!!")
+	assert.Error(t, err)
+
+	// Wrong length (20 bytes instead of 30).
+	short := base64.StdEncoding.EncodeToString(make([]byte, 20))
+	_, err = FromSDESInline(short)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "30 bytes")
+}
+
+func TestGenerateKeyingMaterial(t *testing.T) {
+	key1, err := GenerateKeyingMaterial()
+	require.NoError(t, err)
+
+	// Should be valid base64, decoding to 30 bytes.
+	data, err := base64.StdEncoding.DecodeString(key1)
+	require.NoError(t, err)
+	assert.Equal(t, 30, len(data))
+
+	// Two calls should produce different keys.
+	key2, err := GenerateKeyingMaterial()
+	require.NoError(t, err)
+	assert.NotEqual(t, key1, key2)
+}
+
+func TestROCRollover(t *testing.T) {
+	sender, receiver := testContext()
+
+	// Send packets near the seq boundary to trigger ROC rollover.
+	for seq := uint16(0xFFF0); seq != 0x0010; seq++ {
+		payload := []byte{byte(seq), byte(seq >> 8)}
+		rtp := makeTestRTP(seq, uint32(seq)*160, 0x11223344, payload)
+		original := make([]byte, len(rtp))
+		copy(original, rtp)
+
+		srtp, err := sender.Protect(rtp)
+		require.NoError(t, err)
+
+		decrypted, err := receiver.Unprotect(srtp)
+		require.NoError(t, err, "failed at seq=%d", seq)
+		assert.Equal(t, original, decrypted, "mismatch at seq=%d", seq)
+	}
+}
+
+func TestRTPHeaderLenWithCSRC(t *testing.T) {
+	// V=2, CC=2 → header = 12 + 2*4 = 20
+	pkt := make([]byte, 28)
+	pkt[0] = 0x82 // V=2, CC=2
+	assert.Equal(t, 20, rtpHeaderLen(pkt))
+}
+
+func TestRTPHeaderLenWithExtension(t *testing.T) {
+	// V=2, X=1, CC=0, extension length = 1 word (4 bytes)
+	pkt := make([]byte, 20)
+	pkt[0] = 0x90 // V=2, X=1
+	// Extension header at offset 12: profile (2) + length (2)
+	binary.BigEndian.PutUint16(pkt[14:16], 1) // 1 word = 4 bytes
+	assert.Equal(t, 12+4+4, rtpHeaderLen(pkt))
+}
+
+func TestRTPHeaderLenTooShort(t *testing.T) {
+	assert.Equal(t, -1, rtpHeaderLen(make([]byte, 5)))
+}
+
+func TestRTPHeaderLenBadVersion(t *testing.T) {
+	pkt := make([]byte, 12)
+	pkt[0] = 0x00 // V=0
+	assert.Equal(t, -1, rtpHeaderLen(pkt))
+}
+
+func TestProtectPreservesHeader(t *testing.T) {
+	sender, _ := testContext()
+
+	rtp := makeTestRTP(100, 8000, 0xABCD1234, []byte("payload"))
+	headerCopy := make([]byte, 12)
+	copy(headerCopy, rtp[:12])
+
+	srtp, err := sender.Protect(rtp)
+	require.NoError(t, err)
+
+	// SRTP header should match original RTP header.
+	assert.Equal(t, headerCopy, srtp[:12])
+}
+
+func TestEmptyPayload(t *testing.T) {
+	sender, receiver := testContext()
+
+	rtp := makeTestRTP(1, 160, 0x12345678, nil)
+	original := make([]byte, len(rtp))
+	copy(original, rtp)
+
+	srtp, err := sender.Protect(rtp)
+	require.NoError(t, err)
+	assert.Equal(t, len(rtp)+authTagLen, len(srtp))
+
+	decrypted, err := receiver.Unprotect(srtp)
+	require.NoError(t, err)
+	assert.Equal(t, original, decrypted)
+}
+
+func TestDeriveSessionKeyDeterministic(t *testing.T) {
+	var key [16]byte
+	var salt [14]byte
+	for i := range key {
+		key[i] = byte(i)
+	}
+	for i := range salt {
+		salt[i] = byte(i + 16)
+	}
+
+	k1 := deriveSessionKey(key, salt, labelCipherKey, 16)
+	k2 := deriveSessionKey(key, salt, labelCipherKey, 16)
+	assert.Equal(t, k1, k2)
+
+	// Different label should produce different key.
+	k3 := deriveSessionKey(key, salt, labelAuthKey, 16)
+	assert.NotEqual(t, k1[:16], k3[:16])
+}

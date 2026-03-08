@@ -11,6 +11,7 @@ import (
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
 	"github.com/x-phone/xphone-go/internal/sdp"
+	"github.com/x-phone/xphone-go/internal/srtp"
 )
 
 // parseSIPTarget parses a dial target into a sip.Uri.
@@ -142,7 +143,19 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 	if len(codecPT) == 0 {
 		codecPT = defaultCodecPrefs
 	}
-	sdpOffer := sdp.BuildOffer(ip, rtpPort, codecPT, sdp.DirSendRecv)
+	var sdpOffer string
+	var srtpLocalKey string
+	if s.cfg.SRTP {
+		key, err := srtp.GenerateKeyingMaterial()
+		if err != nil {
+			rtpConn.Close()
+			return nil, fmt.Errorf("xphone: generate SRTP key: %w", err)
+		}
+		srtpLocalKey = key
+		sdpOffer = sdp.BuildOfferSRTP(ip, rtpPort, codecPT, sdp.DirSendRecv, key)
+	} else {
+		sdpOffer = sdp.BuildOffer(ip, rtpPort, codecPT, sdp.DirSendRecv)
+	}
 
 	// Create the dialog session and send INVITE.
 	// Content-Type must be set explicitly — sipgo doesn't add it automatically,
@@ -193,8 +206,9 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 			invite:   sess.InviteRequest,
 			response: sess.InviteResponse,
 		},
-		cancelFn: waitCancel,
-		rtpConn:  rtpConn,
+		cancelFn:     waitCancel,
+		rtpConn:      rtpConn,
+		srtpLocalKey: srtpLocalKey,
 	}, nil
 }
 

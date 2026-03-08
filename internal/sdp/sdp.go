@@ -23,11 +23,26 @@ const (
 	DirInactive = "inactive"
 )
 
+// SDP media profile constants.
+const (
+	ProfileRTP  = "RTP/AVP"
+	ProfileSRTP = "RTP/SAVP"
+)
+
+// CryptoAttr represents an SDP a=crypto: attribute (RFC 4568).
+type CryptoAttr struct {
+	Tag       int
+	Suite     string
+	KeyParams string // inline:<base64key>
+}
+
 // MediaDesc describes a single media line in an SDP session.
 type MediaDesc struct {
 	Port      int
-	Codecs    []int  // payload type numbers
-	Direction string // DirSendRecv | DirSendOnly | DirRecvOnly | DirInactive
+	Profile   string       // ProfileRTP or ProfileSRTP
+	Codecs    []int        // payload type numbers
+	Direction string       // DirSendRecv | DirSendOnly | DirRecvOnly | DirInactive
+	Crypto    []CryptoAttr // a=crypto: attributes
 }
 
 // FirstCodec returns the first payload type from the first m= line, or -1 if none.
@@ -44,6 +59,19 @@ func (s *Session) Dir() string {
 		return s.Media[0].Direction
 	}
 	return DirSendRecv
+}
+
+// IsSRTP returns true if the first media line uses RTP/SAVP profile.
+func (s *Session) IsSRTP() bool {
+	return len(s.Media) > 0 && s.Media[0].Profile == ProfileSRTP
+}
+
+// FirstCrypto returns the first crypto attribute from the first media line, or nil.
+func (s *Session) FirstCrypto() *CryptoAttr {
+	if len(s.Media) > 0 && len(s.Media[0].Crypto) > 0 {
+		return &s.Media[0].Crypto[0]
+	}
+	return nil
 }
 
 var codecNames = map[int]string{
@@ -82,6 +110,7 @@ func Parse(raw string) (*Session, error) {
 			if len(parts) >= 3 {
 				md := MediaDesc{}
 				md.Port, _ = strconv.Atoi(parts[1])
+				md.Profile = parts[2]
 				for _, ptStr := range parts[3:] {
 					if pt, err := strconv.Atoi(ptStr); err == nil {
 						md.Codecs = append(md.Codecs, pt)
@@ -91,10 +120,14 @@ func Parse(raw string) (*Session, error) {
 				curMedia = &s.Media[len(s.Media)-1]
 			}
 		case 'a':
-			switch val {
-			case DirSendRecv, DirSendOnly, DirRecvOnly, DirInactive:
+			switch {
+			case val == DirSendRecv || val == DirSendOnly || val == DirRecvOnly || val == DirInactive:
 				if curMedia != nil {
 					curMedia.Direction = val
+				}
+			case strings.HasPrefix(val, "crypto:") && curMedia != nil:
+				if ca, err := parseCryptoVal(val[7:]); err == nil {
+					curMedia.Crypto = append(curMedia.Crypto, ca)
 				}
 			}
 		}
@@ -108,33 +141,7 @@ func Parse(raw string) (*Session, error) {
 
 // BuildOffer creates an SDP offer string.
 func BuildOffer(ip string, port int, codecs []int, direction string) string {
-	var b strings.Builder
-	b.WriteString("v=0\r\n")
-	b.WriteString("o=xphone 0 0 IN IP4 ")
-	b.WriteString(ip)
-	b.WriteString("\r\n")
-	b.WriteString("s=xphone\r\n")
-	b.WriteString("c=IN IP4 ")
-	b.WriteString(ip)
-	b.WriteString("\r\n")
-	b.WriteString("t=0 0\r\n")
-	b.WriteString(fmt.Sprintf("m=audio %d RTP/AVP", port))
-	for _, c := range codecs {
-		b.WriteString(fmt.Sprintf(" %d", c))
-	}
-	b.WriteString("\r\n")
-	for _, c := range codecs {
-		if name, ok := codecNames[c]; ok {
-			b.WriteString(fmt.Sprintf("a=rtpmap:%d %s\r\n", c, name))
-			if c == 101 {
-				b.WriteString("a=fmtp:101 0-16\r\n")
-			}
-		}
-	}
-	b.WriteString("a=")
-	b.WriteString(direction)
-	b.WriteString("\r\n")
-	return b.String()
+	return buildSDP(ip, port, codecs, direction, ProfileRTP, "")
 }
 
 // BuildAnswer creates an SDP answer string that only includes codecs
@@ -172,4 +179,75 @@ func NegotiateCodec(localPrefs []int, remoteOffer []int) int {
 		return -1
 	}
 	return common[0]
+}
+
+// BuildOfferSRTP creates an SDP offer with RTP/SAVP and a=crypto: attribute.
+func BuildOfferSRTP(ip string, port int, codecs []int, direction, cryptoInlineKey string) string {
+	return buildSDP(ip, port, codecs, direction, ProfileSRTP, cryptoInlineKey)
+}
+
+// BuildAnswerSRTP creates an SDP answer with RTP/SAVP and a=crypto: attribute.
+func BuildAnswerSRTP(ip string, port int, localPrefs []int, remoteOffer []int, direction, cryptoInlineKey string) string {
+	common := intersectCodecs(localPrefs, remoteOffer)
+	if len(common) == 0 {
+		common = localPrefs
+	}
+	return buildSDP(ip, port, common, direction, ProfileSRTP, cryptoInlineKey)
+}
+
+// buildSDP is the shared implementation for building SDP with configurable profile.
+func buildSDP(ip string, port int, codecs []int, direction, profile, cryptoInlineKey string) string {
+	var b strings.Builder
+	b.WriteString("v=0\r\n")
+	b.WriteString("o=xphone 0 0 IN IP4 ")
+	b.WriteString(ip)
+	b.WriteString("\r\n")
+	b.WriteString("s=xphone\r\n")
+	b.WriteString("c=IN IP4 ")
+	b.WriteString(ip)
+	b.WriteString("\r\n")
+	b.WriteString("t=0 0\r\n")
+	b.WriteString(fmt.Sprintf("m=audio %d %s", port, profile))
+	for _, c := range codecs {
+		b.WriteString(fmt.Sprintf(" %d", c))
+	}
+	b.WriteString("\r\n")
+	for _, c := range codecs {
+		if name, ok := codecNames[c]; ok {
+			b.WriteString(fmt.Sprintf("a=rtpmap:%d %s\r\n", c, name))
+			if c == 101 {
+				b.WriteString("a=fmtp:101 0-16\r\n")
+			}
+		}
+	}
+	if cryptoInlineKey != "" {
+		b.WriteString("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:")
+		b.WriteString(cryptoInlineKey)
+		b.WriteString("\r\n")
+	}
+	b.WriteString("a=")
+	b.WriteString(direction)
+	b.WriteString("\r\n")
+	return b.String()
+}
+
+// parseCryptoVal parses the value portion of an a=crypto: attribute.
+// Format: "<tag> <suite> inline:<key>"
+func parseCryptoVal(val string) (CryptoAttr, error) {
+	parts := strings.Fields(val)
+	if len(parts) < 3 {
+		return CryptoAttr{}, fmt.Errorf("sdp: malformed crypto attribute")
+	}
+	tag, _ := strconv.Atoi(parts[0])
+	suite := parts[1]
+	keyParam := parts[2]
+	return CryptoAttr{Tag: tag, Suite: suite, KeyParams: keyParam}, nil
+}
+
+// InlineKey extracts the base64 key from key params (removes "inline:" prefix).
+func (c *CryptoAttr) InlineKey() string {
+	if strings.HasPrefix(c.KeyParams, "inline:") {
+		return c.KeyParams[7:]
+	}
+	return c.KeyParams
 }

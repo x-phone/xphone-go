@@ -100,3 +100,51 @@ func TestNegotiateCodec(t *testing.T) {
 	// no common codec
 	assert.Equal(t, -1, NegotiateCodec([]int{0}, []int{9}))
 }
+
+func TestBuildOfferSRTP(t *testing.T) {
+	s := BuildOfferSRTP("10.0.0.1", 5004, []int{0}, "sendrecv", "YWJjZGVmZ2hpamtsbW5vcA==")
+	assert.Contains(t, s, "m=audio 5004 RTP/SAVP 0")
+	assert.Contains(t, s, "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:YWJjZGVmZ2hpamtsbW5vcA==")
+}
+
+func TestBuildAnswerSRTP(t *testing.T) {
+	s := BuildAnswerSRTP("10.0.0.1", 5004, []int{0, 8}, []int{8}, "sendrecv", "base64key==")
+	assert.Contains(t, s, "RTP/SAVP")
+	assert.Contains(t, s, "a=crypto:")
+	// Should only include codec 8 (intersection).
+	assert.Contains(t, s, "m=audio 5004 RTP/SAVP 8")
+}
+
+func TestParseSRTPOffer(t *testing.T) {
+	raw := BuildOfferSRTP("10.0.0.1", 5004, []int{0, 101}, "sendrecv", "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	assert.True(t, s.IsSRTP())
+	require.NotNil(t, s.FirstCrypto())
+	assert.Equal(t, 1, s.FirstCrypto().Tag)
+	assert.Equal(t, "AES_CM_128_HMAC_SHA1_80", s.FirstCrypto().Suite)
+	assert.Equal(t, "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0", s.FirstCrypto().InlineKey())
+}
+
+func TestParseProfile(t *testing.T) {
+	raw := BuildOffer("10.0.0.1", 5004, []int{0}, "sendrecv")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	assert.False(t, s.IsSRTP())
+	assert.Equal(t, ProfileRTP, s.Media[0].Profile)
+}
+
+func TestParseCryptoNone(t *testing.T) {
+	raw := BuildOffer("10.0.0.1", 5004, []int{0}, "sendrecv")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	assert.Nil(t, s.FirstCrypto())
+}
+
+func TestCryptoAttrInlineKey(t *testing.T) {
+	ca := CryptoAttr{KeyParams: "inline:abc123"}
+	assert.Equal(t, "abc123", ca.InlineKey())
+
+	ca2 := CryptoAttr{KeyParams: "noprefix"}
+	assert.Equal(t, "noprefix", ca2.InlineKey())
+}

@@ -22,6 +22,7 @@ type Config struct {
 	NATKeepaliveInterval time.Duration
 
 	StunServer string
+	SRTP       bool
 
 	RTPPortMin   int
 	RTPPortMax   int
@@ -203,6 +204,14 @@ func WithNATKeepalive(d time.Duration) PhoneOption {
 func WithStunServer(server string) PhoneOption {
 	return func(c *Config) {
 		c.StunServer = server
+	}
+}
+
+// WithSRTP enables SRTP (Secure RTP) for media encryption.
+// When enabled, SDP offers use RTP/SAVP with AES_CM_128_HMAC_SHA1_80.
+func WithSRTP() PhoneOption {
+	return func(c *Config) {
+		c.SRTP = true
 	}
 }
 

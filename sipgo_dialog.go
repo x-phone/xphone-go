@@ -125,8 +125,9 @@ type clientSession interface {
 // backed by a sipgo DialogClientSession.
 type sipgoDialogUAC struct {
 	dialogBase
-	cancelFn context.CancelFunc // cancels the WaitAnswer context
-	rtpConn  net.PacketConn     // bound RTP socket from dial; ownership transferred to call
+	cancelFn     context.CancelFunc // cancels the WaitAnswer context
+	rtpConn      net.PacketConn     // bound RTP socket from dial; ownership transferred to call
+	srtpLocalKey string             // base64 SRTP inline key generated for this dialog
 }
 
 func (d *sipgoDialogUAC) Respond(code int, reason string, body []byte) error {

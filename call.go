@@ -12,6 +12,7 @@ import (
 
 	"github.com/pion/rtp"
 	"github.com/x-phone/xphone-go/internal/sdp"
+	"github.com/x-phone/xphone-go/internal/srtp"
 )
 
 // localIPFor discovers the local IP address used to reach the given host
@@ -167,6 +168,10 @@ type call struct {
 
 	localSDP  string
 	remoteSDP string
+
+	srtpLocalKey string        // base64 inline key for outbound encryption (non-empty = SRTP active)
+	srtpIn       *srtp.Context // inbound SRTP decryption context
+	srtpOut      *srtp.Context // outbound SRTP encryption context
 
 	codec        Codec // negotiated codec (default CodecPCMU)
 	sessionTimer *time.Timer
@@ -481,8 +486,13 @@ func (c *call) ensureRTPPort() {
 // Must be called with c.mu held.
 func (c *call) buildLocalSDP(direction string) string {
 	c.ensureRTPPort()
-	offer := sdp.BuildOffer(c.localIP, c.rtpPort, c.resolveCodecPrefs(), direction)
-	c.logger.Debug("SDP offer built", "id", c.id, "local_ip", c.localIP, "rtp_port", c.rtpPort, "direction", direction, "sdp", offer)
+	var offer string
+	if c.srtpLocalKey != "" {
+		offer = sdp.BuildOfferSRTP(c.localIP, c.rtpPort, c.resolveCodecPrefs(), direction, c.srtpLocalKey)
+	} else {
+		offer = sdp.BuildOffer(c.localIP, c.rtpPort, c.resolveCodecPrefs(), direction)
+	}
+	c.logger.Debug("SDP offer built", "id", c.id, "local_ip", c.localIP, "rtp_port", c.rtpPort, "direction", direction, "srtp", c.srtpLocalKey != "", "sdp", offer)
 	return offer
 }
 
@@ -494,8 +504,13 @@ func (c *call) buildAnswerSDP(remote *sdp.Session, direction string) string {
 	if len(remote.Media) > 0 {
 		remoteCodecs = remote.Media[0].Codecs
 	}
-	answer := sdp.BuildAnswer(c.localIP, c.rtpPort, c.resolveCodecPrefs(), remoteCodecs, direction)
-	c.logger.Debug("SDP answer built", "id", c.id, "local_ip", c.localIP, "rtp_port", c.rtpPort, "direction", direction, "sdp", answer)
+	var answer string
+	if c.srtpLocalKey != "" {
+		answer = sdp.BuildAnswerSRTP(c.localIP, c.rtpPort, c.resolveCodecPrefs(), remoteCodecs, direction, c.srtpLocalKey)
+	} else {
+		answer = sdp.BuildAnswer(c.localIP, c.rtpPort, c.resolveCodecPrefs(), remoteCodecs, direction)
+	}
+	c.logger.Debug("SDP answer built", "id", c.id, "local_ip", c.localIP, "rtp_port", c.rtpPort, "direction", direction, "srtp", c.srtpLocalKey != "", "sdp", answer)
 	return answer
 }
 
@@ -748,6 +763,7 @@ func (c *call) SendDTMF(digit string) error {
 	sentRTP := c.sentRTP
 	conn := c.rtpConn
 	addr := c.remoteAddr
+	srtpOut := c.srtpOut
 	c.mu.Unlock()
 
 	pkts, err := EncodeDTMF(digit, 0, 0, 0)
@@ -760,6 +776,12 @@ func (c *call) SendDTMF(digit string) error {
 		}
 		if conn != nil && addr != nil {
 			if data, marshalErr := pkt.Marshal(); marshalErr == nil {
+				if srtpOut != nil {
+					data, marshalErr = srtpOut.Protect(data)
+					if marshalErr != nil {
+						continue
+					}
+				}
 				conn.WriteTo(data, addr)
 			}
 		}

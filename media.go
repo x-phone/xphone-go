@@ -79,6 +79,10 @@ func (c *call) startRTPReader() {
 		return
 	}
 
+	c.mu.Lock()
+	srtpIn := c.srtpIn
+	c.mu.Unlock()
+
 	go func() {
 		buf := make([]byte, 1500)
 		for {
@@ -89,6 +93,15 @@ func (c *call) startRTPReader() {
 			// Copy before unmarshal since we reuse the read buffer.
 			cp := make([]byte, n)
 			copy(cp, buf[:n])
+
+			// SRTP decrypt before unmarshal.
+			if srtpIn != nil {
+				cp, err = srtpIn.Unprotect(cp)
+				if err != nil {
+					continue // auth failed or malformed — drop
+				}
+			}
+
 			pkt := &rtp.Packet{}
 			if err := pkt.Unmarshal(cp); err != nil {
 				continue
@@ -119,6 +132,7 @@ func (c *call) startMedia() {
 		pcmRate = defaultPCMRate
 	}
 	codec := c.codec
+	srtpOut := c.srtpOut
 	c.mediaDone = make(chan struct{})
 	c.mediaActive = true
 	done := c.mediaDone
@@ -216,6 +230,12 @@ func (c *call) startMedia() {
 				}
 				if conn != nil && dst != nil {
 					if data, err := pkt.Marshal(); err == nil {
+						if srtpOut != nil {
+							data, err = srtpOut.Protect(data)
+							if err != nil {
+								continue
+							}
+						}
 						conn.WriteTo(data, dst)
 					}
 				}
@@ -249,6 +269,12 @@ func (c *call) startMedia() {
 				}
 				if conn != nil && dst != nil {
 					if data, err := outPkt.Marshal(); err == nil {
+						if srtpOut != nil {
+							data, err = srtpOut.Protect(data)
+							if err != nil {
+								continue
+							}
+						}
 						conn.WriteTo(data, dst)
 					}
 				}

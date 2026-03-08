@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/x-phone/xphone-go/internal/sdp"
+	"github.com/x-phone/xphone-go/internal/srtp"
 	"github.com/x-phone/xphone-go/internal/stun"
 )
 
@@ -101,6 +102,26 @@ func (p *phone) wireCallCallbacks(c *call) {
 		fn := p.onCallDTMFFn
 		c.onDTMFPhone = func(digit string) { fn(c, digit) }
 	}
+}
+
+// setupSRTP initializes SRTP contexts on a call.
+// localKey is the base64 inline key for outbound encryption.
+// remoteKey is the base64 inline key from the remote SDP for inbound decryption.
+func (p *phone) setupSRTP(c *call, localKey, remoteKey string) {
+	outCtx, err := srtp.FromSDESInline(localKey)
+	if err != nil {
+		p.logger.Error("SRTP outbound context setup failed", "err", err)
+		return
+	}
+	inCtx, err := srtp.FromSDESInline(remoteKey)
+	if err != nil {
+		p.logger.Error("SRTP inbound context setup failed", "err", err)
+		return
+	}
+	c.srtpLocalKey = localKey
+	c.srtpOut = outCtx
+	c.srtpIn = inCtx
+	p.logger.Info("SRTP enabled for call", "id", c.id)
 }
 
 // applyCallConfig threads phone-level config into a new call.
@@ -330,6 +351,13 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 				if sess, parseErr := sdp.Parse(c.remoteSDP); parseErr == nil {
 					c.negotiateCodec(sess)
 					c.setRemoteEndpoint(sess)
+
+					// Set up SRTP if remote accepted with crypto.
+					if uac.srtpLocalKey != "" && sess.IsSRTP() {
+						if crypto := sess.FirstCrypto(); crypto != nil {
+							p.setupSRTP(c, uac.srtpLocalKey, crypto.InlineKey())
+						}
+					}
 				}
 			}
 		}
@@ -414,6 +442,18 @@ func (p *phone) handleDialogInvite(dlg dialog, from, to, sdpBody string) {
 	p.logger.Info("incoming call", "from", from, "to", to)
 	if sdpBody != "" {
 		p.logger.Debug("incoming remote SDP", "sdp", sdpBody)
+	}
+
+	// Set up SRTP if remote offers it and we have SRTP enabled.
+	if p.cfg.SRTP && sdpBody != "" {
+		if sess, err := sdp.Parse(sdpBody); err == nil && sess.IsSRTP() {
+			if crypto := sess.FirstCrypto(); crypto != nil {
+				localKey, err := srtp.GenerateKeyingMaterial()
+				if err == nil {
+					p.setupSRTP(c, localKey, crypto.InlineKey())
+				}
+			}
+		}
 	}
 
 	// Auto-send 180 Ringing before presenting the call.

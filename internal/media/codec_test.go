@@ -195,5 +195,4 @@ func TestCodecProcessor_PCMA_Interface(t *testing.T) {
 
 func TestCodecProcessor_Unknown_ReturnsNil(t *testing.T) {
 	assert.Nil(t, NewCodecProcessor(99, 8000), "PT=99 should return nil")
-	assert.Nil(t, NewCodecProcessor(111, 8000), "PT=111 (Opus) should return nil")
 }

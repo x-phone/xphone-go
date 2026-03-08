@@ -1,6 +1,6 @@
 // sipcli is an interactive SIP client built with the xphone library.
 // It demonstrates registration, inbound/outbound calls, hold, DTMF,
-// mute, and blind transfer — all driven by the event-based API.
+// mute, blind transfer, echo mode — all driven by the event-based API.
 //
 // Usage:
 //
@@ -8,21 +8,61 @@
 package main
 
 import (
+	"bufio"
 	"context"
-	"flag"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	xphone "github.com/x-phone/xphone-go"
 	"gopkg.in/yaml.v3"
 )
+
+// ---------------------------------------------------------------------------
+// Colors
+// ---------------------------------------------------------------------------
+
+var (
+	accent    = lipgloss.Color("#6495ED") // cornflower blue
+	accentDim = lipgloss.Color("#4A6FA5")
+	green     = lipgloss.Color("#00FF00")
+	red       = lipgloss.Color("#FF0000")
+	yellow    = lipgloss.Color("#FFFF00")
+	magenta   = lipgloss.Color("#FF00FF")
+	dim       = lipgloss.Color("#666666")
+	surface   = lipgloss.Color("#1a1a2e")
+	barBG     = lipgloss.Color("#16213e")
+	white     = lipgloss.Color("#FFFFFF")
+)
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const (
+	maxEvents    = 200
+	maxDebugLogs = 500
+	maxHistory   = 500
+	echoDelay    = 10 // frames (~200ms at 20ms/frame)
+)
+
+// ---------------------------------------------------------------------------
+// App state (shared between TUI and xphone callbacks via prog.Send)
+// ---------------------------------------------------------------------------
+
+// trackedCall tracks one call in the calls panel.
+type trackedCall struct {
+	call   xphone.Call
+	label  string
+	status string
+}
 
 // prog is the running bubbletea program. Used by xphone callbacks and the
 // custom slog handler to send messages into the TUI from any goroutine.
@@ -33,11 +73,16 @@ var prog *tea.Program
 type msgLog string
 type msgDebugLog string
 type msgRegState string
-type msgCallState string
-type msgCallCleared struct{}
+type msgCallState struct {
+	callID string
+	status string
+}
+type msgCallEnded struct{ callID string }
 type msgCallRef struct{ call xphone.Call }
 
-// --- custom slog handler that feeds into the TUI ---
+// ---------------------------------------------------------------------------
+// Custom slog handler that feeds into the TUI debug panel
+// ---------------------------------------------------------------------------
 
 type tuiHandler struct{ level slog.Level }
 
@@ -50,64 +95,154 @@ func (h *tuiHandler) Handle(_ context.Context, r slog.Record) error {
 		return nil
 	}
 	var b strings.Builder
-	// Level tag
 	switch {
 	case r.Level >= slog.LevelError:
-		b.WriteString("\033[31mERR\033[0m ")
+		b.WriteString("ERR ")
 	case r.Level >= slog.LevelWarn:
-		b.WriteString("\033[33mWRN\033[0m ")
+		b.WriteString("WRN ")
 	case r.Level >= slog.LevelInfo:
-		b.WriteString("\033[36mINF\033[0m ")
+		b.WriteString("INF ")
 	default:
-		b.WriteString("\033[2mDBG\033[0m ")
+		b.WriteString("DBG ")
 	}
 	b.WriteString(r.Message)
 	r.Attrs(func(a slog.Attr) bool {
-		b.WriteString(" \033[2m")
+		b.WriteByte(' ')
 		b.WriteString(a.Key)
 		b.WriteByte('=')
 		b.WriteString(a.Value.String())
-		b.WriteString("\033[0m")
 		return true
 	})
-	line := strings.ReplaceAll(b.String(), "\r\n", " | ")
-	line = strings.ReplaceAll(line, "\n", " | ")
-	line = strings.ReplaceAll(line, "\r", " | ")
-	prog.Send(msgDebugLog(line))
+	prog.Send(msgDebugLog(flattenLine(b.String())))
 	return nil
 }
 
-func (h *tuiHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
-func (h *tuiHandler) WithGroup(name string) slog.Handler       { return h }
+func (h *tuiHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *tuiHandler) WithGroup(_ string) slog.Handler      { return h }
 
-// --- model ---
+// flattenLine collapses newlines into " | " for single-line display.
+func flattenLine(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " | ")
+	s = strings.ReplaceAll(s, "\n", " | ")
+	s = strings.ReplaceAll(s, "\r", " | ")
+	return s
+}
+
+// tuiWriter adapts the standard log package output into the TUI debug panel.
+// This captures sipgo's transport-level SIP message logging.
+type tuiWriter struct{}
+
+func (w tuiWriter) Write(p []byte) (int, error) {
+	if prog == nil {
+		return len(p), nil
+	}
+	line := flattenLine(strings.TrimRight(string(p), "\n\r"))
+	if line != "" {
+		prog.Send(msgDebugLog("SIP " + line))
+	}
+	return len(p), nil
+}
+
+// ---------------------------------------------------------------------------
+// Command history (persisted to ~/.sipcli_history)
+// ---------------------------------------------------------------------------
+
+func historyPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".sipcli_history")
+}
+
+func loadHistory() []string {
+	p := historyPath()
+	if p == "" {
+		return nil
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if line := scanner.Text(); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) > maxHistory {
+		lines = lines[len(lines)-maxHistory:]
+	}
+	return lines
+}
+
+func saveHistory(history []string) {
+	p := historyPath()
+	if p == "" {
+		return
+	}
+	h := history
+	if len(h) > maxHistory {
+		h = h[len(h)-maxHistory:]
+	}
+	f, err := os.Create(p)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	for _, line := range h {
+		w.WriteString(line)
+		w.WriteByte('\n')
+	}
+	w.Flush()
+}
+
+// ---------------------------------------------------------------------------
+// Model
+// ---------------------------------------------------------------------------
 
 type model struct {
 	phone xphone.Phone
-	call  xphone.Call
 
-	regStatus  string
-	callStatus string
-	logs       []string
-	debugLogs  []string
-	input      string
-	err        string
-	quitting   bool
-	width      int
-	height     int
+	regStatus string
+	calls     []trackedCall
+	selected  int
+	events    []string
+	debugLogs []string
+	input     string
+	err       string
+	quitting  bool
+	width     int
+	height    int
+
+	// Audio handler for speaker/mic/echo (nil if no active call)
+	audio *audioHandler
+
+	// Command history
+	history      []string
+	historyPos   int // -1 = not browsing
+	historyDraft string
 }
 
 func initialModel(phone xphone.Phone) model {
 	return model{
 		phone:      phone,
 		regStatus:  "disconnected",
-		callStatus: "no active call",
 		width:      80,
 		height:     24,
+		history:    loadHistory(),
+		historyPos: -1,
 	}
 }
 
 func (m model) Init() tea.Cmd { return nil }
+
+// ---------------------------------------------------------------------------
+// Update
+// ---------------------------------------------------------------------------
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -117,38 +252,100 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case msgLog:
-		m.logs = append(m.logs, string(msg))
+		m.pushEvent(string(msg))
 	case msgDebugLog:
 		m.debugLogs = append(m.debugLogs, string(msg))
+		if len(m.debugLogs) > maxDebugLogs {
+			m.debugLogs = m.debugLogs[len(m.debugLogs)-maxDebugLogs:]
+		}
 	case msgRegState:
 		m.regStatus = string(msg)
 	case msgCallState:
-		m.callStatus = string(msg)
-	case msgCallCleared:
-		m.call = nil
-		m.callStatus = "no active call"
+		for i := range m.calls {
+			if m.calls[i].call.CallID() == msg.callID {
+				m.calls[i].status = msg.status
+				// Auto-start audio (speaker ON) when a call becomes active
+				if msg.status == "active" && m.audio == nil {
+					m.audio = newAudioHandler(m.calls[i].call)
+					m.pushEvent("speaker: ON (auto)")
+				}
+				break
+			}
+		}
+	case msgCallEnded:
+		for i := range m.calls {
+			if m.calls[i].call.CallID() == msg.callID {
+				// Stop audio if it was for this call
+				if m.audio != nil && m.audio.call.CallID() == msg.callID {
+					m.stopAudio()
+				}
+				m.calls = append(m.calls[:i], m.calls[i+1:]...)
+				if m.selected >= len(m.calls) && m.selected > 0 {
+					m.selected = len(m.calls) - 1
+				}
+				break
+			}
+		}
 	case msgCallRef:
-		m.call = msg.call
+		isFirst := len(m.calls) == 0
+		m.calls = append(m.calls, trackedCall{
+			call:   msg.call,
+			label:  callLabel(msg.call),
+			status: callStateName(msg.call.State()),
+		})
+		if isFirst {
+			m.selected = 0
+		}
 	}
 	return m, nil
 }
 
+func callLabel(c xphone.Call) string {
+	if c.Direction() == xphone.DirectionOutbound {
+		return c.To()
+	}
+	from := c.From()
+	if name := c.FromName(); name != "" {
+		return fmt.Sprintf("%s (%s)", name, from)
+	}
+	return from
+}
+
+func (m *model) pushEvent(s string) {
+	m.events = append(m.events, s)
+	if len(m.events) > maxEvents {
+		m.events = m.events[len(m.events)-maxEvents:]
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Key handling
+// ---------------------------------------------------------------------------
+
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
-		m.quitting = true
-		return m, tea.Quit
+		return m.shutdown()
+	case tea.KeyEscape:
+		m.input = ""
 	case tea.KeyEnter:
 		cmd := strings.TrimSpace(m.input)
 		m.input = ""
 		m.err = ""
+		m.historyPos = -1
+		m.historyDraft = ""
 		if cmd != "" {
+			m.history = append(m.history, cmd)
 			return m.execCommand(cmd)
 		}
 	case tea.KeyBackspace:
 		if len(m.input) > 0 {
 			m.input = m.input[:len(m.input)-1]
 		}
+	case tea.KeyUp:
+		m.historyUp()
+	case tea.KeyDown:
+		m.historyDown()
 	default:
 		if msg.Type == tea.KeyRunes {
 			m.input += string(msg.Runes)
@@ -159,167 +356,397 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *model) historyUp() {
+	if len(m.history) == 0 {
+		return
+	}
+	if m.historyPos == -1 {
+		m.historyDraft = m.input
+		m.historyPos = len(m.history) - 1
+	} else if m.historyPos > 0 {
+		m.historyPos--
+	}
+	m.input = m.history[m.historyPos]
+}
+
+func (m *model) historyDown() {
+	if m.historyPos == -1 {
+		return
+	}
+	if m.historyPos < len(m.history)-1 {
+		m.historyPos++
+		m.input = m.history[m.historyPos]
+	} else {
+		m.historyPos = -1
+		m.input = m.historyDraft
+		m.historyDraft = ""
+	}
+}
+
+// ---------------------------------------------------------------------------
+// View
+// ---------------------------------------------------------------------------
+
+var (
+	borderStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(accentDim)
+
+	titleStyle = lipgloss.NewStyle().
+			Foreground(accent).
+			Bold(true)
+
+	dimStyle    = lipgloss.NewStyle().Foreground(dim)
+	whiteStyle  = lipgloss.NewStyle().Foreground(white)
+	promptStyle = lipgloss.NewStyle().Foreground(green).Bold(true)
+	cursorStyle = lipgloss.NewStyle().Foreground(green).Blink(true)
+	errStyle    = lipgloss.NewStyle().Foreground(red).Bold(true)
+
+	// Event/debug color styles (cached to avoid per-line allocations)
+	redStyle      = lipgloss.NewStyle().Foreground(red)
+	yellowStyle   = lipgloss.NewStyle().Foreground(yellow)
+	greenStyle    = lipgloss.NewStyle().Foreground(green)
+	magentaStyle  = lipgloss.NewStyle().Foreground(magenta)
+	accentStyle   = lipgloss.NewStyle().Foreground(accent)
+	incomingStyle = lipgloss.NewStyle().Foreground(yellow).Bold(true)
+)
+
 func (m model) View() string {
 	if m.quitting {
 		return "Bye!\n"
 	}
 
-	leftW := m.width * 40 / 100
-	rightW := m.width - leftW - 1 // 1 for the separator
+	w := m.width
+	h := m.height
+
+	// --- Status bar ---
+	statusBar := m.renderStatusBar(w)
+
+	// --- Command area (5 lines with border) ---
+	cmdArea := m.renderCommandArea(w)
+	cmdH := lipgloss.Height(cmdArea)
+
+	// Available height for panels
+	statusH := lipgloss.Height(statusBar)
+	panelH := h - statusH - cmdH
+	if panelH < 4 {
+		panelH = 4
+	}
+
+	// --- Left panels (40%) ---
+	leftW := w * 40 / 100
 	if leftW < 20 {
 		leftW = 20
 	}
+	rightW := w - leftW
 	if rightW < 20 {
 		rightW = 20
 	}
-	panelH := m.height - 4 // status bar + error + input + help
-	if panelH < 3 {
-		panelH = 3
+
+	// Calls panel height: dynamic based on number of calls
+	callsInnerH := len(m.calls)
+	if callsInnerH == 0 {
+		callsInnerH = 1
+	}
+	if callsInnerH > 6 {
+		callsInnerH = 6
+	}
+	callsPanelH := callsInnerH + 2 // +2 for border
+	eventsPanelH := panelH - callsPanelH
+	if eventsPanelH < 4 {
+		eventsPanelH = 4
+		callsPanelH = panelH - eventsPanelH
 	}
 
-	// Build left panel lines (events)
-	leftHeader := invertText(" EVENTS", leftW)
-	leftLines := renderLogPanel(m.logs, leftW, panelH)
+	callsPanel := m.renderCallsPanel(leftW, callsPanelH)
+	eventsPanel := m.renderEventsPanel(leftW, eventsPanelH)
+	leftColumn := lipgloss.NewStyle().Height(panelH).Render(
+		lipgloss.JoinVertical(lipgloss.Left, callsPanel, eventsPanel),
+	)
 
-	// Build right panel lines (debug)
-	rightHeader := invertText(" DEBUG", rightW)
-	rightLines := renderLogPanel(m.debugLogs, rightW, panelH)
+	// --- Right panel (60%) ---
+	debugPanel := lipgloss.NewStyle().Height(panelH).Render(
+		m.renderDebugPanel(rightW, panelH),
+	)
 
-	var b strings.Builder
+	// --- Compose ---
+	panels := lipgloss.JoinHorizontal(lipgloss.Top, leftColumn, debugPanel)
 
-	// Status bar (full width)
-	bar := fmt.Sprintf(" REG: %s  |  CALL: %s", m.regStatus, m.callStatus)
-	b.WriteString(invertText(bar, m.width))
-	b.WriteByte('\n')
-
-	// Panel headers
-	b.WriteString(leftHeader)
-	b.WriteString("\033[2m|\033[0m")
-	b.WriteString(rightHeader)
-	b.WriteByte('\n')
-
-	// Panel body
-	for i := 0; i < panelH; i++ {
-		b.WriteString(leftLines[i])
-		b.WriteString("\033[2m|\033[0m")
-		b.WriteString(rightLines[i])
-		b.WriteByte('\n')
-	}
-
-	// Error / input / help (full width)
-	if m.err != "" {
-		b.WriteString(" \033[31m" + m.err + "\033[0m\n")
-	} else {
-		b.WriteByte('\n')
-	}
-	b.WriteString(" > " + m.input + "\033[5m_\033[0m\n")
-	b.WriteString("\033[2m dial|accept|reject|hangup|hold|resume|mute|unmute|dtmf|transfer|quit\033[0m")
-
-	return b.String()
+	return lipgloss.JoinVertical(lipgloss.Left, statusBar, panels, cmdArea)
 }
 
-// renderLogPanel renders a scrolling log into fixed-width lines.
-// Long entries wrap onto continuation lines indented by 2 spaces.
-func renderLogPanel(logs []string, width, height int) []string {
-	// Expand all log entries into visual lines.
-	var visual []string
-	for _, entry := range logs {
-		wrapped := wrapLine(" "+entry, width)
-		visual = append(visual, wrapped...)
+func (m model) renderStatusBar(w int) string {
+	regDot, regColor := regStatusIndicator(m.regStatus)
+
+	colorStyle := lipgloss.NewStyle().Foreground(regColor)
+	regLine := dimStyle.Render("  REG") +
+		colorStyle.Render(fmt.Sprintf(" %s ", regDot)) +
+		colorStyle.Bold(true).Render(m.regStatus)
+
+	return borderStyle.
+		Width(w-2).
+		Background(barBG).
+		Padding(0, 0).
+		Render(
+			titleStyle.Render(" sipcli (go) ") + "\n" + regLine,
+		)
+}
+
+func regStatusIndicator(status string) (string, lipgloss.Color) {
+	switch status {
+	case "registered":
+		return "●", green
+	case "registering":
+		return "◌", yellow
+	case "error", "failed":
+		return "●", red
+	default:
+		return "○", dim
 	}
-	// Take the last `height` visual lines.
-	start := 0
-	if len(visual) > height {
-		start = len(visual) - height
+}
+
+func (m model) renderCallsPanel(w, h int) string {
+	innerW := w - 2
+	innerH := h - 2
+	if innerH < 1 {
+		innerH = 1
 	}
-	lines := make([]string, height)
-	for i := 0; i < height; i++ {
-		idx := start + i
-		if idx < len(visual) {
-			lines[i] = pad(visual[idx], width)
-		} else {
-			lines[i] = strings.Repeat(" ", width)
+
+	var lines []string
+	if len(m.calls) == 0 {
+		lines = append(lines, dimStyle.Render("  (no calls)"))
+	} else {
+		for i, tc := range m.calls {
+			selected := i == m.selected
+			color, indicator := callStatusStyle(tc.status)
+
+			marker := " "
+			markerColor := dim
+			if selected {
+				marker = ">"
+				markerColor = green
+			}
+
+			statusStyle := lipgloss.NewStyle().Foreground(color)
+			line := lipgloss.NewStyle().Foreground(markerColor).Bold(selected).Render(fmt.Sprintf(" %s", marker)) +
+				dimStyle.Render(fmt.Sprintf("#%d ", i+1)) +
+				statusStyle.Render(fmt.Sprintf("%s ", indicator)) +
+				whiteStyle.Bold(selected).Render(tc.label) +
+				statusStyle.Render(fmt.Sprintf("  %s", tc.status))
+
+			lines = append(lines, truncate(line, innerW))
 		}
 	}
-	return lines
+
+	// Pad to innerH
+	for len(lines) < innerH {
+		lines = append(lines, "")
+	}
+	if len(lines) > innerH {
+		lines = lines[len(lines)-innerH:]
+	}
+
+	content := strings.Join(lines, "\n")
+	return borderStyle.
+		Width(innerW).
+		Height(innerH).
+		Background(surface).
+		Render(titleStyle.Render(" Calls ") + "\n" + content)
 }
 
-// wrapLine splits s into lines of at most width visible characters.
-// Continuation lines are indented with 3 spaces.
-func wrapLine(s string, width int) []string {
-	if width < 5 {
-		width = 5
+func (m model) renderEventsPanel(w, h int) string {
+	return renderLogPanel(" Events ", m.events, w, h, styleEvent)
+}
+
+func (m model) renderDebugPanel(w, h int) string {
+	return renderLogPanel(" SIP Debug ", m.debugLogs, w, h, styleDebug)
+}
+
+func renderLogPanel(title string, logs []string, w, h int, styleFn func(string) string) string {
+	innerW := w - 2
+	innerH := h - 2
+	if innerH < 1 {
+		innerH = 1
+	}
+
+	// Expand log entries into visual lines with soft wrapping,
+	// working backwards from the end so we fill exactly innerH lines.
+	var visual []string
+	for i := len(logs) - 1; i >= 0 && len(visual) < innerH*2; i-- {
+		wrapped := wrapLine(logs[i], innerW)
+		// Prepend wrapped lines (reversed, we'll reverse later)
+		for j := len(wrapped) - 1; j >= 0; j-- {
+			visual = append(visual, styleFn(wrapped[j]))
+		}
+	}
+	// Reverse to get chronological order
+	for i, j := 0, len(visual)-1; i < j; i, j = i+1, j-1 {
+		visual[i], visual[j] = visual[j], visual[i]
+	}
+	// Take last innerH lines
+	if len(visual) > innerH {
+		visual = visual[len(visual)-innerH:]
+	}
+	// Pad
+	for len(visual) < innerH {
+		visual = append(visual, "")
+	}
+
+	content := strings.Join(visual, "\n")
+	return borderStyle.
+		Width(innerW).
+		Height(innerH).
+		Background(surface).
+		Render(titleStyle.Render(title) + "\n" + content)
+}
+
+// wrapLine splits a string into lines that fit within maxW visible characters.
+// Continuation lines are indented with 2 spaces.
+func wrapLine(s string, maxW int) []string {
+	if maxW < 5 {
+		maxW = 5
+	}
+	if lipgloss.Width(s) <= maxW {
+		return []string{s}
 	}
 	var result []string
-	for len(s) > 0 {
-		cut := truncateIndex(s, width)
-		result = append(result, s[:cut])
-		s = s[cut:]
-		if len(s) > 0 {
-			s = "   " + s // indent continuation
+	runes := []rune(s)
+	for len(runes) > 0 {
+		// Find the cut point
+		cut := len(runes)
+		if lipgloss.Width(string(runes)) > maxW {
+			// Binary-ish search for the right cut
+			cut = maxW
+			if cut > len(runes) {
+				cut = len(runes)
+			}
+			for cut > 0 && lipgloss.Width(string(runes[:cut])) > maxW {
+				cut--
+			}
+			if cut == 0 {
+				cut = 1 // always make progress
+			}
+		}
+		result = append(result, string(runes[:cut]))
+		runes = runes[cut:]
+		if len(runes) > 0 {
+			// Indent continuation lines
+			runes = append([]rune("  "), runes...)
 		}
 	}
 	return result
 }
 
-// truncateIndex returns the byte index where s should be cut to fit
-// within maxW visible characters, respecting ANSI escape sequences.
-func truncateIndex(s string, maxW int) int {
-	visible := 0
-	inEscape := false
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\033' {
-			inEscape = true
-			continue
-		}
-		if inEscape {
-			if (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') {
-				inEscape = false
-			}
-			continue
-		}
-		visible++
-		if visible >= maxW {
-			return i + 1
-		}
+func (m model) renderCommandArea(w int) string {
+	innerW := w - 2
+
+	inputLine := promptStyle.Render(" > ") + m.input + cursorStyle.Render("_")
+
+	helpText := "dial(d) accept(a) reject hangup(h) hold resume mute unmute dtmf transfer(xfer) echo speaker mic 1/2/3 quit(q)"
+	helpLine := "   " + dimStyle.Render(helpText)
+
+	cmdTitle := titleStyle.Render(" Command ")
+	if m.err != "" {
+		cmdTitle = errStyle.Render(fmt.Sprintf(" Command  --  %s ", m.err))
 	}
-	return len(s)
+
+	content := inputLine + "\n\n" + truncate(helpLine, innerW)
+
+	return borderStyle.
+		Width(innerW).
+		Background(surface).
+		Render(cmdTitle + "\n" + content)
 }
 
-func pad(s string, width int) string {
-	// Count visible characters (ignoring ANSI escapes).
-	visible := 0
-	inEscape := false
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\033' {
-			inEscape = true
-			continue
-		}
-		if inEscape {
-			if (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') {
-				inEscape = false
-			}
-			continue
-		}
-		visible++
+// ---------------------------------------------------------------------------
+// Style helpers
+// ---------------------------------------------------------------------------
+
+func callStatusStyle(status string) (lipgloss.Color, string) {
+	switch status {
+	case "active":
+		return green, "●"
+	case "ringing", "ringing remote", "dialing", "early media":
+		return yellow, "◌"
+	case "on hold":
+		return magenta, "◊"
+	default:
+		return dim, "○"
 	}
-	if visible < width {
-		return s + strings.Repeat(" ", width-visible)
-	}
-	return s
 }
 
-func invertText(text string, width int) string {
-	if len(text) < width {
-		text += strings.Repeat(" ", width-len(text))
+func styleEvent(line string) string {
+	// Strip "[label] " prefix for matching.
+	content := line
+	if strings.HasPrefix(line, "[") {
+		if i := strings.Index(line, "] "); i >= 0 {
+			content = line[i+2:]
+		}
 	}
-	return "\033[7m" + text[:min(len(text), width)] + "\033[0m"
+
+	switch {
+	case strings.HasPrefix(content, "ERROR"):
+		return redStyle.Render(line)
+	case strings.HasPrefix(content, "ended:"):
+		return accentStyle.Render(line)
+	case strings.HasPrefix(content, "incoming"):
+		return incomingStyle.Render(line)
+	case strings.HasPrefix(content, "active"), strings.HasPrefix(content, "connected"):
+		return greenStyle.Render(line)
+	case strings.HasPrefix(content, "DTMF"):
+		return magentaStyle.Render(line)
+	case strings.HasPrefix(content, "dialing"),
+		strings.HasPrefix(content, "ringing"),
+		strings.HasPrefix(content, "early media"):
+		return yellowStyle.Render(line)
+	case strings.HasPrefix(content, "held"), strings.HasPrefix(content, "resumed"):
+		return magentaStyle.Render(line)
+	case strings.HasPrefix(content, "registered"):
+		return greenStyle.Render(line)
+	default:
+		return whiteStyle.Render(line)
+	}
 }
 
-// --- command dispatch ---
+func styleDebug(line string) string {
+	switch {
+	case strings.HasPrefix(line, "ERR"):
+		return redStyle.Render(line)
+	case strings.HasPrefix(line, "WRN"):
+		return yellowStyle.Render(line)
+	case strings.HasPrefix(line, "INF"):
+		return accentStyle.Render(line)
+	default:
+		return dimStyle.Render(line)
+	}
+}
+
+// truncate cuts a string to fit within maxW visible characters,
+// accounting for ANSI escape sequences.
+func truncate(s string, maxW int) string {
+	if maxW <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= maxW {
+		return s
+	}
+	// Cut runes until we fit; ANSI codes are zero-width.
+	runes := []rune(s)
+	for len(runes) > 0 && lipgloss.Width(string(runes)) > maxW {
+		runes = runes[:len(runes)-1]
+	}
+	return string(runes)
+}
+
+// ---------------------------------------------------------------------------
+// Command dispatch
+// ---------------------------------------------------------------------------
 
 func (m model) execCommand(input string) (model, tea.Cmd) {
 	parts := strings.Fields(input)
+	if len(parts) == 0 {
+		return m, nil
+	}
 	cmd := strings.ToLower(parts[0])
 	arg := ""
 	if len(parts) > 1 {
@@ -328,90 +755,193 @@ func (m model) execCommand(input string) (model, tea.Cmd) {
 
 	switch cmd {
 	case "quit", "q", "exit":
-		call := m.call
-		phone := m.phone
-		go func() {
-			if call != nil {
-				call.End()
-			}
-			phone.Disconnect()
-		}()
-		m.quitting = true
-		return m, tea.Quit
+		return m.shutdown()
 
 	case "dial", "d":
 		if arg == "" {
 			m.err = "usage: dial <target>"
 			return m, nil
 		}
-		if m.call != nil {
-			m.err = "already in a call — hangup first"
-			return m, nil
-		}
-		m.logs = append(m.logs, fmt.Sprintf("[dial] calling %s...", arg))
+		m.pushEvent(fmt.Sprintf("dialing %s...", arg))
 		return m, m.cmdDial(arg)
 
 	case "accept", "a":
-		return m, m.callAction("accept", func(c xphone.Call) error { return c.Accept() })
+		num := parseCallNum(arg)
+		return m, callAction(&m, "accept", num, func(c xphone.Call) error {
+			return c.Accept()
+		})
 
 	case "reject":
-		return m, m.callAction("reject", func(c xphone.Call) error { return c.Reject(486, "Busy Here") })
+		num := parseCallNum(arg)
+		return m, callAction(&m, "reject", num, func(c xphone.Call) error {
+			return c.Reject(486, "Busy Here")
+		})
 
 	case "hangup", "h":
-		return m, m.callAction("hangup", func(c xphone.Call) error { return c.End() })
+		num := parseCallNum(arg)
+		return m, callAction(&m, "hangup", num, func(c xphone.Call) error {
+			return c.End()
+		})
 
 	case "hold":
-		return m, m.callAction("hold", func(c xphone.Call) error { return c.Hold() })
+		num := parseCallNum(arg)
+		return m, callAction(&m, "hold", num, func(c xphone.Call) error {
+			return c.Hold()
+		})
 
 	case "resume":
-		return m, m.callAction("resume", func(c xphone.Call) error { return c.Resume() })
+		num := parseCallNum(arg)
+		return m, callAction(&m, "resume", num, func(c xphone.Call) error {
+			return c.Resume()
+		})
 
 	case "mute":
-		return m, m.callAction("mute", func(c xphone.Call) error { return c.Mute() })
+		num := parseCallNum(arg)
+		return m, callAction(&m, "mute", num, func(c xphone.Call) error {
+			return c.Mute()
+		})
 
 	case "unmute":
-		return m, m.callAction("unmute", func(c xphone.Call) error { return c.Unmute() })
+		num := parseCallNum(arg)
+		return m, callAction(&m, "unmute", num, func(c xphone.Call) error {
+			return c.Unmute()
+		})
 
 	case "dtmf":
-		if m.call == nil {
-			m.err = "no active call"
-			return m, nil
-		}
 		if arg == "" {
 			m.err = "usage: dtmf <digits>"
 			return m, nil
 		}
+		c := m.resolveCall(-1)
+		if c == nil {
+			m.err = "no active call"
+			return m, nil
+		}
 		for _, ch := range arg {
-			if err := m.call.SendDTMF(string(ch)); err != nil {
-				m.err = err.Error()
+			if err := c.SendDTMF(string(ch)); err != nil {
+				m.err = fmt.Sprintf("dtmf error: %s", err)
 				return m, nil
 			}
 		}
-		m.logs = append(m.logs, fmt.Sprintf("[dtmf] sent: %s", arg))
+		m.pushEvent(fmt.Sprintf("DTMF sent: %s", arg))
 		return m, nil
 
-	case "transfer":
+	case "transfer", "xfer":
 		if arg == "" {
 			m.err = "usage: transfer <target>"
 			return m, nil
 		}
-		return m, m.callAction("transfer to "+arg, func(c xphone.Call) error { return c.BlindTransfer(arg) })
+		target := arg
+		return m, callAction(&m, "transfer to "+arg, -1, func(c xphone.Call) error {
+			return c.BlindTransfer(target)
+		})
+
+	case "echo":
+		m.ensureAudio()
+		if m.audio == nil {
+			m.err = "no active call"
+			return m, nil
+		}
+		on := !m.audio.EchoActive()
+		m.audio.SetEcho(on)
+		if on {
+			m.pushEvent("echo: ON")
+			if m.audio.MicActive() {
+				m.pushEvent("mic: OFF (echo takes priority)")
+			}
+		} else {
+			m.pushEvent("echo: OFF")
+		}
+		return m, nil
+
+	case "speaker":
+		m.ensureAudio()
+		if m.audio == nil {
+			m.err = "no active call"
+			return m, nil
+		}
+		on := !m.audio.SpeakerActive()
+		m.audio.SetSpeaker(on)
+		if on {
+			m.pushEvent("speaker: ON")
+		} else {
+			m.pushEvent("speaker: OFF")
+		}
+		return m, nil
+
+	case "mic":
+		m.ensureAudio()
+		if m.audio == nil {
+			m.err = "no active call"
+			return m, nil
+		}
+		on := !m.audio.MicActive()
+		m.audio.SetMic(on)
+		if on {
+			m.pushEvent("mic: ON")
+			if m.audio.EchoActive() {
+				m.pushEvent("echo: OFF (mic takes priority)")
+			}
+		} else {
+			m.pushEvent("mic: OFF")
+		}
+		return m, nil
 
 	default:
-		m.err = fmt.Sprintf("unknown: %s", cmd)
+		// Try to select a call by number
+		if n, err := strconv.Atoi(cmd); err == nil {
+			if n >= 1 && n <= len(m.calls) {
+				m.selected = n - 1
+			} else {
+				m.err = fmt.Sprintf("no call #%d", n)
+			}
+			return m, nil
+		}
+		m.err = fmt.Sprintf("unknown command: %s", cmd)
 		return m, nil
 	}
 }
 
-func (m model) callAction(name string, fn func(xphone.Call) error) tea.Cmd {
-	if m.call == nil {
-		m.err = "no active call"
+func parseCallNum(arg string) int {
+	if arg == "" {
+		return -1
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(arg))
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
+func (m *model) resolveCall(num int) xphone.Call {
+	if len(m.calls) == 0 {
 		return nil
 	}
-	call := m.call
+	idx := m.selected
+	if num >= 1 && num <= len(m.calls) {
+		idx = num - 1
+	} else if num >= 1 {
+		return nil
+	}
+	if idx >= 0 && idx < len(m.calls) {
+		return m.calls[idx].call
+	}
+	return nil
+}
+
+func callAction(m *model, name string, num int, fn func(xphone.Call) error) tea.Cmd {
+	c := m.resolveCall(num)
+	if c == nil {
+		if num >= 1 {
+			m.err = fmt.Sprintf("no call #%d", num)
+		} else {
+			m.err = "no active call"
+		}
+		return nil
+	}
 	return func() tea.Msg {
-		if err := fn(call); err != nil {
-			return msgLog(fmt.Sprintf("[error] %s: %s", name, err))
+		if err := fn(c); err != nil {
+			return msgLog(fmt.Sprintf("ERROR %s: %s", name, err))
 		}
 		return nil
 	}
@@ -424,108 +954,160 @@ func (m model) cmdDial(target string) tea.Cmd {
 			xphone.WithDialTimeout(30*time.Second),
 		)
 		if err != nil {
-			return msgLog(fmt.Sprintf("[error] dial failed: %s", err))
+			return msgLog(fmt.Sprintf("ERROR dial failed: %s", err))
 		}
 		wireCallEvents(call)
 		return msgCallRef{call: call}
 	}
 }
 
-// --- xphone event wiring ---
+// ---------------------------------------------------------------------------
+// Audio management
+// ---------------------------------------------------------------------------
+
+// ensureAudio starts the audio handler for the selected call if not already running.
+func (m *model) ensureAudio() {
+	c := m.resolveCall(-1)
+	if c == nil {
+		return
+	}
+	if m.audio != nil {
+		return
+	}
+	m.audio = newAudioHandler(c)
+}
+
+// shutdown cleanly stops audio, ends all calls, and disconnects the phone.
+func (m model) shutdown() (model, tea.Cmd) {
+	m.quitting = true
+	m.stopAudio()
+	calls := m.calls
+	phone := m.phone
+	return m, tea.Batch(tea.Quit, func() tea.Msg {
+		for _, tc := range calls {
+			tc.call.End()
+		}
+		phone.Disconnect()
+		return nil
+	})
+}
+
+// stopAudio stops and cleans up the audio handler.
+func (m *model) stopAudio() {
+	if m.audio != nil {
+		m.audio.Stop()
+		m.audio = nil
+	}
+}
+
+// ---------------------------------------------------------------------------
+// xphone event wiring
+// ---------------------------------------------------------------------------
 
 func wirePhoneEvents(phone xphone.Phone) {
 	phone.OnRegistered(func() {
 		prog.Send(msgRegState("registered"))
-		prog.Send(msgLog("[event] registered with server"))
+		prog.Send(msgLog("registered with server"))
 	})
 	phone.OnUnregistered(func() {
 		prog.Send(msgRegState("unregistered"))
-		prog.Send(msgLog("[event] registration lost"))
+		prog.Send(msgLog("registration lost"))
 	})
 	phone.OnError(func(err error) {
 		prog.Send(msgRegState("error"))
-		prog.Send(msgLog(fmt.Sprintf("[error] %s", err)))
+		prog.Send(msgLog(fmt.Sprintf("ERROR %s", err)))
 	})
 	phone.OnIncoming(func(call xphone.Call) {
 		wireCallEvents(call)
-
-		from := call.From()
-		if name := call.FromName(); name != "" {
-			from = fmt.Sprintf("%s (%s)", name, from)
-		}
-		prog.Send(msgLog(fmt.Sprintf("[incoming] from %s — type 'accept' or 'reject'", from)))
-		prog.Send(msgCallState(fmt.Sprintf("ringing from %s", from)))
+		prog.Send(msgLog(fmt.Sprintf("incoming from %s — type 'accept' or 'reject'", callLabel(call))))
 		prog.Send(msgCallRef{call: call})
 	})
 }
 
 func wireCallEvents(call xphone.Call) {
+	callID := call.CallID()
 	call.OnState(func(state xphone.CallState) {
 		name := callStateName(state)
-		prog.Send(msgLog(fmt.Sprintf("[state] %s", name)))
-		if state == xphone.StateEnded {
-			prog.Send(msgCallCleared{})
-		} else {
-			prog.Send(msgCallState(name))
+		prog.Send(msgLog(fmt.Sprintf("[%s] %s", callLabel(call), name)))
+		if state != xphone.StateEnded {
+			prog.Send(msgCallState{callID: callID, status: name})
 		}
 	})
 	call.OnEnded(func(reason xphone.EndReason) {
-		prog.Send(msgLog(fmt.Sprintf("[ended] %s", endReasonName(reason))))
-		prog.Send(msgCallCleared{})
+		prog.Send(msgLog(fmt.Sprintf("ended: %s", endReasonName(reason))))
+		prog.Send(msgCallEnded{callID: callID})
 	})
 	call.OnDTMF(func(digit string) {
-		prog.Send(msgLog(fmt.Sprintf("[dtmf] received: %s", digit)))
+		prog.Send(msgLog(fmt.Sprintf("DTMF received: %s", digit)))
 	})
 	call.OnHold(func() {
-		prog.Send(msgLog("[event] put on hold by remote"))
+		prog.Send(msgLog("held by remote"))
 	})
 	call.OnResume(func() {
-		prog.Send(msgLog("[event] resumed by remote"))
+		prog.Send(msgLog("resumed by remote"))
 	})
 }
 
-// --- display helpers ---
+// ---------------------------------------------------------------------------
+// Display helpers
+// ---------------------------------------------------------------------------
 
 func callStateName(s xphone.CallState) string {
-	names := map[xphone.CallState]string{
-		xphone.StateIdle:          "idle",
-		xphone.StateRinging:       "ringing",
-		xphone.StateDialing:       "dialing",
-		xphone.StateRemoteRinging: "remote ringing",
-		xphone.StateEarlyMedia:    "early media",
-		xphone.StateActive:        "active",
-		xphone.StateOnHold:        "on hold",
-		xphone.StateEnded:         "ended",
+	switch s {
+	case xphone.StateIdle:
+		return "idle"
+	case xphone.StateRinging:
+		return "ringing"
+	case xphone.StateDialing:
+		return "dialing"
+	case xphone.StateRemoteRinging:
+		return "ringing remote"
+	case xphone.StateEarlyMedia:
+		return "early media"
+	case xphone.StateActive:
+		return "active"
+	case xphone.StateOnHold:
+		return "on hold"
+	case xphone.StateEnded:
+		return "ended"
+	default:
+		return fmt.Sprintf("unknown(%d)", s)
 	}
-	if name, ok := names[s]; ok {
-		return name
-	}
-	return fmt.Sprintf("unknown(%d)", s)
 }
 
 func endReasonName(r xphone.EndReason) string {
-	names := map[xphone.EndReason]string{
-		xphone.EndedByLocal:     "local hangup",
-		xphone.EndedByRemote:    "remote hangup",
-		xphone.EndedByTimeout:   "media timeout",
-		xphone.EndedByError:     "error",
-		xphone.EndedByTransfer:  "transferred",
-		xphone.EndedByRejected:  "rejected",
-		xphone.EndedByCancelled: "cancelled",
+	switch r {
+	case xphone.EndedByLocal:
+		return "local hangup"
+	case xphone.EndedByRemote:
+		return "remote hangup"
+	case xphone.EndedByTimeout:
+		return "media timeout"
+	case xphone.EndedByError:
+		return "error"
+	case xphone.EndedByTransfer:
+		return "transferred"
+	case xphone.EndedByRejected:
+		return "rejected"
+	case xphone.EndedByCancelled:
+		return "cancelled"
+	default:
+		return fmt.Sprintf("unknown(%d)", r)
 	}
-	if name, ok := names[r]; ok {
-		return name
-	}
-	return fmt.Sprintf("unknown(%d)", r)
 }
 
-// --- profiles ---
+// ---------------------------------------------------------------------------
+// Profiles
+// ---------------------------------------------------------------------------
 
 type profile struct {
 	Server    string `yaml:"server"`
 	User      string `yaml:"user"`
 	Pass      string `yaml:"pass"`
 	Transport string `yaml:"transport"`
+	Port      int    `yaml:"port"`
+	Stun      string `yaml:"stun"`
+	LocalIP   string `yaml:"local_ip"`
 }
 
 type profileFile struct {
@@ -556,36 +1138,100 @@ func loadProfile(name string) (profile, error) {
 	return p, nil
 }
 
-// --- main ---
+// ---------------------------------------------------------------------------
+// CLI flags
+// ---------------------------------------------------------------------------
+
+type cliFlags struct {
+	profile   string
+	server    string
+	user      string
+	pass      string
+	transport string
+	port      int
+	stun      string
+	localIP   string
+}
+
+func parseFlags() cliFlags {
+	var f cliFlags
+	// Manual flag parsing to support --flag syntax like the Rust version,
+	// while also supporting Go's -flag syntax.
+	args := os.Args[1:]
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		arg = strings.TrimLeft(arg, "-")
+		if i+1 >= len(args) {
+			break
+		}
+		val := args[i+1]
+		switch arg {
+		case "profile":
+			f.profile = val
+			i++
+		case "server":
+			f.server = val
+			i++
+		case "user":
+			f.user = val
+			i++
+		case "pass":
+			f.pass = val
+			i++
+		case "transport":
+			f.transport = val
+			i++
+		case "port":
+			f.port, _ = strconv.Atoi(val)
+			i++
+		case "stun":
+			f.stun = val
+			i++
+		case "local-ip", "local_ip", "localip":
+			f.localIP = val
+			i++
+		}
+	}
+	return f
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 func main() {
-	profileName := flag.String("profile", "", "load settings from ~/.sipcli.yaml profile")
-	server := flag.String("server", "", "SIP server hostname or IP")
-	user := flag.String("user", "", "SIP username")
-	pass := flag.String("pass", "", "SIP password")
-	transport := flag.String("transport", "", "SIP transport: udp, tcp, tls")
-	flag.Parse()
+	cli := parseFlags()
 
+	// Resolve profile + CLI overrides.
 	var p profile
-	if *profileName != "" {
+	if cli.profile != "" {
 		var err error
-		p, err = loadProfile(*profileName)
+		p, err = loadProfile(cli.profile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 	}
-	if *server != "" {
-		p.Server = *server
+	if cli.server != "" {
+		p.Server = cli.server
 	}
-	if *user != "" {
-		p.User = *user
+	if cli.user != "" {
+		p.User = cli.user
 	}
-	if *pass != "" {
-		p.Pass = *pass
+	if cli.pass != "" {
+		p.Pass = cli.pass
 	}
-	if *transport != "" {
-		p.Transport = *transport
+	if cli.transport != "" {
+		p.Transport = cli.transport
+	}
+	if cli.port != 0 {
+		p.Port = cli.port
+	}
+	if cli.stun != "" {
+		p.Stun = cli.stun
+	}
+	if cli.localIP != "" {
+		p.LocalIP = cli.localIP
 	}
 	if p.Transport == "" {
 		p.Transport = "udp"
@@ -594,39 +1240,60 @@ func main() {
 	if p.Server == "" || p.User == "" {
 		fmt.Fprintln(os.Stderr, "Usage: sipcli -profile <name>")
 		fmt.Fprintln(os.Stderr, "       sipcli -server <host> -user <username> [-pass <password>] [-transport udp|tcp|tls]")
+		fmt.Fprintln(os.Stderr, "             [-port <port>] [-stun <host:port>] [-local-ip <ip>]")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Profiles are loaded from ~/.sipcli.yaml. Flags override profile values.")
 		os.Exit(1)
 	}
 
-	// Silence the standard log package (used by sipgo's transport layer)
-	// so it doesn't leak through bubbletea's alt screen.
-	log.SetOutput(io.Discard)
+	// Route sipgo's standard log output into the TUI debug panel
+	// instead of letting it leak through bubbletea's alt screen.
+	log.SetOutput(tuiWriter{})
+	log.SetFlags(0) // no timestamp prefix — we handle formatting
 
-	// Route library logs into the TUI debug panel instead of stderr.
+	// Route library logs into the TUI debug panel.
 	debugLogger := slog.New(&tuiHandler{level: slog.LevelDebug})
 
-	phone := xphone.New(
+	// Build phone options
+	opts := []xphone.PhoneOption{
 		xphone.WithCredentials(p.User, p.Pass, p.Server),
 		xphone.WithTransport(p.Transport, nil),
 		xphone.WithLogger(debugLogger),
-	)
+	}
+	if p.Port != 0 {
+		opts = append(opts, xphone.WithRTPPorts(p.Port, p.Port+100))
+	}
+	if p.Stun != "" {
+		opts = append(opts, xphone.WithStunServer(p.Stun))
+	}
+
+	phone := xphone.New(opts...)
 
 	wirePhoneEvents(phone)
 
 	prog = tea.NewProgram(initialModel(phone), tea.WithAltScreen())
 
 	go func() {
-		prog.Send(msgLog("[info] connecting to " + p.Server + " as " + p.User + "..."))
+		msg := fmt.Sprintf("connecting to %s as %s...", p.Server, p.User)
+		if p.Stun != "" {
+			msg += fmt.Sprintf(" (STUN: %s)", p.Stun)
+		}
+		prog.Send(msgLog(msg))
 		prog.Send(msgRegState("registering"))
 		if err := phone.Connect(context.Background()); err != nil {
-			prog.Send(msgLog(fmt.Sprintf("[error] connect: %s", err)))
+			prog.Send(msgLog(fmt.Sprintf("ERROR connect: %s", err)))
 			prog.Send(msgRegState("failed"))
 		}
 	}()
 
-	if _, err := prog.Run(); err != nil {
+	finalModel, err := prog.Run()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Save command history on exit.
+	if m, ok := finalModel.(model); ok {
+		saveHistory(m.history)
 	}
 }

@@ -118,9 +118,11 @@ func (p *phone) setupSRTP(c *call, localKey, remoteKey string) {
 		p.logger.Error("SRTP inbound context setup failed", "err", err)
 		return
 	}
+	c.mu.Lock()
 	c.srtpLocalKey = localKey
 	c.srtpOut = outCtx
 	c.srtpIn = inCtx
+	c.mu.Unlock()
 	p.logger.Info("SRTP enabled for call", "id", c.id)
 }
 

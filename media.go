@@ -161,6 +161,8 @@ func (c *call) startMedia() {
 		defer mediaTimer.Stop()
 		jitterTick := time.NewTicker(5 * time.Millisecond)
 		defer jitterTick.Stop()
+		// Close output channels so consumers unblock on call end.
+		defer c.closeOutputChannels()
 
 		resetTimer := func() {
 			if !mediaTimer.Stop() {

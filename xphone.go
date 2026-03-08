@@ -260,7 +260,19 @@ func (p *phone) Disconnect() error {
 	p.reg = nil
 	p.tr = nil
 	fn := p.onUnregisteredFn
+
+	// Snapshot and clear active calls so we can end them outside the lock.
+	activeCalls := make([]*call, 0, len(p.calls))
+	for _, c := range p.calls {
+		activeCalls = append(activeCalls, c)
+	}
+	p.calls = make(map[string]*call)
 	p.mu.Unlock()
+
+	// End all active calls.
+	for _, c := range activeCalls {
+		c.End()
+	}
 
 	// Stop the registry (cancels refresh loop and re-registration goroutines).
 	if reg != nil {

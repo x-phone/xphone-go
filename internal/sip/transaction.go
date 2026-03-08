@@ -91,10 +91,12 @@ func (tm *TransactionManager) Send(req *Message, dst *net.UDPAddr, timeout time.
 	}
 
 	// Wait for first response, timeout, or stop.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case resp := <-tx.respCh:
 		return resp, nil
-	case <-time.After(timeout):
+	case <-timer.C:
 		tm.removeTx(branch)
 		return nil, ErrTransactionTimeout
 	case <-tm.done:
@@ -112,10 +114,12 @@ func (tm *TransactionManager) ReadResponse(branch string, timeout time.Duration)
 		return nil, errors.New("sip: no pending transaction for branch")
 	}
 
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case resp := <-tx.respCh:
 		return resp, nil
-	case <-time.After(timeout):
+	case <-timer.C:
 		return nil, ErrTransactionTimeout
 	case <-tm.done:
 		return nil, ErrTransactionStopped

@@ -67,7 +67,15 @@ func (jb *JitterBuffer) Pop() *rtp.Packet {
 	if now.Sub(jb.entries[0].arrival) >= jb.depth {
 		pkt := jb.entries[0].pkt
 		delete(jb.seen, pkt.Header.SequenceNumber)
+		// Zero vacated slot to allow GC of the popped packet.
+		jb.entries[0] = jitterEntry{}
 		jb.entries = jb.entries[1:]
+		// Compact when backing array is oversized to prevent unbounded growth.
+		if cap(jb.entries) > 64 && cap(jb.entries) > 4*len(jb.entries) {
+			compacted := make([]jitterEntry, len(jb.entries))
+			copy(compacted, jb.entries)
+			jb.entries = compacted
+		}
 		return pkt
 	}
 	return nil

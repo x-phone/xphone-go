@@ -185,6 +185,7 @@ type call struct {
 	pcmReader    chan []int16
 	pcmWriter    chan []int16
 	sentRTP      chan *rtp.Packet // test hook: outbound packets copied here
+	closeChOnce  sync.Once        // ensures output channels are closed exactly once
 }
 
 func newInboundCall(d dialog) *call {
@@ -565,6 +566,11 @@ func (c *call) fireOnState(state CallState) {
 // fireOnEnded dispatches the cleanup, phone-level, and public OnEnded callbacks.
 // Must be called with c.mu held.
 func (c *call) fireOnEnded(reason EndReason) {
+	// Stop session refresh timer.
+	if c.sessionTimer != nil {
+		c.sessionTimer.Stop()
+		c.sessionTimer = nil
+	}
 	// Stop media pipeline goroutine.
 	if c.mediaDone != nil {
 		select {
@@ -579,6 +585,13 @@ func (c *call) fireOnEnded(reason EndReason) {
 		c.rtpConn.Close()
 		c.rtpConn = nil
 	}
+	// Close output channels only if the media goroutine was never started
+	// (otherwise the goroutine's defer handles it to avoid send-on-closed panic).
+	if c.mediaDone == nil {
+		c.closeOutputChannels()
+	}
+	// Clear OnNotify to break closure reference cycles.
+	c.dlg.OnNotify(nil)
 	if c.onEndedCleanup != nil {
 		fn := c.onEndedCleanup
 		go fn(reason)
@@ -591,6 +604,15 @@ func (c *call) fireOnEnded(reason EndReason) {
 		fn := c.onEndedFn
 		go fn(reason)
 	}
+}
+
+// closeOutputChannels closes the consumer-facing channels exactly once.
+func (c *call) closeOutputChannels() {
+	c.closeChOnce.Do(func() {
+		close(c.rtpReader)
+		close(c.rtpRawReader)
+		close(c.pcmReader)
+	})
 }
 
 func (c *call) Accept(opts ...AcceptOption) error {
@@ -652,9 +674,6 @@ func (c *call) Reject(code int, reason string) error {
 func (c *call) End() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.sessionTimer != nil {
-		c.sessionTimer.Stop()
-	}
 	switch c.state {
 	case StateDialing, StateRemoteRinging, StateEarlyMedia:
 		if err := c.dlg.SendCancel(); err != nil {

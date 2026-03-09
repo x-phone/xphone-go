@@ -13,6 +13,10 @@ type Session struct {
 	Connection string // IP from c= line
 	Media      []MediaDesc
 	Raw        string // original SDP text
+
+	IceUfrag string // a=ice-ufrag (session or media level)
+	IcePwd   string // a=ice-pwd (session or media level)
+	IceLite  bool   // a=ice-lite (session level)
 }
 
 // SDP direction constants.
@@ -38,11 +42,12 @@ type CryptoAttr struct {
 
 // MediaDesc describes a single media line in an SDP session.
 type MediaDesc struct {
-	Port      int
-	Profile   string       // ProfileRTP or ProfileSRTP
-	Codecs    []int        // payload type numbers
-	Direction string       // DirSendRecv | DirSendOnly | DirRecvOnly | DirInactive
-	Crypto    []CryptoAttr // a=crypto: attributes
+	Port       int
+	Profile    string       // ProfileRTP or ProfileSRTP
+	Codecs     []int        // payload type numbers
+	Direction  string       // DirSendRecv | DirSendOnly | DirRecvOnly | DirInactive
+	Crypto     []CryptoAttr // a=crypto: attributes
+	Candidates []string     // a=candidate: values (raw, without prefix)
 }
 
 // FirstCodec returns the first payload type from the first m= line, or -1 if none.
@@ -129,6 +134,14 @@ func Parse(raw string) (*Session, error) {
 				if ca, err := parseCryptoVal(val[7:]); err == nil {
 					curMedia.Crypto = append(curMedia.Crypto, ca)
 				}
+			case val == "ice-lite":
+				s.IceLite = true
+			case strings.HasPrefix(val, "ice-ufrag:"):
+				s.IceUfrag = val[10:]
+			case strings.HasPrefix(val, "ice-pwd:"):
+				s.IcePwd = val[8:]
+			case strings.HasPrefix(val, "candidate:") && curMedia != nil:
+				curMedia.Candidates = append(curMedia.Candidates, val[10:])
 			}
 		}
 	}
@@ -139,9 +152,17 @@ func Parse(raw string) (*Session, error) {
 	return s, nil
 }
 
+// ICEParams holds ICE attributes for SDP encoding.
+type ICEParams struct {
+	Ufrag      string   // ice-ufrag value
+	Pwd        string   // ice-pwd value
+	Candidates []string // raw candidate values (without "a=candidate:" prefix)
+	Lite       bool     // include a=ice-lite at session level
+}
+
 // BuildOffer creates an SDP offer string.
 func BuildOffer(ip string, port int, codecs []int, direction string) string {
-	return buildSDP(ip, port, codecs, direction, ProfileRTP, "")
+	return buildSDP(ip, port, codecs, direction, ProfileRTP, "", nil)
 }
 
 // BuildAnswer creates an SDP answer string that only includes codecs
@@ -154,6 +175,34 @@ func BuildAnswer(ip string, port int, localPrefs []int, remoteOffer []int, direc
 		common = localPrefs
 	}
 	return BuildOffer(ip, port, common, direction)
+}
+
+// BuildOfferICE creates an SDP offer with ICE attributes.
+func BuildOfferICE(ip string, port int, codecs []int, direction string, ice *ICEParams) string {
+	return buildSDP(ip, port, codecs, direction, ProfileRTP, "", ice)
+}
+
+// BuildAnswerICE creates an SDP answer with ICE attributes.
+func BuildAnswerICE(ip string, port int, localPrefs, remoteOffer []int, direction string, ice *ICEParams) string {
+	common := intersectCodecs(localPrefs, remoteOffer)
+	if len(common) == 0 {
+		common = localPrefs
+	}
+	return buildSDP(ip, port, common, direction, ProfileRTP, "", ice)
+}
+
+// BuildOfferSRTPICE creates an SDP offer with SRTP and ICE attributes.
+func BuildOfferSRTPICE(ip string, port int, codecs []int, direction, cryptoInlineKey string, ice *ICEParams) string {
+	return buildSDP(ip, port, codecs, direction, ProfileSRTP, cryptoInlineKey, ice)
+}
+
+// BuildAnswerSRTPICE creates an SDP answer with SRTP and ICE attributes.
+func BuildAnswerSRTPICE(ip string, port int, localPrefs, remoteOffer []int, direction, cryptoInlineKey string, ice *ICEParams) string {
+	common := intersectCodecs(localPrefs, remoteOffer)
+	if len(common) == 0 {
+		common = localPrefs
+	}
+	return buildSDP(ip, port, common, direction, ProfileSRTP, cryptoInlineKey, ice)
 }
 
 // intersectCodecs returns codecs present in both lists, in localPrefs order.
@@ -183,7 +232,7 @@ func NegotiateCodec(localPrefs []int, remoteOffer []int) int {
 
 // BuildOfferSRTP creates an SDP offer with RTP/SAVP and a=crypto: attribute.
 func BuildOfferSRTP(ip string, port int, codecs []int, direction, cryptoInlineKey string) string {
-	return buildSDP(ip, port, codecs, direction, ProfileSRTP, cryptoInlineKey)
+	return buildSDP(ip, port, codecs, direction, ProfileSRTP, cryptoInlineKey, nil)
 }
 
 // BuildAnswerSRTP creates an SDP answer with RTP/SAVP and a=crypto: attribute.
@@ -192,11 +241,11 @@ func BuildAnswerSRTP(ip string, port int, localPrefs []int, remoteOffer []int, d
 	if len(common) == 0 {
 		common = localPrefs
 	}
-	return buildSDP(ip, port, common, direction, ProfileSRTP, cryptoInlineKey)
+	return buildSDP(ip, port, common, direction, ProfileSRTP, cryptoInlineKey, nil)
 }
 
 // buildSDP is the shared implementation for building SDP with configurable profile.
-func buildSDP(ip string, port int, codecs []int, direction, profile, cryptoInlineKey string) string {
+func buildSDP(ip string, port int, codecs []int, direction, profile, cryptoInlineKey string, ice *ICEParams) string {
 	var b strings.Builder
 	b.WriteString("v=0\r\n")
 	b.WriteString("o=xphone 0 0 IN IP4 ")
@@ -207,6 +256,9 @@ func buildSDP(ip string, port int, codecs []int, direction, profile, cryptoInlin
 	b.WriteString(ip)
 	b.WriteString("\r\n")
 	b.WriteString("t=0 0\r\n")
+	if ice != nil && ice.Lite {
+		b.WriteString("a=ice-lite\r\n")
+	}
 	b.WriteString(fmt.Sprintf("m=audio %d %s", port, profile))
 	for _, c := range codecs {
 		b.WriteString(fmt.Sprintf(" %d", c))
@@ -227,6 +279,19 @@ func buildSDP(ip string, port int, codecs []int, direction, profile, cryptoInlin
 		b.WriteString("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:")
 		b.WriteString(cryptoInlineKey)
 		b.WriteString("\r\n")
+	}
+	if ice != nil {
+		b.WriteString("a=ice-ufrag:")
+		b.WriteString(ice.Ufrag)
+		b.WriteString("\r\n")
+		b.WriteString("a=ice-pwd:")
+		b.WriteString(ice.Pwd)
+		b.WriteString("\r\n")
+		for _, c := range ice.Candidates {
+			b.WriteString("a=candidate:")
+			b.WriteString(c)
+			b.WriteString("\r\n")
+		}
 	}
 	b.WriteString("a=")
 	b.WriteString(direction)

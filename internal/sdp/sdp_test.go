@@ -148,3 +148,69 @@ func TestCryptoAttrInlineKey(t *testing.T) {
 	ca2 := CryptoAttr{KeyParams: "noprefix"}
 	assert.Equal(t, "noprefix", ca2.InlineKey())
 }
+
+// --- ICE SDP tests ---
+
+func TestBuildOfferICE(t *testing.T) {
+	ice := &ICEParams{
+		Ufrag: "abcd1234",
+		Pwd:   "longpasswordstringhere123",
+		Candidates: []string{
+			"1 1 UDP 2130706431 192.168.1.100 5004 typ host",
+			"2 1 UDP 1694498815 203.0.113.42 12345 typ srflx raddr 192.168.1.100 rport 5004",
+		},
+		Lite: true,
+	}
+	s := BuildOfferICE("192.168.1.100", 5004, []int{0}, "sendrecv", ice)
+	assert.Contains(t, s, "a=ice-lite\r\n")
+	assert.Contains(t, s, "a=ice-ufrag:abcd1234\r\n")
+	assert.Contains(t, s, "a=ice-pwd:longpasswordstringhere123\r\n")
+	assert.Contains(t, s, "a=candidate:1 1 UDP 2130706431 192.168.1.100 5004 typ host\r\n")
+	assert.Contains(t, s, "a=candidate:2 1 UDP 1694498815 203.0.113.42 12345 typ srflx")
+}
+
+func TestBuildOfferSRTPICE(t *testing.T) {
+	ice := &ICEParams{Ufrag: "u1234567", Pwd: "pwd12345678901234567890", Lite: true}
+	s := BuildOfferSRTPICE("10.0.0.1", 5004, []int{0}, "sendrecv", "base64key==", ice)
+	assert.Contains(t, s, "RTP/SAVP")
+	assert.Contains(t, s, "a=crypto:")
+	assert.Contains(t, s, "a=ice-ufrag:u1234567")
+	assert.Contains(t, s, "a=ice-lite")
+}
+
+func TestParseICE_RoundTrip(t *testing.T) {
+	ice := &ICEParams{
+		Ufrag:      "testufrag",
+		Pwd:        "testpasswordstring123456",
+		Candidates: []string{"1 1 UDP 2130706431 192.168.1.100 5004 typ host"},
+		Lite:       true,
+	}
+	raw := BuildOfferICE("192.168.1.100", 5004, []int{0}, "sendrecv", ice)
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	assert.True(t, s.IceLite)
+	assert.Equal(t, "testufrag", s.IceUfrag)
+	assert.Equal(t, "testpasswordstring123456", s.IcePwd)
+	require.NotEmpty(t, s.Media)
+	require.Len(t, s.Media[0].Candidates, 1)
+	assert.Contains(t, s.Media[0].Candidates[0], "192.168.1.100")
+}
+
+func TestParseICE_NotPresent(t *testing.T) {
+	raw := BuildOffer("10.0.0.1", 5004, []int{0}, "sendrecv")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	assert.False(t, s.IceLite)
+	assert.Empty(t, s.IceUfrag)
+	assert.Empty(t, s.IcePwd)
+}
+
+func TestParseICE_FromRawSDP(t *testing.T) {
+	raw := "v=0\r\no=- 0 0 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\na=ice-lite\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=ice-ufrag:abc123\r\na=ice-pwd:password1234567890abcdef\r\na=candidate:1 1 UDP 2130706431 10.0.0.1 5004 typ host\r\na=sendrecv\r\n"
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	assert.True(t, s.IceLite)
+	assert.Equal(t, "abc123", s.IceUfrag)
+	assert.Equal(t, "password1234567890abcdef", s.IcePwd)
+	require.Len(t, s.Media[0].Candidates, 1)
+}

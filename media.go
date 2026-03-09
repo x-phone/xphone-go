@@ -10,6 +10,7 @@ import (
 	"github.com/pion/rtp"
 	"github.com/x-phone/xphone-go/internal/media"
 	"github.com/x-phone/xphone-go/internal/rtcp"
+	"github.com/x-phone/xphone-go/internal/stun"
 )
 
 // Default media configuration values.
@@ -78,6 +79,7 @@ func randUint32() uint32 {
 func (c *call) startRTPReader() {
 	c.mu.Lock()
 	conn := c.rtpConn
+	iceAgent := c.iceAgent // immutable after call setup
 	c.mu.Unlock()
 	if conn == nil {
 		return
@@ -86,13 +88,24 @@ func (c *call) startRTPReader() {
 	go func() {
 		buf := make([]byte, 1500)
 		for {
-			n, _, err := conn.ReadFrom(buf)
+			n, from, err := conn.ReadFrom(buf)
 			if err != nil {
 				return // socket closed
 			}
 			// Copy before unmarshal since we reuse the read buffer.
 			cp := make([]byte, n)
 			copy(cp, buf[:n])
+
+			// ICE STUN demux: intercept Binding Requests before RTP processing.
+			if iceAgent != nil && stun.IsMessage(cp) {
+				fromUDP, ok := from.(*net.UDPAddr)
+				if ok {
+					if resp := iceAgent.HandleBindingRequest(cp, fromUDP); resp != nil {
+						conn.WriteTo(resp, from)
+					}
+				}
+				continue
+			}
 
 			// Re-read srtpIn each iteration so a re-INVITE key change takes effect.
 			c.mu.Lock()

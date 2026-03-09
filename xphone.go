@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/x-phone/xphone-go/ice"
 	"github.com/x-phone/xphone-go/internal/sdp"
 	"github.com/x-phone/xphone-go/internal/srtp"
 	"github.com/x-phone/xphone-go/internal/stun"
@@ -44,7 +45,8 @@ type phone struct {
 	logger     *slog.Logger
 	tr         sipTransport
 	reg        *registry
-	localIP    string // cached localIPFor(cfg.Host), set at construction
+	localIP    string // cached localIPFor(cfg.Host), or STUN-mapped IP after Connect
+	hostIP     string // real local interface IP (pre-STUN, for ICE host candidate)
 	codecPrefs []int  // cached codecPrefsToInts(cfg.CodecPrefs), set at construction
 	state      PhoneState
 	incoming   func(Call)
@@ -84,10 +86,12 @@ func codecPrefsToInts(codecs []Codec) []int {
 }
 
 func newPhone(cfg Config) *phone {
+	hostIP := localIPFor(cfg.Host)
 	return &phone{
 		cfg:        cfg,
 		logger:     resolveLogger(cfg.Logger),
-		localIP:    localIPFor(cfg.Host),
+		localIP:    hostIP,
+		hostIP:     hostIP,
 		codecPrefs: codecPrefsToInts(cfg.CodecPrefs),
 		state:      PhoneStateDisconnected,
 		calls:      make(map[string]*call),
@@ -141,6 +145,8 @@ func (p *phone) applyCallConfig(c *call) {
 	c.pcmRate = p.cfg.PCMRate
 	c.codecPrefs = p.codecPrefs
 	c.dtmfMode = p.cfg.DtmfMode
+	c.iceEnabled = p.cfg.ICE
+	c.hostIP = p.hostIP
 }
 
 // transportDial implements dialFn using the sipTransport interface.
@@ -397,6 +403,11 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 				if sess, parseErr := sdp.Parse(c.remoteSDP); parseErr == nil {
 					c.negotiateCodec(sess)
 					c.setRemoteEndpoint(sess)
+
+					// Set remote ICE credentials from answer SDP.
+					if c.iceAgent != nil && sess.IceUfrag != "" && sess.IcePwd != "" {
+						c.iceAgent.SetRemoteCredentials(ice.Credentials{Ufrag: sess.IceUfrag, Pwd: sess.IcePwd})
+					}
 
 					// Set up SRTP if remote accepted with crypto.
 					if uac.srtpLocalKey != "" && sess.IsSRTP() {

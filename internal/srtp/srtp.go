@@ -1,7 +1,8 @@
-// Package srtp implements SRTP (RFC 3711) with AES_CM_128_HMAC_SHA1_80.
+// Package srtp implements SRTP/SRTCP (RFC 3711) with AES_CM_128_HMAC_SHA1_80.
 //
-// It provides encrypt (Protect) and decrypt (Unprotect) for RTP packets,
-// SDES key exchange (RFC 4568), and keying material generation.
+// It provides encrypt/decrypt for both RTP (Protect/Unprotect) and
+// RTCP (ProtectRTCP/UnprotectRTCP) packets, SDES key exchange (RFC 4568),
+// keying material generation, and key zeroization.
 package srtp
 
 import (
@@ -22,10 +23,20 @@ const (
 	masterSaltLen = 14
 	authTagLen    = 10 // HMAC-SHA1-80 (truncated to 80 bits)
 
-	// Key derivation labels (RFC 3711 §4.3.1).
+	// SRTP key derivation labels (RFC 3711 §4.3.1).
 	labelCipherKey = 0x00
 	labelAuthKey   = 0x01
 	labelSalt      = 0x02
+
+	// SRTCP key derivation labels (RFC 3711 §4.3.1).
+	labelSRTCPCipherKey = 0x03
+	labelSRTCPAuthKey   = 0x04
+	labelSRTCPSalt      = 0x05
+
+	// rtcpHeaderMin is the minimum RTCP packet size (V, PT, length, SSRC).
+	rtcpHeaderMin = 8
+	// srtcpIndexLen is the size of the SRTCP index word.
+	srtcpIndexLen = 4
 
 	// CryptoSuite is the only suite we support.
 	CryptoSuite = "AES_CM_128_HMAC_SHA1_80"
@@ -116,40 +127,76 @@ func (w *replayWindow) accept(index uint64) {
 	}
 }
 
-// Context holds the derived session keys for one direction of SRTP.
+// Context holds the derived session keys for one direction of SRTP/SRTCP.
 type Context struct {
-	sessionSalt [14]byte // session salt
+	// SRTP fields.
+	sessionSalt [14]byte
+	authKey     [20]byte // retained for zeroization
 	block       cipher.Block
 	mac         hash.Hash
 
-	roc            uint32 // rollover counter
+	roc            uint32
 	lastSeq        uint16
 	seqInitialized bool
+	replay         replayWindow
 
-	replay replayWindow // replay protection (used by Unprotect only)
+	// SRTCP fields (RFC 3711 §3.4).
+	srtcpSessionSalt [14]byte
+	srtcpAuthKey     [20]byte
+	srtcpBlock       cipher.Block
+	srtcpMac         hash.Hash
+	srtcpIndex       uint32       // monotonically increasing 31-bit sender index
+	srtcpReplay      replayWindow // receiver-side replay protection
 }
 
-// New derives session keys from master key (16 bytes) and master salt (14 bytes).
+// New derives SRTP and SRTCP session keys from master key (16 bytes) and master salt (14 bytes).
 func New(masterKey [16]byte, masterSalt [14]byte) *Context {
 	c := &Context{}
 
+	// Derive SRTP session keys (labels 0x00-0x02).
 	var cipherKey [16]byte
 	derived := deriveSessionKey(masterKey, masterSalt, labelCipherKey, 16)
 	copy(cipherKey[:], derived[:16])
+	zeroize20(&derived)
 
-	var authKey [20]byte
 	derived = deriveSessionKey(masterKey, masterSalt, labelAuthKey, 20)
-	copy(authKey[:], derived[:])
+	copy(c.authKey[:], derived[:])
+	zeroize20(&derived)
 
 	derived = deriveSessionKey(masterKey, masterSalt, labelSalt, 14)
 	copy(c.sessionSalt[:], derived[:14])
+	zeroize20(&derived)
 
 	block, err := aes.NewCipher(cipherKey[:])
 	if err != nil {
 		panic("srtp: AES cipher creation failed: " + err.Error())
 	}
+	zeroize16(&cipherKey)
 	c.block = block
-	c.mac = hmac.New(sha1.New, authKey[:])
+	c.mac = hmac.New(sha1.New, c.authKey[:])
+
+	// Derive SRTCP session keys (labels 0x03-0x05).
+	var srtcpCipherKey [16]byte
+	derived = deriveSessionKey(masterKey, masterSalt, labelSRTCPCipherKey, 16)
+	copy(srtcpCipherKey[:], derived[:16])
+	zeroize20(&derived)
+
+	derived = deriveSessionKey(masterKey, masterSalt, labelSRTCPAuthKey, 20)
+	copy(c.srtcpAuthKey[:], derived[:])
+	zeroize20(&derived)
+
+	derived = deriveSessionKey(masterKey, masterSalt, labelSRTCPSalt, 14)
+	copy(c.srtcpSessionSalt[:], derived[:14])
+	zeroize20(&derived)
+
+	srtcpBlock, err := aes.NewCipher(srtcpCipherKey[:])
+	if err != nil {
+		panic("srtp: AES cipher creation failed: " + err.Error())
+	}
+	zeroize16(&srtcpCipherKey)
+	c.srtcpBlock = srtcpBlock
+	c.srtcpMac = hmac.New(sha1.New, c.srtcpAuthKey[:])
+
 	return c
 }
 
@@ -162,13 +209,18 @@ func FromSDESInline(inline string) (*Context, error) {
 		return nil, fmt.Errorf("srtp: decode inline key: %w", err)
 	}
 	if len(data) != masterKeyLen+masterSaltLen {
+		zeroizeSlice(data)
 		return nil, fmt.Errorf("srtp: inline key must be %d bytes, got %d", masterKeyLen+masterSaltLen, len(data))
 	}
 	var key [16]byte
 	var salt [14]byte
 	copy(key[:], data[:16])
 	copy(salt[:], data[16:])
-	return New(key, salt), nil
+	zeroizeSlice(data)
+	ctx := New(key, salt)
+	zeroize16(&key)
+	zeroize14(&salt)
+	return ctx, nil
 }
 
 // Protect encrypts an RTP packet in-place and appends a 10-byte auth tag.
@@ -260,6 +312,129 @@ func (c *Context) Unprotect(srtpPacket []byte) ([]byte, error) {
 	return rtp, nil
 }
 
+// ProtectRTCP encrypts an RTCP packet and appends SRTCP index + auth tag.
+// Layout: [header(8)][encrypted_payload][SRTCP_index(4)][auth_tag(10)]
+// First 8 bytes stay cleartext (authenticated but not encrypted).
+func (c *Context) ProtectRTCP(rtcpPacket []byte) ([]byte, error) {
+	if len(rtcpPacket) < rtcpHeaderMin {
+		return nil, fmt.Errorf("srtcp: packet too short")
+	}
+
+	ssrc := binary.BigEndian.Uint32(rtcpPacket[4:8])
+	index := c.srtcpIndex
+	c.srtcpIndex++
+
+	out := make([]byte, len(rtcpPacket))
+	copy(out, rtcpPacket)
+
+	// Encrypt bytes 8..end (header stays cleartext).
+	if len(out) > rtcpHeaderMin {
+		payload := out[rtcpHeaderMin:]
+		keystream := c.generateSRTCPKeystream(ssrc, uint64(index), len(payload))
+		for i := range payload {
+			payload[i] ^= keystream[i]
+		}
+	}
+
+	// Append SRTCP index with E-bit set (bit 31 = 1 → encrypted).
+	var indexWord [4]byte
+	binary.BigEndian.PutUint32(indexWord[:], 0x80000000|index)
+	out = append(out, indexWord[:]...)
+
+	// Auth tag covers: encrypted RTCP + SRTCP index.
+	tag := c.computeSRTCPAuthTag(out)
+	out = append(out, tag[:]...)
+	return out, nil
+}
+
+// UnprotectRTCP verifies auth tag, strips SRTCP index, and decrypts the packet.
+// Input: SRTCP bytes [header][encrypted_payload][SRTCP_index(4)][auth_tag(10)]
+// Output: raw RTCP bytes.
+func (c *Context) UnprotectRTCP(srtcpPacket []byte) ([]byte, error) {
+	// Minimum: 8 (header) + 4 (SRTCP index) + 10 (auth tag) = 22.
+	minLen := rtcpHeaderMin + srtcpIndexLen + authTagLen
+	if len(srtcpPacket) < minLen {
+		return nil, fmt.Errorf("srtcp: packet too short")
+	}
+
+	tagStart := len(srtcpPacket) - authTagLen
+	indexStart := tagStart - srtcpIndexLen
+	receivedTag := srtcpPacket[tagStart:]
+	authenticatedPortion := srtcpPacket[:tagStart] // everything before auth tag
+
+	// Extract SRTCP index word (E-bit + 31-bit index).
+	indexWord := binary.BigEndian.Uint32(srtcpPacket[indexStart : indexStart+4])
+	encrypted := (indexWord & 0x80000000) != 0
+	index := indexWord & 0x7FFFFFFF
+
+	// Replay check.
+	if c.srtcpReplay.isReplay(uint64(index)) {
+		return nil, fmt.Errorf("srtcp: replay detected")
+	}
+
+	// Verify auth tag.
+	expectedTag := c.computeSRTCPAuthTag(authenticatedPortion)
+	if subtle.ConstantTimeCompare(receivedTag, expectedTag[:]) != 1 {
+		return nil, fmt.Errorf("srtcp: authentication failed")
+	}
+
+	// Auth passed — update replay window.
+	c.srtcpReplay.accept(uint64(index))
+
+	// RTCP data is everything before the SRTCP index.
+	out := make([]byte, indexStart)
+	copy(out, srtcpPacket[:indexStart])
+
+	// Decrypt if E-bit is set.
+	if encrypted && len(out) > rtcpHeaderMin {
+		ssrc := binary.BigEndian.Uint32(out[4:8])
+		payload := out[rtcpHeaderMin:]
+		keystream := c.generateSRTCPKeystream(ssrc, uint64(index), len(payload))
+		for i := range payload {
+			payload[i] ^= keystream[i]
+		}
+	}
+
+	return out, nil
+}
+
+// Zeroize clears all sensitive key material from the context.
+// Call this when the SRTP session is no longer needed.
+func (c *Context) Zeroize() {
+	zeroize20(&c.authKey)
+	zeroize14(&c.sessionSalt)
+	zeroize20(&c.srtcpAuthKey)
+	zeroize14(&c.srtcpSessionSalt)
+	c.block = nil
+	c.mac = nil
+	c.srtcpBlock = nil
+	c.srtcpMac = nil
+}
+
+// generateSRTCPKeystream generates AES-CM keystream using SRTCP keys.
+func (c *Context) generateSRTCPKeystream(ssrc uint32, index uint64, length int) []byte {
+	return aesCMKeystream(c.srtcpBlock, &c.srtcpSessionSalt, ssrc, index, length)
+}
+
+// computeSRTCPAuthTag computes HMAC-SHA1 over the SRTCP authenticated portion.
+// Unlike SRTP, SRTCP does not append ROC (RFC 3711 §3.4).
+func (c *Context) computeSRTCPAuthTag(packet []byte) [authTagLen]byte {
+	c.srtcpMac.Reset()
+	c.srtcpMac.Write(packet)
+	return hmacTag(c.srtcpMac, nil)
+}
+
+// --- zeroization helpers ---
+
+func zeroize14(b *[14]byte) { *b = [14]byte{} }
+func zeroize16(b *[16]byte) { *b = [16]byte{} }
+func zeroize20(b *[20]byte) { *b = [20]byte{} }
+func zeroizeSlice(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
 // GenerateKeyingMaterial generates 30 random bytes (16 key + 14 salt)
 // and returns the base64-encoded inline key for SDP a=crypto: attributes.
 func GenerateKeyingMaterial() (string, error) {
@@ -312,18 +487,35 @@ func deriveSessionKey(masterKey [16]byte, masterSalt [14]byte, label byte, outLe
 	return result
 }
 
-// generateKeystream generates AES-CM keystream for encrypting/decrypting payload.
+// generateKeystream generates AES-CM keystream for encrypting/decrypting RTP payload.
 func (c *Context) generateKeystream(ssrc uint32, index uint64, length int) []byte {
-	// IV = (session_salt XOR (ssrc || index)) padded to 16 bytes
+	return aesCMKeystream(c.block, &c.sessionSalt, ssrc, index, length)
+}
+
+// computeAuthTag computes HMAC-SHA1 over (packet || ROC), truncated to 80 bits.
+func (c *Context) computeAuthTag(packet []byte, roc uint32) [authTagLen]byte {
+	var rocBuf [4]byte
+	binary.BigEndian.PutUint32(rocBuf[:], roc)
+	// SRTP auth covers packet + ROC (RFC 3711 §4.2).
+	c.mac.Reset()
+	c.mac.Write(packet)
+	c.mac.Write(rocBuf[:])
+	return hmacTag(c.mac, nil)
+}
+
+// --- shared crypto helpers ---
+
+// aesCMKeystream generates AES-CM keystream (RFC 3711 §4.1.1).
+// Used by both SRTP and SRTCP with their respective block ciphers and salts.
+func aesCMKeystream(block cipher.Block, salt *[14]byte, ssrc uint32, index uint64, length int) []byte {
+	// IV = (salt XOR (ssrc || index)) padded to 16 bytes.
 	// Layout: [0..3]=0, [4..7]=SSRC, [8..13]=index(48-bit), [14..15]=counter
 	var iv [16]byte
 	binary.BigEndian.PutUint32(iv[4:8], ssrc)
 	binary.BigEndian.PutUint16(iv[8:10], uint16(index>>32))
 	binary.BigEndian.PutUint32(iv[10:14], uint32(index))
-
-	// XOR with session salt (14 bytes).
 	for i := 0; i < 14; i++ {
-		iv[i] ^= c.sessionSalt[i]
+		iv[i] ^= salt[i]
 	}
 
 	keystream := make([]byte, length)
@@ -334,21 +526,21 @@ func (c *Context) generateKeystream(ssrc uint32, index uint64, length int) []byt
 		binary.BigEndian.PutUint16(ctrBlock[14:16], counter)
 
 		var out [16]byte
-		c.block.Encrypt(out[:], ctrBlock[:])
+		block.Encrypt(out[:], ctrBlock[:])
 		copy(keystream[off:], out[:])
 		counter++
 	}
 	return keystream
 }
 
-// computeAuthTag computes HMAC-SHA1 over (packet || ROC), truncated to 80 bits.
-func (c *Context) computeAuthTag(packet []byte, roc uint32) [authTagLen]byte {
-	c.mac.Reset()
-	c.mac.Write(packet)
-	var rocBuf [4]byte
-	binary.BigEndian.PutUint32(rocBuf[:], roc)
-	c.mac.Write(rocBuf[:])
-	sum := c.mac.Sum(nil)
+// hmacTag computes the HMAC-SHA1 tag truncated to authTagLen bytes.
+// If mac has already been written to, pass nil for data.
+func hmacTag(mac hash.Hash, data []byte) [authTagLen]byte {
+	if data != nil {
+		mac.Reset()
+		mac.Write(data)
+	}
+	sum := mac.Sum(nil)
 	var tag [authTagLen]byte
 	copy(tag[:], sum[:authTagLen])
 	return tag

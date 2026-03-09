@@ -342,11 +342,31 @@ func (c *call) startMedia() {
 
 			case <-rtcpTick:
 				if rtcpConn != nil && rtcpRemoteAddr != nil {
+					c.mu.Lock()
+					srtcpOut := c.srtpOut
+					c.mu.Unlock()
 					sr := rtcp.BuildSR(outSSRC, rtcpStats)
+					if srtcpOut != nil {
+						var err error
+						sr, err = srtcpOut.ProtectRTCP(sr)
+						if err != nil {
+							continue
+						}
+					}
 					rtcpConn.WriteTo(sr, rtcpRemoteAddr)
 				}
 
 			case data := <-rtcpInbound:
+				c.mu.Lock()
+				srtcpIn := c.srtpIn
+				c.mu.Unlock()
+				if srtcpIn != nil {
+					var err error
+					data, err = srtcpIn.UnprotectRTCP(data)
+					if err != nil {
+						continue
+					}
+				}
 				if pkt := rtcp.Parse(data); pkt != nil && pkt.IsSenderReport() {
 					rtcpStats.ProcessIncomingSR(pkt.NTPSec, pkt.NTPFrac)
 				}

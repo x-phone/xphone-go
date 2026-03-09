@@ -366,6 +366,219 @@ func TestSRTPOldPacketRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "replay")
 }
 
+// --- SRTCP tests ---
+
+// makeTestRTCP builds a minimal RTCP Sender Report (V=2, PT=200, SSRC).
+func makeTestRTCP(ssrc uint32) []byte {
+	pkt := make([]byte, 28)                 // 8 header + 20 sender info
+	pkt[0] = 0x80                           // V=2, RC=0
+	pkt[1] = 200                            // PT=SR
+	binary.BigEndian.PutUint16(pkt[2:4], 6) // length in 32-bit words minus one
+	binary.BigEndian.PutUint32(pkt[4:8], ssrc)
+	// Fill sender info with non-zero data.
+	for i := 8; i < 28; i++ {
+		pkt[i] = byte(i)
+	}
+	return pkt
+}
+
+func TestSRTCPProtectUnprotectRoundTrip(t *testing.T) {
+	sender, receiver := testContext()
+
+	rtcp := makeTestRTCP(0xDEADBEEF)
+	protected, err := sender.ProtectRTCP(rtcp)
+	require.NoError(t, err)
+
+	decrypted, err := receiver.UnprotectRTCP(protected)
+	require.NoError(t, err)
+	assert.Equal(t, rtcp, decrypted)
+}
+
+func TestSRTCPHeaderStaysCleartext(t *testing.T) {
+	sender, _ := testContext()
+
+	rtcp := makeTestRTCP(0xCAFEBABE)
+	protected, err := sender.ProtectRTCP(rtcp)
+	require.NoError(t, err)
+
+	// First 8 bytes (V, PT, length, SSRC) must be identical.
+	assert.Equal(t, rtcp[:8], protected[:8])
+}
+
+func TestSRTCPEBitSet(t *testing.T) {
+	sender, _ := testContext()
+
+	rtcp := makeTestRTCP(0x11111111)
+	protected, err := sender.ProtectRTCP(rtcp)
+	require.NoError(t, err)
+
+	// SRTCP index is at [len - 14 .. len - 10] (before the 10-byte auth tag).
+	idxStart := len(protected) - authTagLen - srtcpIndexLen
+	indexWord := binary.BigEndian.Uint32(protected[idxStart : idxStart+4])
+	assert.NotEqual(t, uint32(0), indexWord&0x80000000, "E-bit must be set")
+	assert.Equal(t, uint32(0), indexWord&0x7FFFFFFF, "first packet index should be 0")
+}
+
+func TestSRTCPIndexIncrements(t *testing.T) {
+	sender, _ := testContext()
+
+	rtcp := makeTestRTCP(0x22222222)
+	for expected := uint32(0); expected < 5; expected++ {
+		protected, err := sender.ProtectRTCP(rtcp)
+		require.NoError(t, err)
+
+		idxStart := len(protected) - authTagLen - srtcpIndexLen
+		indexWord := binary.BigEndian.Uint32(protected[idxStart : idxStart+4])
+		assert.Equal(t, expected, indexWord&0x7FFFFFFF)
+	}
+}
+
+func TestSRTCPAuthFailure(t *testing.T) {
+	sender, receiver := testContext()
+
+	rtcp := makeTestRTCP(0x33333333)
+	protected, err := sender.ProtectRTCP(rtcp)
+	require.NoError(t, err)
+
+	// Flip a byte in the encrypted payload.
+	protected[10] ^= 0xFF
+
+	_, err = receiver.UnprotectRTCP(protected)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "authentication failed")
+}
+
+func TestSRTCPReplayDetected(t *testing.T) {
+	sender, receiver := testContext()
+
+	rtcp := makeTestRTCP(0x44444444)
+	protected, err := sender.ProtectRTCP(rtcp)
+	require.NoError(t, err)
+
+	_, err = receiver.UnprotectRTCP(protected)
+	require.NoError(t, err)
+
+	// Replay of the same packet is rejected.
+	_, err = receiver.UnprotectRTCP(protected)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "replay")
+}
+
+func TestSRTCPWrongKeyFails(t *testing.T) {
+	var keyA, keyB [16]byte
+	var salt [14]byte
+	rand.Read(keyA[:])
+	rand.Read(keyB[:])
+	rand.Read(salt[:])
+
+	sender := New(keyA, salt)
+	receiver := New(keyB, salt)
+
+	rtcp := makeTestRTCP(0x55555555)
+	protected, err := sender.ProtectRTCP(rtcp)
+	require.NoError(t, err)
+
+	_, err = receiver.UnprotectRTCP(protected)
+	assert.Error(t, err)
+}
+
+func TestSRTCPProtectTooShort(t *testing.T) {
+	sender, _ := testContext()
+	_, err := sender.ProtectRTCP(make([]byte, 4))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "too short")
+}
+
+func TestSRTCPUnprotectTooShort(t *testing.T) {
+	_, receiver := testContext()
+	_, err := receiver.UnprotectRTCP(make([]byte, 21)) // needs at least 22
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "too short")
+}
+
+func TestSRTCPKeyDerivationDiffersFromSRTP(t *testing.T) {
+	var key [16]byte
+	var salt [14]byte
+	for i := range key {
+		key[i] = byte(i + 0x23)
+	}
+	for i := range salt {
+		salt[i] = byte(i + 0x24)
+	}
+
+	srtpCK := deriveSessionKey(key, salt, labelCipherKey, 16)
+	srtcpCK := deriveSessionKey(key, salt, labelSRTCPCipherKey, 16)
+	assert.NotEqual(t, srtpCK, srtcpCK, "SRTP and SRTCP cipher keys must differ")
+
+	srtpAK := deriveSessionKey(key, salt, labelAuthKey, 20)
+	srtcpAK := deriveSessionKey(key, salt, labelSRTCPAuthKey, 20)
+	assert.NotEqual(t, srtpAK, srtcpAK, "SRTP and SRTCP auth keys must differ")
+
+	srtpSalt := deriveSessionKey(key, salt, labelSalt, 14)
+	srtcpSalt := deriveSessionKey(key, salt, labelSRTCPSalt, 14)
+	assert.NotEqual(t, srtpSalt, srtcpSalt, "SRTP and SRTCP salts must differ")
+}
+
+func TestSRTCPMultiplePacketsRoundTrip(t *testing.T) {
+	sender, receiver := testContext()
+
+	for i := uint32(0); i < 20; i++ {
+		rtcp := makeTestRTCP(0xAA000000 | i)
+		protected, err := sender.ProtectRTCP(rtcp)
+		require.NoError(t, err)
+
+		decrypted, err := receiver.UnprotectRTCP(protected)
+		require.NoError(t, err)
+		assert.Equal(t, rtcp, decrypted, "mismatch at SRTCP index %d", i)
+	}
+}
+
+func TestSRTCPOutOfOrderWithinWindow(t *testing.T) {
+	sender, receiver := testContext()
+
+	rtcp := makeTestRTCP(0xBBBBBBBB)
+	protected := make([][]byte, 5)
+	for i := 0; i < 5; i++ {
+		p, err := sender.ProtectRTCP(rtcp)
+		require.NoError(t, err)
+		protected[i] = p
+	}
+
+	// Receive in reverse order — all should succeed within the replay window.
+	for i := len(protected) - 1; i >= 0; i-- {
+		_, err := receiver.UnprotectRTCP(protected[i])
+		assert.NoError(t, err, "reverse packet %d should succeed", i)
+	}
+}
+
+// --- Key zeroization tests ---
+
+func TestZeroize(t *testing.T) {
+	var key [16]byte
+	var salt [14]byte
+	for i := range key {
+		key[i] = 0x11
+	}
+	for i := range salt {
+		salt[i] = 0x22
+	}
+
+	ctx := New(key, salt)
+
+	// Verify keys are non-zero before zeroization.
+	assert.NotEqual(t, [20]byte{}, ctx.authKey)
+	assert.NotEqual(t, [14]byte{}, ctx.sessionSalt)
+	assert.NotEqual(t, [20]byte{}, ctx.srtcpAuthKey)
+	assert.NotEqual(t, [14]byte{}, ctx.srtcpSessionSalt)
+
+	ctx.Zeroize()
+
+	assert.Equal(t, [20]byte{}, ctx.authKey, "authKey should be zeroed")
+	assert.Equal(t, [14]byte{}, ctx.sessionSalt, "sessionSalt should be zeroed")
+	assert.Equal(t, [20]byte{}, ctx.srtcpAuthKey, "srtcpAuthKey should be zeroed")
+	assert.Equal(t, [14]byte{}, ctx.srtcpSessionSalt, "srtcpSessionSalt should be zeroed")
+}
+
 func TestDeriveSessionKeyDeterministic(t *testing.T) {
 	var key [16]byte
 	var salt [14]byte

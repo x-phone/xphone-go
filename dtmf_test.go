@@ -93,3 +93,57 @@ func TestEncodeDTMF_InvalidDigitReturnsError(t *testing.T) {
 	_, err := EncodeDTMF("X", 0, 0, 0x12345678)
 	assert.ErrorIs(t, err, ErrInvalidDTMFDigit)
 }
+
+// --- SIP INFO DTMF ---
+
+func TestEncodeInfoDTMF_ValidDigit(t *testing.T) {
+	body, err := EncodeInfoDTMF("5", 160)
+	require.NoError(t, err)
+	assert.Equal(t, "Signal=5\r\nDuration=160\r\n", body)
+}
+
+func TestEncodeInfoDTMF_Star(t *testing.T) {
+	body, err := EncodeInfoDTMF("*", 200)
+	require.NoError(t, err)
+	assert.Equal(t, "Signal=*\r\nDuration=200\r\n", body)
+}
+
+func TestEncodeInfoDTMF_InvalidDigitReturnsError(t *testing.T) {
+	_, err := EncodeInfoDTMF("X", 160)
+	assert.ErrorIs(t, err, ErrInvalidDTMFDigit)
+}
+
+func TestParseInfoDTMF_BasicSignal(t *testing.T) {
+	assert.Equal(t, "5", ParseInfoDTMF("Signal=5\r\nDuration=160\r\n"))
+}
+
+func TestParseInfoDTMF_StarAndHash(t *testing.T) {
+	assert.Equal(t, "*", ParseInfoDTMF("Signal=*\r\nDuration=160\r\n"))
+	assert.Equal(t, "#", ParseInfoDTMF("Signal=#\r\nDuration=160\r\n"))
+}
+
+func TestParseInfoDTMF_CaseInsensitiveKey(t *testing.T) {
+	assert.Equal(t, "5", ParseInfoDTMF("SIGNAL=5\r\nDuration=160\r\n"))
+	assert.Equal(t, "5", ParseInfoDTMF("signal=5\r\nDuration=160\r\n"))
+}
+
+func TestParseInfoDTMF_LowercaseDigitNormalized(t *testing.T) {
+	assert.Equal(t, "A", ParseInfoDTMF("Signal=a\r\nDuration=160\r\n"))
+	assert.Equal(t, "D", ParseInfoDTMF("Signal=d\r\n"))
+}
+
+func TestParseInfoDTMF_WithSpaces(t *testing.T) {
+	assert.Equal(t, "5", ParseInfoDTMF("Signal = 5 \r\nDuration = 160\r\n"))
+}
+
+func TestParseInfoDTMF_EmptyBody(t *testing.T) {
+	assert.Equal(t, "", ParseInfoDTMF(""))
+}
+
+func TestParseInfoDTMF_NoSignalLine(t *testing.T) {
+	assert.Equal(t, "", ParseInfoDTMF("Duration=160\r\n"))
+}
+
+func TestParseInfoDTMF_InvalidDigit(t *testing.T) {
+	assert.Equal(t, "", ParseInfoDTMF("Signal=X\r\n"))
+}

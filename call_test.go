@@ -656,6 +656,57 @@ func TestCall_OnDTMF_NilCallbackNoPanic(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 }
 
+// --- SIP INFO DTMF ---
+
+func TestCall_SendDTMF_SipInfoMode_SendsInfoRequest(t *testing.T) {
+	dlg := testutil.NewMockDialog()
+	c := testInboundCall(t, dlg)
+	c.dtmfMode = DtmfSipInfo
+	c.Accept()
+
+	err := c.SendDTMF("5")
+	require.NoError(t, err)
+	assert.True(t, dlg.InfoSent())
+	assert.Equal(t, "5", dlg.LastInfoDigit())
+	assert.Equal(t, 160, dlg.LastInfoDuration())
+}
+
+func TestCall_SendDTMF_BothMode_SendsRTP(t *testing.T) {
+	c := activeCall(t)
+	defer c.stopMedia()
+	c.dtmfMode = DtmfBoth
+
+	err := c.SendDTMF("5")
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+	pkts := drainPackets(c.sentRTP)
+	var dtmfPkts int
+	for _, pkt := range pkts {
+		if pkt.PayloadType == DTMFPayloadType {
+			dtmfPkts++
+		}
+	}
+	assert.Greater(t, dtmfPkts, 0, "Both mode should send via RTP")
+}
+
+func TestCall_SendDTMF_Rfc4733Mode_DoesNotSendInfo(t *testing.T) {
+	dlg := testutil.NewMockDialog()
+	c := testInboundCall(t, dlg)
+	c.dtmfMode = DtmfRfc4733
+	c.Accept()
+
+	c.SendDTMF("5")
+	assert.False(t, dlg.InfoSent())
+}
+
+func TestCall_SendDTMF_SipInfoMode_InvalidDigitReturnsError(t *testing.T) {
+	c := testInboundCall(t)
+	c.dtmfMode = DtmfSipInfo
+	c.Accept()
+	assert.ErrorIs(t, c.SendDTMF("X"), ErrInvalidDTMFDigit)
+}
+
 // --- Session timers ---
 
 func TestCall_SessionTimer_SendsRefreshReInvite(t *testing.T) {

@@ -514,3 +514,122 @@ func TestPhone_FindCallReturnsNilForUnknown(t *testing.T) {
 
 	assert.Nil(t, p.FindCall("nonexistent"))
 }
+
+// --- DtmfMode ---
+
+func TestPhone_DtmfModePropagatedToCalls(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	cfg := testConfig()
+	cfg.DtmfMode = DtmfSipInfo
+	p := newPhone(cfg)
+	p.connectWithTransport(tr)
+
+	incoming := make(chan Call, 1)
+	p.OnIncoming(func(c Call) { incoming <- c })
+	tr.SimulateInvite("sip:1001@pbx", "sip:1002@pbx")
+
+	c := <-incoming
+	// Access the concrete call to check dtmfMode.
+	cc := c.(*call)
+	cc.mu.Lock()
+	mode := cc.dtmfMode
+	cc.mu.Unlock()
+	assert.Equal(t, DtmfSipInfo, mode)
+}
+
+func TestPhone_InfoDTMFFiresCallDTMFCallback(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	cfg := testConfig()
+	cfg.DtmfMode = DtmfSipInfo
+	p := newPhone(cfg)
+	p.connectWithTransport(tr)
+
+	got := make(chan string, 1)
+	incoming := make(chan Call, 1)
+	p.OnIncoming(func(c Call) { incoming <- c })
+	tr.SimulateInvite("sip:1001@pbx", "sip:1002@pbx")
+
+	c := <-incoming
+	c.OnDTMF(func(digit string) { got <- digit })
+	c.Accept()
+
+	// Simulate SIP INFO DTMF via the phone handler.
+	p.handleDialogInfo(c.CallID(), "5")
+
+	select {
+	case digit := <-got:
+		assert.Equal(t, "5", digit)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnDTMF callback never fired for INFO DTMF")
+	}
+}
+
+func TestPhone_InfoDTMFIgnoredInRfc4733Mode(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	cfg := testConfig()
+	cfg.DtmfMode = DtmfRfc4733
+	p := newPhone(cfg)
+	p.connectWithTransport(tr)
+
+	got := make(chan string, 1)
+	incoming := make(chan Call, 1)
+	p.OnIncoming(func(c Call) { incoming <- c })
+	tr.SimulateInvite("sip:1001@pbx", "sip:1002@pbx")
+
+	c := <-incoming
+	c.OnDTMF(func(digit string) { got <- digit })
+	c.Accept()
+
+	p.handleDialogInfo(c.CallID(), "5")
+
+	select {
+	case <-got:
+		t.Fatal("INFO DTMF should be ignored in Rfc4733 mode")
+	case <-time.After(100 * time.Millisecond):
+		// Expected — no callback fired.
+	}
+}
+
+func TestPhone_InfoDTMFAcceptedInBothMode(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	cfg := testConfig()
+	cfg.DtmfMode = DtmfBoth
+	p := newPhone(cfg)
+	p.connectWithTransport(tr)
+
+	got := make(chan string, 1)
+	incoming := make(chan Call, 1)
+	p.OnIncoming(func(c Call) { incoming <- c })
+	tr.SimulateInvite("sip:1001@pbx", "sip:1002@pbx")
+
+	c := <-incoming
+	c.OnDTMF(func(digit string) { got <- digit })
+	c.Accept()
+
+	p.handleDialogInfo(c.CallID(), "9")
+
+	select {
+	case digit := <-got:
+		assert.Equal(t, "9", digit)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnDTMF callback never fired for INFO DTMF in Both mode")
+	}
+}
+
+func TestWithDtmfMode(t *testing.T) {
+	p := New(WithDtmfMode(DtmfSipInfo)).(*phone)
+	assert.Equal(t, DtmfSipInfo, p.cfg.DtmfMode)
+}
+
+func TestDtmfModeDefaultIsRfc4733(t *testing.T) {
+	p := New().(*phone)
+	assert.Equal(t, DtmfRfc4733, p.cfg.DtmfMode)
+}

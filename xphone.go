@@ -132,6 +132,7 @@ func (p *phone) applyCallConfig(c *call) {
 	c.jitterDepth = p.cfg.JitterBuffer
 	c.pcmRate = p.cfg.PCMRate
 	c.codecPrefs = p.codecPrefs
+	c.dtmfMode = p.cfg.DtmfMode
 }
 
 // transportDial implements dialFn using the sipTransport interface.
@@ -244,6 +245,7 @@ func (p *phone) Connect(ctx context.Context) error {
 	tr.onDialogBye = p.handleDialogBye
 	tr.onDialogCancel = p.handleDialogCancel
 	tr.onDialogNotify = p.handleDialogNotify
+	tr.onDialogInfo = p.handleDialogInfo
 	tr.mu.Unlock()
 	tr.startServer()
 
@@ -511,6 +513,22 @@ func (p *phone) handleDialogNotify(callID string, code int) {
 	}
 }
 
+// handleDialogInfo is called by sipUA's OnInfo handler when a SIP INFO with
+// application/dtmf-relay is received. It fires the call's DTMF callbacks.
+func (p *phone) handleDialogInfo(callID string, digit string) {
+	c := p.findCall(callID)
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	mode := c.dtmfMode
+	c.mu.Unlock()
+	if mode != DtmfSipInfo && mode != DtmfBoth {
+		return
+	}
+	c.fireOnDTMF(digit)
+}
+
 // handleIncoming is called by the mock transport when an incoming INVITE arrives.
 // It auto-sends 100 Trying via the transport, creates an inbound call, fires
 // OnIncoming, and auto-sends 180 Ringing via the transport.
@@ -523,6 +541,7 @@ func (p *phone) handleIncoming(from, to string) {
 	dlg := newPhoneDialog()
 	c := newInboundCall(dlg)
 	c.logger = p.logger
+	p.applyCallConfig(c)
 	p.registerCall(c)
 
 	p.mu.Lock()
@@ -607,14 +626,17 @@ type phoneDialog struct {
 	onNotify func(int)
 
 	// State tracking (for test inspection via concrete type, not interface).
-	byeSent         bool
-	cancelSent      bool
-	referSent       bool
-	lastRespCode    int
-	lastRespReason  string
-	lastRespBody    []byte
-	lastReInviteSDP []byte
-	lastReferTarget string
+	byeSent          bool
+	cancelSent       bool
+	referSent        bool
+	infoSent         bool
+	lastInfoDigit    string
+	lastInfoDuration int
+	lastRespCode     int
+	lastRespReason   string
+	lastRespBody     []byte
+	lastReInviteSDP  []byte
+	lastReferTarget  string
 }
 
 func newPhoneDialog() *phoneDialog {
@@ -659,6 +681,15 @@ func (d *phoneDialog) SendRefer(target string) error {
 	defer d.mu.Unlock()
 	d.referSent = true
 	d.lastReferTarget = target
+	return nil
+}
+
+func (d *phoneDialog) SendInfoDTMF(digit string, duration int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.infoSent = true
+	d.lastInfoDigit = digit
+	d.lastInfoDuration = duration
 	return nil
 }
 

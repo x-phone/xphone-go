@@ -31,9 +31,22 @@ type Config struct {
 	MediaTimeout time.Duration
 	PCMFrameSize int
 	PCMRate      int
+	DtmfMode     DtmfMode
 
 	Logger *slog.Logger
 }
+
+// DtmfMode controls how DTMF digits are sent and received.
+type DtmfMode int
+
+const (
+	// DtmfRfc4733 sends and receives DTMF via RFC 4733 RTP telephone-event packets (default).
+	DtmfRfc4733 DtmfMode = iota
+	// DtmfSipInfo sends and receives DTMF via SIP INFO with application/dtmf-relay body (RFC 2976).
+	DtmfSipInfo
+	// DtmfBoth sends DTMF via RFC 4733 RTP; also accepts incoming SIP INFO DTMF.
+	DtmfBoth
+)
 
 // Codec represents an audio codec.
 type Codec int
@@ -219,6 +232,14 @@ func WithSRTP() PhoneOption {
 func WithPCMRate(rate int) PhoneOption {
 	return func(c *Config) {
 		c.PCMRate = rate
+	}
+}
+
+// WithDtmfMode sets the DTMF signaling mode.
+// Default is DtmfRfc4733 (RTP telephone-event packets).
+func WithDtmfMode(mode DtmfMode) PhoneOption {
+	return func(c *Config) {
+		c.DtmfMode = mode
 	}
 }
 

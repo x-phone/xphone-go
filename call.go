@@ -69,6 +69,8 @@ type dialog interface {
 	SendReInvite(sdp []byte) error
 	// SendRefer sends a REFER for blind transfer.
 	SendRefer(target string) error
+	// SendInfoDTMF sends a SIP INFO request with application/dtmf-relay body.
+	SendInfoDTMF(digit string, duration int) error
 	// OnNotify registers a callback for NOTIFY events (REFER progress).
 	OnNotify(fn func(code int))
 	// FireNotify fires the on_notify callback with the given status code.
@@ -151,7 +153,8 @@ type call struct {
 	onMuteFn       func()
 	onUnmuteFn     func()
 
-	muted bool
+	muted    bool
+	dtmfMode DtmfMode
 
 	codecPrefs  []int          // codec preference order (payload types)
 	jitterDepth time.Duration  // jitter buffer depth (0 = default)
@@ -590,6 +593,21 @@ func (c *call) dispatch(fn func()) {
 	}
 }
 
+// fireOnDTMF dispatches both the phone-level and public OnDTMF callbacks.
+// Acquires c.mu internally to snapshot function pointers.
+func (c *call) fireOnDTMF(digit string) {
+	c.mu.Lock()
+	fn := c.onDTMFFn
+	fnPhone := c.onDTMFPhone
+	c.mu.Unlock()
+	if fnPhone != nil {
+		c.dispatch(func() { fnPhone(digit) })
+	}
+	if fn != nil {
+		c.dispatch(func() { fn(digit) })
+	}
+}
+
 // fireOnState dispatches both the phone-level and public OnState callbacks.
 // Must be called with c.mu held. Copies function pointers and dispatches via
 // the callback goroutine.
@@ -840,12 +858,18 @@ func (c *call) SendDTMF(digit string) error {
 		c.mu.Unlock()
 		return ErrInvalidDTMFDigit
 	}
+	mode := c.dtmfMode
 	sentRTP := c.sentRTP
 	conn := c.rtpConn
 	addr := c.remoteAddr
 	srtpOut := c.srtpOut
 	c.mu.Unlock()
 
+	if mode == DtmfSipInfo {
+		return c.dlg.SendInfoDTMF(digit, defaultInfoDTMFDuration)
+	}
+
+	// DtmfRfc4733 and DtmfBoth both send via RTP.
 	pkts, err := EncodeDTMF(digit, 0, 0, 0)
 	if err != nil {
 		return err
@@ -868,6 +892,9 @@ func (c *call) SendDTMF(digit string) error {
 	}
 	return nil
 }
+
+// defaultInfoDTMFDuration is the duration in milliseconds sent in SIP INFO DTMF bodies.
+const defaultInfoDTMFDuration = 160
 
 func (c *call) BlindTransfer(target string) error {
 	c.mu.Lock()

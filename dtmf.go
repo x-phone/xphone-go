@@ -2,6 +2,8 @@ package xphone
 
 import (
 	"encoding/binary"
+	"fmt"
+	"strings"
 
 	"github.com/pion/rtp"
 )
@@ -100,4 +102,37 @@ func DecodeDTMF(payload []byte) *DTMFEvent {
 		Volume:   payload[1] & 0x3F,
 		Duration: binary.BigEndian.Uint16(payload[2:4]),
 	}
+}
+
+// EncodeInfoDTMF creates a SIP INFO application/dtmf-relay body.
+// Format: "Signal=<digit>\r\nDuration=<ms>\r\n"
+func EncodeInfoDTMF(digit string, durationMs int) (string, error) {
+	if DTMFDigitCode(digit) < 0 {
+		return "", ErrInvalidDTMFDigit
+	}
+	return fmt.Sprintf("Signal=%s\r\nDuration=%d\r\n", digit, durationMs), nil
+}
+
+// ParseInfoDTMF parses a SIP INFO application/dtmf-relay body and returns the digit.
+// Parsing is case-insensitive for the "Signal" key and tolerates whitespace.
+// Returns "" if no valid digit is found.
+func ParseInfoDTMF(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		if !strings.EqualFold(key, "signal") {
+			continue
+		}
+		val := strings.TrimSpace(line[eq+1:])
+		// Normalize a-d to A-D.
+		val = strings.ToUpper(val)
+		if val != "" && DTMFDigitCode(val) >= 0 {
+			return val
+		}
+	}
+	return ""
 }

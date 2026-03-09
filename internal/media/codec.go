@@ -19,6 +19,8 @@ func NewCodecProcessor(payloadType int, pcmRate int) CodecProcessor {
 		return &pcmaProcessor{}
 	case 9:
 		return newG722Processor(pcmRate)
+	case 18:
+		return newG729Processor()
 	case 111:
 		return newOpusProcessor()
 	default:

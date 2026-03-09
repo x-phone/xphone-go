@@ -34,4 +34,8 @@ var (
 	ErrNotConnected = errors.New("xphone: not connected")
 	// ErrHostRequired is returned when Connect is called without a Host configured.
 	ErrHostRequired = errors.New("xphone: Host is required")
+	// ErrSubscriptionRejected is returned when the server permanently rejects a SUBSCRIBE.
+	ErrSubscriptionRejected = errors.New("xphone: subscription rejected")
+	// ErrSubscriptionNotFound is returned when UnsubscribeEvent is called with an unknown ID.
+	ErrSubscriptionNotFound = errors.New("xphone: subscription not found")
 )

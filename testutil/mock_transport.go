@@ -41,6 +41,7 @@ type MockTransport struct {
 	inviteFunc      func()
 	dropHandler     func()
 	incomingHandler func(from, to string)
+	notifyFn        func(event, from, contentType, body, subscriptionState string)
 	mwiNotifyFn     func(body string)
 	messageFn       func(from, to, contentType, body string)
 	responseCh      map[int][]chan bool
@@ -251,6 +252,13 @@ func (m *MockTransport) SendSubscribe(ctx context.Context, uri string, headers m
 	return m.awaitResponse(ctx)
 }
 
+// OnNotify registers a handler for incoming NOTIFY requests (general).
+func (m *MockTransport) OnNotify(fn func(event, from, contentType, body, subscriptionState string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.notifyFn = fn
+}
+
 // OnMWINotify registers a handler for incoming MWI NOTIFY bodies.
 func (m *MockTransport) OnMWINotify(fn func(body string)) {
 	m.mu.Lock()
@@ -294,6 +302,16 @@ func (m *MockTransport) SimulateMessage(from, to, contentType, body string) {
 	m.mu.Unlock()
 	if fn != nil {
 		fn(from, to, contentType, body)
+	}
+}
+
+// SimulateNotify simulates an incoming NOTIFY request.
+func (m *MockTransport) SimulateNotify(event, from, contentType, body, subscriptionState string) {
+	m.mu.Lock()
+	fn := m.notifyFn
+	m.mu.Unlock()
+	if fn != nil {
+		fn(event, from, contentType, body, subscriptionState)
 	}
 }
 

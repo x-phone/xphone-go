@@ -34,6 +34,10 @@ type Phone interface {
 	OnMessage(func(msg SipMessage))
 	SendMessage(ctx context.Context, target string, body string) error
 	SendMessageWithType(ctx context.Context, target string, contentType string, body string) error
+	Watch(ctx context.Context, extension string, fn func(ext string, state ExtensionState, prev ExtensionState)) (string, error)
+	Unwatch(subscriptionID string) error
+	SubscribeEvent(ctx context.Context, uri string, event string, expires int, fn func(NotifyEvent)) (string, error)
+	UnsubscribeEvent(subscriptionID string) error
 	AttendedTransfer(callA Call, callB Call) error
 	FindCall(callID string) Call
 	Calls() []Call
@@ -77,6 +81,9 @@ type phone struct {
 	// MWI (voicemail) state.
 	onVoicemailFn func(VoicemailStatus)
 	mwi           *mwiSubscriber
+
+	// Subscription manager for Watch/SubscribeEvent.
+	subMgr *subscriptionManager
 }
 
 // codecPrefsToInts converts []Codec to []int for SDP/negotiation.
@@ -234,6 +241,15 @@ func (p *phone) connectWithTransport(tr sipTransport) {
 		p.mu.Unlock()
 	}
 
+	// Start subscription manager for Watch/SubscribeEvent.
+	if err == nil {
+		sm := newSubscriptionManager(tr, p.cfg.Host, p.logger)
+		sm.start()
+		p.mu.Lock()
+		p.subMgr = sm
+		p.mu.Unlock()
+	}
+
 	p.logger.Info("phone connected")
 }
 
@@ -297,10 +313,12 @@ func (p *phone) Disconnect() error {
 	reg := p.reg
 	tr := p.tr
 	mwi := p.mwi
+	sm := p.subMgr
 	p.state = PhoneStateDisconnected
 	p.reg = nil
 	p.tr = nil
 	p.mwi = nil
+	p.subMgr = nil
 	fn := p.onUnregisteredFn
 
 	// Snapshot and clear active calls so we can end them outside the lock.
@@ -314,6 +332,11 @@ func (p *phone) Disconnect() error {
 	// End all active calls.
 	for _, c := range activeCalls {
 		c.End()
+	}
+
+	// Stop subscription manager (sends Expires: 0 unsubscribes).
+	if sm != nil {
+		sm.stop()
 	}
 
 	// Stop MWI subscription (sends Expires: 0 unsubscribe).
@@ -769,6 +792,46 @@ func (p *phone) SendMessageWithType(ctx context.Context, target string, contentT
 		return fmt.Errorf("MESSAGE %d %s", code, reason)
 	}
 	return nil
+}
+
+func (p *phone) Watch(ctx context.Context, extension string, fn func(string, ExtensionState, ExtensionState)) (string, error) {
+	p.mu.Lock()
+	sm := p.subMgr
+	p.mu.Unlock()
+	if sm == nil {
+		return "", ErrNotConnected
+	}
+	return sm.watch(ctx, extension, fn)
+}
+
+func (p *phone) Unwatch(subscriptionID string) error {
+	p.mu.Lock()
+	sm := p.subMgr
+	p.mu.Unlock()
+	if sm == nil {
+		return ErrNotConnected
+	}
+	return sm.unwatch(subscriptionID)
+}
+
+func (p *phone) SubscribeEvent(ctx context.Context, uri string, event string, expires int, fn func(NotifyEvent)) (string, error) {
+	p.mu.Lock()
+	sm := p.subMgr
+	p.mu.Unlock()
+	if sm == nil {
+		return "", ErrNotConnected
+	}
+	return sm.subscribeEvent(ctx, uri, event, expires, fn)
+}
+
+func (p *phone) UnsubscribeEvent(subscriptionID string) error {
+	p.mu.Lock()
+	sm := p.subMgr
+	p.mu.Unlock()
+	if sm == nil {
+		return ErrNotConnected
+	}
+	return sm.unsubscribeEvent(subscriptionID)
 }
 
 func (p *phone) handleMessage(from, to, contentType, body string) {

@@ -64,6 +64,12 @@ type trackedCall struct {
 	status string
 }
 
+// blfEntry tracks one watched extension in the BLF panel.
+type blfEntry struct {
+	extension string
+	state     xphone.ExtensionState
+}
+
 // prog is the running bubbletea program. Used by xphone callbacks and the
 // custom slog handler to send messages into the TUI from any goroutine.
 var prog *tea.Program
@@ -79,6 +85,14 @@ type msgCallState struct {
 }
 type msgCallEnded struct{ callID string }
 type msgCallRef struct{ call xphone.Call }
+type msgWatchAdded struct {
+	ext string
+	id  string
+}
+type msgBLFUpdate struct {
+	ext   string
+	state xphone.ExtensionState
+}
 
 // ---------------------------------------------------------------------------
 // Custom slog handler that feeds into the TUI debug panel
@@ -221,6 +235,10 @@ type model struct {
 	// Audio handler for speaker/mic/echo (nil if no active call)
 	audio *audioHandler
 
+	// BLF state
+	blf     []blfEntry        // watched extensions for BLF panel
+	watches map[string]string // subscription IDs keyed by extension
+
 	// Command history
 	history      []string
 	historyPos   int // -1 = not browsing
@@ -233,6 +251,7 @@ func initialModel(phone xphone.Phone) model {
 		regStatus:  "disconnected",
 		width:      80,
 		height:     24,
+		watches:    make(map[string]string),
 		history:    loadHistory(),
 		historyPos: -1,
 	}
@@ -283,6 +302,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.selected >= len(m.calls) && m.selected > 0 {
 					m.selected = len(m.calls) - 1
 				}
+				break
+			}
+		}
+	case msgWatchAdded:
+		m.watches[msg.ext] = msg.id
+		// Add to BLF list with Unknown state (will be updated by first NOTIFY).
+		m.blf = append(m.blf, blfEntry{extension: msg.ext, state: xphone.ExtensionUnknown})
+	case msgBLFUpdate:
+		for i := range m.blf {
+			if m.blf[i].extension == msg.ext {
+				m.blf[i].state = msg.state
 				break
 			}
 		}
@@ -452,16 +482,32 @@ func (m model) View() string {
 		callsInnerH = 6
 	}
 	callsPanelH := callsInnerH + 2 // +2 for border
-	eventsPanelH := panelH - callsPanelH
+
+	// BLF panel height: conditional, only when watching extensions
+	blfPanelH := 0
+	if len(m.blf) > 0 {
+		blfInnerH := len(m.blf)
+		if blfInnerH > 4 {
+			blfInnerH = 4
+		}
+		blfPanelH = blfInnerH + 2 // +2 for border
+	}
+
+	eventsPanelH := panelH - callsPanelH - blfPanelH
 	if eventsPanelH < 4 {
 		eventsPanelH = 4
-		callsPanelH = panelH - eventsPanelH
+		callsPanelH = panelH - eventsPanelH - blfPanelH
 	}
 
 	callsPanel := m.renderCallsPanel(leftW, callsPanelH)
-	eventsPanel := m.renderEventsPanel(leftW, eventsPanelH)
+	var leftPanels []string
+	leftPanels = append(leftPanels, callsPanel)
+	if blfPanelH > 0 {
+		leftPanels = append(leftPanels, m.renderBLFPanel(leftW, blfPanelH))
+	}
+	leftPanels = append(leftPanels, m.renderEventsPanel(leftW, eventsPanelH))
 	leftColumn := lipgloss.NewStyle().Height(panelH).Render(
-		lipgloss.JoinVertical(lipgloss.Left, callsPanel, eventsPanel),
+		lipgloss.JoinVertical(lipgloss.Left, leftPanels...),
 	)
 
 	// --- Right panel (60%) ---
@@ -554,6 +600,51 @@ func (m model) renderCallsPanel(w, h int) string {
 		Render(titleStyle.Render(" Calls ") + "\n" + content)
 }
 
+func (m model) renderBLFPanel(w, h int) string {
+	innerW := w - 2
+	innerH := h - 2
+	if innerH < 1 {
+		innerH = 1
+	}
+
+	var lines []string
+	for _, b := range m.blf {
+		indicator, style := blfIndicator(b.state)
+		line := "  " + style.Render(indicator) + " " + whiteStyle.Render(b.extension) +
+			"  " + style.Render(extStateName(b.state))
+		lines = append(lines, truncate(line, innerW))
+	}
+
+	for len(lines) < innerH {
+		lines = append(lines, "")
+	}
+	if len(lines) > innerH {
+		lines = lines[:innerH]
+	}
+
+	content := strings.Join(lines, "\n")
+	return borderStyle.
+		Width(innerW).
+		Height(innerH).
+		Background(surface).
+		Render(titleStyle.Render(" BLF ") + "\n" + content)
+}
+
+func blfIndicator(state xphone.ExtensionState) (string, lipgloss.Style) {
+	switch state {
+	case xphone.ExtensionAvailable:
+		return "●", greenStyle
+	case xphone.ExtensionRinging:
+		return "◌", yellowStyle
+	case xphone.ExtensionOnThePhone:
+		return "●", redStyle
+	case xphone.ExtensionOffline:
+		return "○", dimStyle
+	default:
+		return "○", dimStyle
+	}
+}
+
 func (m model) renderEventsPanel(w, h int) string {
 	return renderLogPanel(" Events ", m.events, w, h, styleEvent)
 }
@@ -642,7 +733,7 @@ func (m model) renderCommandArea(w int) string {
 
 	inputLine := promptStyle.Render(" > ") + m.input + cursorStyle.Render("_")
 
-	helpText := "dial(d) accept(a) reject hangup(h) hold resume mute unmute dtmf transfer(xfer) msg echo speaker mic 1/2/3 quit(q)"
+	helpText := "dial(d) accept(a) reject hangup(h) hold resume mute unmute dtmf transfer(xfer) msg watch(w) unwatch(uw) echo speaker mic quit(q)"
 	helpLine := "   " + dimStyle.Render(helpText)
 
 	cmdTitle := titleStyle.Render(" Command ")
@@ -697,6 +788,12 @@ func styleEvent(line string) string {
 		return magentaStyle.Render(line)
 	case strings.HasPrefix(content, "MSG from"):
 		return incomingStyle.Render(line)
+	case strings.HasPrefix(content, "BLF"):
+		return magentaStyle.Render(line)
+	case strings.HasPrefix(content, "watching"):
+		return accentStyle.Render(line)
+	case strings.HasPrefix(content, "unwatched"):
+		return accentStyle.Render(line)
 	case strings.HasPrefix(content, "dialing"),
 		strings.HasPrefix(content, "ringing"),
 		strings.HasPrefix(content, "early media"):
@@ -853,6 +950,57 @@ func (m model) execCommand(input string) (model, tea.Cmd) {
 				return msgLog(fmt.Sprintf("ERROR msg: %s", err))
 			}
 			return msgLog(fmt.Sprintf("message sent to %s", target))
+		}
+
+	case "watch", "w":
+		if arg == "" {
+			m.err = "usage: watch <extension>"
+			return m, nil
+		}
+		ext := arg
+		if _, ok := m.watches[ext]; ok {
+			m.err = fmt.Sprintf("already watching %s", ext)
+			return m, nil
+		}
+		m.pushEvent(fmt.Sprintf("watching %s...", ext))
+		ph := m.phone
+		return m, func() tea.Msg {
+			id, err := ph.Watch(context.Background(), ext, func(extension string, state, prev xphone.ExtensionState) {
+				prog.Send(msgBLFUpdate{ext: extension, state: state})
+				prog.Send(msgLog(fmt.Sprintf("BLF %s: %s (was %s)", extension, extStateName(state), extStateName(prev))))
+			})
+			if err != nil {
+				return msgLog(fmt.Sprintf("ERROR watch %s: %s", ext, err))
+			}
+			prog.Send(msgLog(fmt.Sprintf("watching %s", ext)))
+			return msgWatchAdded{ext: ext, id: id}
+		}
+
+	case "unwatch", "uw":
+		if arg == "" {
+			m.err = "usage: unwatch <extension>"
+			return m, nil
+		}
+		ext := arg
+		id, ok := m.watches[ext]
+		if !ok {
+			m.err = fmt.Sprintf("not watching %s", ext)
+			return m, nil
+		}
+		delete(m.watches, ext)
+		// Remove from BLF list.
+		for i := range m.blf {
+			if m.blf[i].extension == ext {
+				m.blf = append(m.blf[:i], m.blf[i+1:]...)
+				break
+			}
+		}
+		ph := m.phone
+		return m, func() tea.Msg {
+			if err := ph.Unwatch(id); err != nil {
+				return msgLog(fmt.Sprintf("ERROR unwatch %s: %s", ext, err))
+			}
+			return msgLog(fmt.Sprintf("unwatched %s", ext))
 		}
 
 	case "echo":
@@ -1094,6 +1242,23 @@ func callStateName(s xphone.CallState) string {
 		return "ended"
 	default:
 		return fmt.Sprintf("unknown(%d)", s)
+	}
+}
+
+func extStateName(s xphone.ExtensionState) string {
+	switch s {
+	case xphone.ExtensionAvailable:
+		return "available"
+	case xphone.ExtensionRinging:
+		return "ringing"
+	case xphone.ExtensionOnThePhone:
+		return "on the phone"
+	case xphone.ExtensionOffline:
+		return "offline"
+	case xphone.ExtensionUnknown:
+		return "unknown"
+	default:
+		return fmt.Sprintf("state(%d)", s)
 	}
 }
 

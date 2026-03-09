@@ -54,6 +54,36 @@ type SipMessage struct {
 	Body        string
 }
 
+// ExtensionState represents the monitoring state of a remote extension (BLF).
+type ExtensionState int
+
+const (
+	ExtensionAvailable  ExtensionState = iota // idle, no active dialogs
+	ExtensionRinging                          // early/proceeding dialog
+	ExtensionOnThePhone                       // confirmed dialog
+	ExtensionOffline                          // not registered or subscription failed
+	ExtensionUnknown                          // subscription pending or parse error
+)
+
+// SubState represents the state of a SIP event subscription (RFC 6665).
+type SubState int
+
+const (
+	SubStatePending    SubState = iota // awaiting authorization
+	SubStateActive                     // subscription is active
+	SubStateTerminated                 // subscription ended
+)
+
+// NotifyEvent is delivered by SubscribeEvent callbacks for each incoming NOTIFY.
+type NotifyEvent struct {
+	Event             string   // Event header (e.g. "dialog", "presence")
+	ContentType       string   // Content-Type of the NOTIFY body
+	Body              string   // raw NOTIFY body
+	SubscriptionState SubState // parsed Subscription-State
+	Expires           int      // expires parameter from Subscription-State header
+	Reason            string   // reason parameter (e.g. "deactivated", "rejected")
+}
+
 // VoicemailStatus represents the state of a voicemail mailbox (RFC 3842 MWI).
 type VoicemailStatus struct {
 	// MessagesWaiting indicates whether new messages are waiting.

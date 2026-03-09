@@ -250,17 +250,12 @@ func (c *call) startMedia() {
 					if ev := DecodeDTMF(pkt.Payload); ev != nil && ev.End && !(lastDTMFSeen && pkt.Timestamp == lastDTMFTimestamp) {
 						lastDTMFTimestamp = pkt.Timestamp
 						lastDTMFSeen = true
+						// Skip RTP DTMF callbacks in SipInfo-only mode.
 						c.mu.Lock()
-						fn := c.onDTMFFn
-						fnPhone := c.onDTMFPhone
+						mode := c.dtmfMode
 						c.mu.Unlock()
-						if fnPhone != nil {
-							digit := ev.Digit
-							c.dispatch(func() { fnPhone(digit) })
-						}
-						if fn != nil {
-							digit := ev.Digit
-							c.dispatch(func() { fn(digit) })
+						if mode != DtmfSipInfo {
+							c.fireOnDTMF(ev.Digit)
 						}
 					}
 					resetTimer(timeout)

@@ -10,6 +10,7 @@ import (
 )
 
 const contentTypeSDP = "application/sdp"
+const contentTypeDTMFRelay = "application/dtmf-relay"
 
 // sipRequestTimeout is the deadline for SIP dialog operations (BYE, re-INVITE, REFER).
 const sipRequestTimeout = 5 * time.Second
@@ -54,6 +55,20 @@ func (d *dialogBase) SendRefer(target string) error {
 	req := sip.NewRequest(sip.REFER, d.invite.Recipient)
 	req.AppendHeader(sip.NewHeader("Refer-To", target))
 	_, err := d.sess.Do(ctx, req)
+	return err
+}
+
+func (d *dialogBase) SendInfoDTMF(digit string, duration int) error {
+	body, err := EncodeInfoDTMF(digit, duration)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sipRequestTimeout)
+	defer cancel()
+	req := sip.NewRequest(sip.INFO, d.invite.Recipient)
+	req.AppendHeader(sip.NewHeader("Content-Type", contentTypeDTMFRelay))
+	req.SetBody([]byte(body))
+	_, err = d.sess.Do(ctx, req)
 	return err
 }
 

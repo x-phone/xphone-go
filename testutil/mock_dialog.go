@@ -20,6 +20,9 @@ type MockDialog struct {
 	lastReInviteSDP    []byte
 	referSent          bool
 	lastReferTarget    string
+	infoSent           bool
+	lastInfoDigit      string
+	lastInfoDuration   int
 	callID             string
 	headers            map[string][]string
 	onNotify           func(code int)
@@ -96,6 +99,16 @@ func (d *MockDialog) SendRefer(target string) error {
 	defer d.mu.Unlock()
 	d.referSent = true
 	d.lastReferTarget = target
+	return nil
+}
+
+// SendInfoDTMF records a SIP INFO DTMF request.
+func (d *MockDialog) SendInfoDTMF(digit string, duration int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.infoSent = true
+	d.lastInfoDigit = digit
+	d.lastInfoDuration = duration
 	return nil
 }
 
@@ -207,6 +220,27 @@ func (d *MockDialog) LastReInviteSDP() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return string(d.lastReInviteSDP)
+}
+
+// InfoSent returns whether a SIP INFO DTMF was sent.
+func (d *MockDialog) InfoSent() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.infoSent
+}
+
+// LastInfoDigit returns the digit from the last SIP INFO DTMF.
+func (d *MockDialog) LastInfoDigit() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastInfoDigit
+}
+
+// LastInfoDuration returns the duration from the last SIP INFO DTMF.
+func (d *MockDialog) LastInfoDuration() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastInfoDuration
 }
 
 // SimulateNotify simulates a NOTIFY with the given response code.

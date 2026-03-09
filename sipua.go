@@ -81,6 +81,10 @@ type sipUA struct {
 	// onDialogNotify is called when an inbound NOTIFY is received (REFER progress).
 	// The phone uses this to fire the dialog's OnNotify callback.
 	onDialogNotify func(callID string, code int)
+
+	// onDialogInfo is called when an inbound INFO with application/dtmf-relay is received.
+	// The phone uses this to fire DTMF callbacks on the call.
+	onDialogInfo func(callID string, digit string)
 }
 
 // newSipUA creates a sipgo-backed SIP transport.
@@ -367,6 +371,38 @@ func (s *sipUA) startServer() {
 	s.server.OnOptions(func(req *sip.Request, tx sip.ServerTransaction) {
 		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
 		tx.Respond(res)
+	})
+
+	s.server.OnInfo(func(req *sip.Request, tx sip.ServerTransaction) {
+		// Always respond 200 OK to INFO.
+		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+		tx.Respond(res)
+
+		// Only process application/dtmf-relay bodies.
+		ct := ""
+		if h := req.ContentType(); h != nil {
+			ct = strings.ToLower(h.Value())
+		}
+		if !strings.Contains(ct, "application/dtmf-relay") {
+			return
+		}
+
+		digit := ParseInfoDTMF(string(req.Body()))
+		if digit == "" {
+			return
+		}
+
+		callID := ""
+		if h := req.CallID(); h != nil {
+			callID = h.Value()
+		}
+
+		s.mu.Lock()
+		fn := s.onDialogInfo
+		s.mu.Unlock()
+		if fn != nil && callID != "" {
+			go fn(callID, digit)
+		}
 	})
 
 	s.server.OnNotify(func(req *sip.Request, tx sip.ServerTransaction) {

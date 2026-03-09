@@ -2,5 +2,5 @@
 
 ## Other
 
-- [ ] SIP INFO DTMF
+- [x] SIP INFO DTMF
 - [ ] Attended transfer

@@ -57,6 +57,14 @@ func NewMockDialogWithHeaders(headers map[string][]string) *MockDialog {
 	return d
 }
 
+// NewMockDialogWithCallIDAndHeaders creates a MockDialog with a specific Call-ID and headers.
+func NewMockDialogWithCallIDAndHeaders(callID string, headers map[string][]string) *MockDialog {
+	d := NewMockDialog()
+	d.callID = callID
+	d.headers = headers
+	return d
+}
+
 // NewMockDialogWithSessionExpires creates a MockDialog with a Session-Expires header.
 func NewMockDialogWithSessionExpires(seconds int) *MockDialog {
 	return NewMockDialogWithHeaders(map[string][]string{

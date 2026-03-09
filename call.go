@@ -328,6 +328,58 @@ func sipHeaderDisplayName(val string) string {
 	return name
 }
 
+// sipHeaderTag extracts the tag parameter from a SIP header value.
+// e.g. `<sip:1001@host>;tag=abc123` → `abc123`
+func sipHeaderTag(val string) string {
+	const needle = ";tag="
+	idx := -1
+	for i := 0; i <= len(val)-len(needle); i++ {
+		if strings.EqualFold(val[i:i+len(needle)], needle) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return ""
+	}
+	rest := val[idx+len(needle):]
+	if end := strings.IndexAny(rest, ";>,"); end >= 0 {
+		return rest[:end]
+	}
+	return rest
+}
+
+// uriEncode percent-encodes URI-reserved characters for SIP Replaces headers (RFC 3891).
+func uriEncode(val string) string {
+	var b strings.Builder
+	b.Grow(len(val) * 2)
+	for i := 0; i < len(val); i++ {
+		switch val[i] {
+		case '%':
+			b.WriteString("%25")
+		case '@':
+			b.WriteString("%40")
+		case ' ':
+			b.WriteString("%20")
+		case ';':
+			b.WriteString("%3B")
+		case '?':
+			b.WriteString("%3F")
+		case '&':
+			b.WriteString("%26")
+		case '=':
+			b.WriteString("%3D")
+		case '+':
+			b.WriteString("%2B")
+		case ':':
+			b.WriteString("%3A")
+		default:
+			b.WriteByte(val[i])
+		}
+	}
+	return b.String()
+}
+
 func (c *call) RemoteIP() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -912,14 +964,45 @@ func (c *call) BlindTransfer(target string) error {
 	c.dlg.SendRefer(target)
 	c.dlg.OnNotify(func(code int) {
 		if code == 200 {
-			c.mu.Lock()
-			c.state = StateEnded
-			c.fireOnState(StateEnded)
-			c.fireOnEnded(EndedByTransfer)
-			c.mu.Unlock()
+			c.endWithReason(EndedByTransfer)
 		}
 	})
 	return nil
+}
+
+// dialogID returns the Call-ID, local tag, and remote tag for this call's dialog.
+// For outbound calls: local=From tag, remote=To tag.
+// For inbound calls: local=To tag, remote=From tag.
+func (c *call) dialogID() (callID, localTag, remoteTag string) {
+	callID = c.dlg.CallID()
+	var fromTag, toTag string
+	if vals := c.dlg.Header("From"); len(vals) > 0 {
+		fromTag = sipHeaderTag(vals[0])
+	}
+	if vals := c.dlg.Header("To"); len(vals) > 0 {
+		toTag = sipHeaderTag(vals[0])
+	}
+	c.mu.Lock()
+	dir := c.direction
+	c.mu.Unlock()
+	if dir == DirectionOutbound {
+		return callID, fromTag, toTag
+	}
+	return callID, toTag, fromTag
+}
+
+// endWithReason transitions the call to Ended with the given reason.
+// Safe to call from outside the call's goroutine (e.g., from a NOTIFY handler).
+func (c *call) endWithReason(reason EndReason) {
+	c.mu.Lock()
+	if c.state == StateEnded {
+		c.mu.Unlock()
+		return
+	}
+	c.state = StateEnded
+	c.fireOnState(StateEnded)
+	c.fireOnEnded(reason)
+	c.mu.Unlock()
 }
 
 func (c *call) RTPRawReader() <-chan *rtp.Packet { return c.rtpRawReader }

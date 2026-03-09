@@ -6,6 +6,7 @@ package xphone
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"strings"
@@ -28,6 +29,7 @@ type Phone interface {
 	OnCallState(func(call Call, state CallState))
 	OnCallEnded(func(call Call, reason EndReason))
 	OnCallDTMF(func(call Call, digit string))
+	AttendedTransfer(callA Call, callB Call) error
 	FindCall(callID string) Call
 	Calls() []Call
 	State() PhoneState
@@ -443,6 +445,71 @@ func (p *phone) Calls() []Call {
 		result = append(result, c)
 	}
 	return result
+}
+
+// AttendedTransfer performs an attended (consultative) transfer.
+// Call A's dialog sends a REFER with a Replaces header built from Call B's
+// dialog identifiers. On NOTIFY 200, both calls end with EndedByTransfer.
+// Both calls must be Active or OnHold.
+func (p *phone) AttendedTransfer(callA Call, callB Call) error {
+	// Validate states.
+	if s := callA.State(); s != StateActive && s != StateOnHold {
+		return ErrInvalidState
+	}
+	if s := callB.State(); s != StateActive && s != StateOnHold {
+		return ErrInvalidState
+	}
+
+	a, ok := callA.(*call)
+	if !ok {
+		return fmt.Errorf("xphone: callA is not an *call")
+	}
+	b, ok := callB.(*call)
+	if !ok {
+		return fmt.Errorf("xphone: callB is not an *call")
+	}
+
+	// Extract Call B's dialog identifiers for the Replaces header.
+	bCallID, bLocalTag, bRemoteTag := b.dialogID()
+	if bCallID == "" || bLocalTag == "" || bRemoteTag == "" {
+		return fmt.Errorf("xphone: attended transfer: call B dialog missing call-id or tags")
+	}
+
+	// Build remote party URI from Call B's headers.
+	var remoteURI string
+	if callB.Direction() == DirectionOutbound {
+		if vals := b.dlg.Header("To"); len(vals) > 0 {
+			remoteURI = sipHeaderURI(vals[0])
+		}
+	} else {
+		if vals := b.dlg.Header("From"); len(vals) > 0 {
+			remoteURI = sipHeaderURI(vals[0])
+		}
+	}
+	if remoteURI == "" {
+		return fmt.Errorf("xphone: attended transfer: cannot determine call B remote URI")
+	}
+
+	// Build Refer-To with Replaces parameter (RFC 3891).
+	referTo := remoteURI + "?Replaces=" +
+		uriEncode(bCallID) + "%3Bto-tag%3D" +
+		uriEncode(bRemoteTag) + "%3Bfrom-tag%3D" +
+		uriEncode(bLocalTag)
+
+	// Send REFER, then wire NOTIFY handler on success.
+	if err := a.dlg.SendRefer(referTo); err != nil {
+		return err
+	}
+
+	// Wire NOTIFY handler: on 200, end both calls with Transfer reason.
+	a.dlg.OnNotify(func(code int) {
+		if code == 200 {
+			a.endWithReason(EndedByTransfer)
+			b.endWithReason(EndedByTransfer)
+		}
+	})
+
+	return nil
 }
 
 // FindCall returns an active call by its SIP Call-ID, or nil if not found.

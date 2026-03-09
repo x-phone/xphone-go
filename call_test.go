@@ -465,6 +465,27 @@ func TestCall_BlindTransferWhenNotActiveReturnsInvalidState(t *testing.T) {
 	assert.ErrorIs(t, call.BlindTransfer("sip:1003@pbx"), ErrInvalidState)
 }
 
+// --- sipHeaderTag ---
+
+func TestSipHeaderTag(t *testing.T) {
+	assert.Equal(t, "abc123", sipHeaderTag("<sip:1001@host>;tag=abc123"))
+	assert.Equal(t, "xyz", sipHeaderTag(`"Alice" <sip:1001@host>;tag=xyz`))
+	assert.Equal(t, "t1", sipHeaderTag("<sip:1001@host>;tag=t1;other=val"))
+	assert.Equal(t, "", sipHeaderTag("<sip:1001@host>"))
+	assert.Equal(t, "CaSe", sipHeaderTag("<sip:u@h>;Tag=CaSe")) // case-insensitive param name
+}
+
+// --- uriEncode ---
+
+func TestURIEncode(t *testing.T) {
+	assert.Equal(t, "abc%40host", uriEncode("abc@host"))
+	assert.Equal(t, "hello%20world", uriEncode("hello world"))
+	assert.Equal(t, "100%25done", uriEncode("100%done"))
+	assert.Equal(t, "simple", uriEncode("simple"))
+	assert.Equal(t, "a%3Bb%3Dc%3Fd%26e%2Bf", uriEncode("a;b=c?d&e+f"))
+	assert.Equal(t, "sip%3Auser", uriEncode("sip:user"))
+}
+
 // --- SDP integration ---
 
 // testSDP generates a minimal valid SDP for call-level tests.

@@ -149,6 +149,16 @@ func (p *MockPhone) wireCallCallbacks(c *MockCall) {
 	}
 }
 
+func (p *MockPhone) AttendedTransfer(callA Call, callB Call) error {
+	if s := callA.State(); s != StateActive && s != StateOnHold {
+		return ErrInvalidState
+	}
+	if s := callB.State(); s != StateActive && s != StateOnHold {
+		return ErrInvalidState
+	}
+	return nil
+}
+
 func (p *MockPhone) Calls() []Call {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -3,6 +3,7 @@ package xphone
 import (
 	"context"
 	"crypto/tls"
+	"strings"
 	"testing"
 	"time"
 
@@ -764,4 +765,128 @@ func TestPhone_CallsUpdatedAfterDial(t *testing.T) {
 	calls := p.Calls()
 	require.Len(t, calls, 1)
 	assert.Equal(t, c.ID(), calls[0].ID())
+}
+
+// --- Attended Transfer ---
+
+// mockDlgWithTags creates a MockDialog with From/To headers containing tags.
+func mockDlgWithTags(callID, from, to string) *testutil.MockDialog {
+	return testutil.NewMockDialogWithCallIDAndHeaders(callID, map[string][]string{
+		"From": {from},
+		"To":   {to},
+	})
+}
+
+func TestPhone_AttendedTransferSendsReferWithReplaces(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	// Call A (outbound to Bob).
+	dlgA := mockDlgWithTags("call-a-id", "<sip:1001@pbx>;tag=alice-a", "<sip:bob@pbx>;tag=bob-a")
+	callA := testOutboundCall(t, dlgA)
+	callA.simulateResponse(200, "OK")
+
+	// Call B (outbound to Charlie) — Call-ID contains @ to test encoding.
+	dlgB := mockDlgWithTags("call-b-id@pbx.local", "<sip:1001@pbx>;tag=alice-b", "<sip:charlie@pbx>;tag=charlie-b")
+	callB := testOutboundCall(t, dlgB)
+	callB.simulateResponse(200, "OK")
+	callB.Hold()
+
+	err := p.AttendedTransfer(callA, callB)
+	require.NoError(t, err)
+
+	// Verify REFER sent on Call A's dialog.
+	assert.True(t, dlgA.ReferSent())
+	target := dlgA.LastReferTarget()
+
+	// Refer-To should point to Charlie's URI with Replaces.
+	assert.True(t, strings.HasPrefix(target, "sip:charlie@pbx?Replaces="), "target: %s", target)
+	assert.Contains(t, target, "call-b-id%40pbx.local", "Call-ID @ should be encoded")
+	assert.Contains(t, target, "to-tag%3Dcharlie-b", "remote tag should be in to-tag")
+	assert.Contains(t, target, "from-tag%3Dalice-b", "local tag should be in from-tag")
+}
+
+func TestPhone_AttendedTransferEndsBothOnNotify200(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	dlgA := mockDlgWithTags("call-a", "<sip:1001@pbx>;tag=a1", "<sip:bob@pbx>;tag=b1")
+	callA := testOutboundCall(t, dlgA)
+	callA.simulateResponse(200, "OK")
+
+	dlgB := mockDlgWithTags("call-b", "<sip:1001@pbx>;tag=a2", "<sip:charlie@pbx>;tag=c2")
+	callB := testOutboundCall(t, dlgB)
+	callB.simulateResponse(200, "OK")
+
+	endedA := make(chan EndReason, 1)
+	endedB := make(chan EndReason, 1)
+	callA.OnEnded(func(r EndReason) { endedA <- r })
+	callB.OnEnded(func(r EndReason) { endedB <- r })
+
+	require.NoError(t, p.AttendedTransfer(callA, callB))
+
+	// Simulate NOTIFY 200 on Call A's dialog.
+	dlgA.SimulateNotify(200)
+
+	select {
+	case r := <-endedA:
+		assert.Equal(t, EndedByTransfer, r)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("callA OnEnded never fired")
+	}
+	select {
+	case r := <-endedB:
+		assert.Equal(t, EndedByTransfer, r)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("callB OnEnded never fired")
+	}
+	assert.Equal(t, StateEnded, callA.State())
+	assert.Equal(t, StateEnded, callB.State())
+}
+
+func TestPhone_AttendedTransferRejectsInactiveCallA(t *testing.T) {
+	p := newPhone(testConfig())
+	callA := testInboundCall(t) // Ringing, not Active
+	dlgB := testutil.NewMockDialog()
+	callB := testOutboundCall(t, dlgB)
+	callB.simulateResponse(200, "OK")
+
+	assert.ErrorIs(t, p.AttendedTransfer(callA, callB), ErrInvalidState)
+}
+
+func TestPhone_AttendedTransferRejectsInactiveCallB(t *testing.T) {
+	p := newPhone(testConfig())
+	callA := testInboundCall(t)
+	callA.Accept()
+	callB := testInboundCall(t) // Ringing, not Active
+
+	assert.ErrorIs(t, p.AttendedTransfer(callA, callB), ErrInvalidState)
+}
+
+func TestPhone_AttendedTransferNotifyNon200KeepsCallsAlive(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	dlgA := mockDlgWithTags("call-a", "<sip:1001@pbx>;tag=a1", "<sip:bob@pbx>;tag=b1")
+	callA := testOutboundCall(t, dlgA)
+	callA.simulateResponse(200, "OK")
+
+	dlgB := mockDlgWithTags("call-b", "<sip:1001@pbx>;tag=a2", "<sip:charlie@pbx>;tag=c2")
+	callB := testOutboundCall(t, dlgB)
+	callB.simulateResponse(200, "OK")
+
+	require.NoError(t, p.AttendedTransfer(callA, callB))
+
+	// NOTIFY 100 (Trying) should NOT end the calls.
+	dlgA.SimulateNotify(100)
+	time.Sleep(50 * time.Millisecond)
+
+	assert.Equal(t, StateActive, callA.State())
+	assert.Equal(t, StateActive, callB.State())
 }

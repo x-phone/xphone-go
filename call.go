@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pion/rtp"
+	"github.com/x-phone/xphone-go/ice"
 	"github.com/x-phone/xphone-go/internal/sdp"
 	"github.com/x-phone/xphone-go/internal/srtp"
 )
@@ -176,6 +177,10 @@ type call struct {
 	srtpLocalKey string        // base64 inline key for outbound encryption (non-empty = SRTP active)
 	srtpIn       *srtp.Context // inbound SRTP decryption context
 	srtpOut      *srtp.Context // outbound SRTP encryption context
+
+	iceEnabled bool       // ICE-Lite enabled for this call
+	iceAgent   *ice.Agent // ICE-Lite agent (nil if ICE disabled)
+	hostIP     string     // real local interface IP (for ICE host candidate)
 
 	codec           Codec // negotiated codec (default CodecPCMU)
 	sessionTimer    *time.Timer
@@ -552,13 +557,19 @@ func (c *call) ensureRTPPort() {
 // Must be called with c.mu held.
 func (c *call) buildLocalSDP(direction string) string {
 	c.ensureRTPPort()
+	iceParams := c.buildICEParams()
+	codecs := c.resolveCodecPrefs()
 	var offer string
-	if c.srtpLocalKey != "" {
-		offer = sdp.BuildOfferSRTP(c.localIP, c.rtpPort, c.resolveCodecPrefs(), direction, c.srtpLocalKey)
+	if c.srtpLocalKey != "" && iceParams != nil {
+		offer = sdp.BuildOfferSRTPICE(c.localIP, c.rtpPort, codecs, direction, c.srtpLocalKey, iceParams)
+	} else if c.srtpLocalKey != "" {
+		offer = sdp.BuildOfferSRTP(c.localIP, c.rtpPort, codecs, direction, c.srtpLocalKey)
+	} else if iceParams != nil {
+		offer = sdp.BuildOfferICE(c.localIP, c.rtpPort, codecs, direction, iceParams)
 	} else {
-		offer = sdp.BuildOffer(c.localIP, c.rtpPort, c.resolveCodecPrefs(), direction)
+		offer = sdp.BuildOffer(c.localIP, c.rtpPort, codecs, direction)
 	}
-	c.logger.Debug("SDP offer built", "id", c.id, "local_ip", c.localIP, "rtp_port", c.rtpPort, "direction", direction, "srtp", c.srtpLocalKey != "", "sdp", offer)
+	c.logger.Debug("SDP offer built", "id", c.id, "local_ip", c.localIP, "rtp_port", c.rtpPort, "direction", direction, "srtp", c.srtpLocalKey != "", "ice", iceParams != nil, "sdp", offer)
 	return offer
 }
 
@@ -566,17 +577,27 @@ func (c *call) buildLocalSDP(direction string) string {
 // remote offer (RFC 3264 compliance). Must be called with c.mu held.
 func (c *call) buildAnswerSDP(remote *sdp.Session, direction string) string {
 	c.ensureRTPPort()
+	iceParams := c.buildICEParams()
+	// Set remote ICE credentials on agent if available.
+	if c.iceAgent != nil && remote.IceUfrag != "" && remote.IcePwd != "" {
+		c.iceAgent.SetRemoteCredentials(ice.Credentials{Ufrag: remote.IceUfrag, Pwd: remote.IcePwd})
+	}
 	var remoteCodecs []int
 	if len(remote.Media) > 0 {
 		remoteCodecs = remote.Media[0].Codecs
 	}
+	codecs := c.resolveCodecPrefs()
 	var answer string
-	if c.srtpLocalKey != "" {
-		answer = sdp.BuildAnswerSRTP(c.localIP, c.rtpPort, c.resolveCodecPrefs(), remoteCodecs, direction, c.srtpLocalKey)
+	if c.srtpLocalKey != "" && iceParams != nil {
+		answer = sdp.BuildAnswerSRTPICE(c.localIP, c.rtpPort, codecs, remoteCodecs, direction, c.srtpLocalKey, iceParams)
+	} else if c.srtpLocalKey != "" {
+		answer = sdp.BuildAnswerSRTP(c.localIP, c.rtpPort, codecs, remoteCodecs, direction, c.srtpLocalKey)
+	} else if iceParams != nil {
+		answer = sdp.BuildAnswerICE(c.localIP, c.rtpPort, codecs, remoteCodecs, direction, iceParams)
 	} else {
-		answer = sdp.BuildAnswer(c.localIP, c.rtpPort, c.resolveCodecPrefs(), remoteCodecs, direction)
+		answer = sdp.BuildAnswer(c.localIP, c.rtpPort, codecs, remoteCodecs, direction)
 	}
-	c.logger.Debug("SDP answer built", "id", c.id, "local_ip", c.localIP, "rtp_port", c.rtpPort, "direction", direction, "srtp", c.srtpLocalKey != "", "sdp", answer)
+	c.logger.Debug("SDP answer built", "id", c.id, "local_ip", c.localIP, "rtp_port", c.rtpPort, "direction", direction, "srtp", c.srtpLocalKey != "", "ice", iceParams != nil, "sdp", answer)
 	return answer
 }
 
@@ -591,6 +612,57 @@ func (c *call) negotiateCodec(sess *sdp.Session) {
 		c.codec = Codec(pt)
 	}
 	c.logger.Debug("codec negotiated", "id", c.id, "codec", int(c.codec), "local_prefs", c.resolveCodecPrefs(), "remote_codecs", remoteCodecs)
+}
+
+// buildICEParams creates ICE SDP parameters and initializes the ICE agent.
+// Returns nil if ICE is disabled. Must be called with c.mu held.
+func (c *call) buildICEParams() *sdp.ICEParams {
+	if !c.iceEnabled {
+		return nil
+	}
+	// Only create agent once per call (first SDP build).
+	if c.iceAgent != nil {
+		// Reuse existing credentials/candidates for re-INVITEs.
+		return &sdp.ICEParams{
+			Ufrag:      c.iceAgent.LocalCreds().Ufrag,
+			Pwd:        c.iceAgent.LocalCreds().Pwd,
+			Candidates: candidateStrings(c.iceAgent.Candidates()),
+			Lite:       true,
+		}
+	}
+
+	creds := ice.GenerateCredentials()
+
+	hostIP := c.hostIP
+	if hostIP == "" {
+		hostIP = c.localIP
+	}
+	localAddr := &net.UDPAddr{IP: net.ParseIP(hostIP), Port: c.rtpPort}
+
+	// Server-reflexive: only if STUN mapped IP differs from host IP.
+	var srflxAddr *net.UDPAddr
+	if c.localIP != hostIP {
+		srflxAddr = &net.UDPAddr{IP: net.ParseIP(c.localIP), Port: c.rtpPort}
+	}
+
+	candidates := ice.GatherCandidates(localAddr, srflxAddr, nil, 1)
+	c.iceAgent = ice.NewAgent(creds, candidates)
+
+	return &sdp.ICEParams{
+		Ufrag:      creds.Ufrag,
+		Pwd:        creds.Pwd,
+		Candidates: candidateStrings(candidates),
+		Lite:       true,
+	}
+}
+
+// candidateStrings converts ICE candidates to their SDP string representations.
+func candidateStrings(cands []ice.Candidate) []string {
+	s := make([]string, len(cands))
+	for i, c := range cands {
+		s[i] = c.SDPValue()
+	}
+	return s
 }
 
 func (c *call) startSessionTimer() {
@@ -1128,6 +1200,11 @@ func (c *call) simulateReInvite(rawSDP string) {
 	}
 	c.remoteSDP = rawSDP
 	c.setRemoteEndpoint(sess)
+
+	// Update remote ICE credentials if present.
+	if c.iceAgent != nil && sess.IceUfrag != "" && sess.IcePwd != "" {
+		c.iceAgent.SetRemoteCredentials(ice.Credentials{Ufrag: sess.IceUfrag, Pwd: sess.IcePwd})
+	}
 
 	dir := sess.Dir()
 	var holdFn, resumeFn func()

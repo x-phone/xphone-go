@@ -243,6 +243,24 @@ func FindAttr(attrs []Attr, attrType uint16) []byte {
 	return nil
 }
 
+// FindAttrOffset finds the byte offset of a specific STUN attribute within a raw message.
+// Returns -1 if not found.
+func FindAttrOffset(msg []byte, targetType uint16) int {
+	if len(msg) < HeaderSize {
+		return -1
+	}
+	offset := HeaderSize
+	for offset+4 <= len(msg) {
+		attrType := uint16(msg[offset])<<8 | uint16(msg[offset+1])
+		attrLen := int(uint16(msg[offset+2])<<8 | uint16(msg[offset+3]))
+		if attrType == targetType {
+			return offset
+		}
+		offset += 4 + ((attrLen + 3) & ^3)
+	}
+	return -1
+}
+
 // ParseErrorCode extracts the error code and reason from an ERROR-CODE attribute.
 func ParseErrorCode(attrs []Attr) (int, string) {
 	val := FindAttr(attrs, AttrErrorCode)

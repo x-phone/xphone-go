@@ -648,6 +648,13 @@ func (c *call) fireOnEnded(reason EndReason) {
 		c.rtpConn.Close()
 		c.rtpConn = nil
 	}
+	// Zeroize SRTP key material.
+	if c.srtpIn != nil {
+		c.srtpIn.Zeroize()
+	}
+	if c.srtpOut != nil {
+		c.srtpOut.Zeroize()
+	}
 	// Close output channels only if the media goroutine was never started
 	// (otherwise the goroutine's defer handles it to avoid send-on-closed panic).
 	if c.mediaDone == nil {

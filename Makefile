@@ -1,4 +1,4 @@
-.PHONY: fmt vet build test test-race test-opus lint tidy check install-sipcli
+.PHONY: fmt vet build test test-race test-opus test-g729 lint tidy check install-sipcli
 
 fmt:
 	gofmt -s -w .
@@ -17,6 +17,9 @@ test-race:
 
 test-opus:
 	go test -tags opus ./... -count=1
+
+test-g729:
+	go test -tags g729 ./... -count=1
 
 lint:
 	golangci-lint run ./...

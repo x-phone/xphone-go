@@ -80,7 +80,7 @@ func (s *Session) FirstCrypto() *CryptoAttr {
 }
 
 var codecNames = map[int]string{
-	0: "PCMU/8000", 8: "PCMA/8000", 9: "G722/8000", 101: "telephone-event/8000", 111: "opus/48000/2",
+	0: "PCMU/8000", 8: "PCMA/8000", 9: "G722/8000", 18: "G729/8000", 101: "telephone-event/8000", 111: "opus/48000/2",
 }
 
 // Parse parses a raw SDP string into a Session.
@@ -267,6 +267,9 @@ func buildSDP(ip string, port int, codecs []int, direction, profile, cryptoInlin
 	for _, c := range codecs {
 		if name, ok := codecNames[c]; ok {
 			b.WriteString(fmt.Sprintf("a=rtpmap:%d %s\r\n", c, name))
+			if c == 18 {
+				b.WriteString("a=fmtp:18 annexb=no\r\n")
+			}
 			if c == 101 {
 				b.WriteString("a=fmtp:101 0-16\r\n")
 			}

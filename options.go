@@ -69,6 +69,7 @@ const (
 	CodecPCMU Codec = 0
 	CodecPCMA Codec = 8
 	CodecG722 Codec = 9
+	CodecG729 Codec = 18
 	CodecOpus Codec = 111
 )
 

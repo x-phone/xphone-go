@@ -94,11 +94,37 @@ func TestParse_RoundTrip(t *testing.T) {
 	assert.Equal(t, 0, s.FirstCodec())
 }
 
+func TestBuildOffer_G729(t *testing.T) {
+	sdp := BuildOffer("192.168.1.100", 5004, []int{18}, "sendrecv")
+	assert.Contains(t, sdp, "m=audio 5004 RTP/AVP 18")
+	assert.Contains(t, sdp, "a=rtpmap:18 G729/8000")
+	assert.Contains(t, sdp, "a=fmtp:18 annexb=no")
+}
+
+func TestBuildOffer_G729WithOtherCodecs(t *testing.T) {
+	sdp := BuildOffer("192.168.1.100", 5004, []int{0, 18}, "sendrecv")
+	assert.Contains(t, sdp, "m=audio 5004 RTP/AVP 0 18")
+	assert.Contains(t, sdp, "a=rtpmap:18 G729/8000")
+	assert.Contains(t, sdp, "a=fmtp:18 annexb=no")
+	assert.Contains(t, sdp, "a=rtpmap:0 PCMU/8000")
+}
+
+func TestParse_G729RoundTrip(t *testing.T) {
+	raw := BuildOffer("10.0.0.1", 5004, []int{18}, "sendrecv")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	assert.Equal(t, 18, s.FirstCodec())
+	assert.Equal(t, 5004, s.Media[0].Port)
+}
+
 func TestNegotiateCodec(t *testing.T) {
 	// local prefers [0,8], remote offers [8,0] → first local pref found in remote = 0
 	assert.Equal(t, 0, NegotiateCodec([]int{0, 8}, []int{8, 0}))
 	// no common codec
 	assert.Equal(t, -1, NegotiateCodec([]int{0}, []int{9}))
+	// G.729 negotiation
+	assert.Equal(t, 18, NegotiateCodec([]int{0, 18}, []int{18}))
+	assert.Equal(t, -1, NegotiateCodec([]int{18}, []int{0, 8}))
 }
 
 func TestBuildOfferSRTP(t *testing.T) {

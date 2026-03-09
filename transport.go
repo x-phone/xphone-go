@@ -16,6 +16,14 @@ type sipTransport interface {
 	// Returns (response code, response header/reason, error).
 	ReadResponse(ctx context.Context) (int, string, error)
 
+	// SendSubscribe sends a SIP SUBSCRIBE to the given URI with the specified headers.
+	// Used for MWI (RFC 3842). Returns (response code, reason, error).
+	SendSubscribe(ctx context.Context, uri string, headers map[string]string) (int, string, error)
+
+	// OnMWINotify registers a callback for incoming MWI NOTIFY bodies.
+	// The callback receives the raw application/simple-message-summary body.
+	OnMWINotify(fn func(body string))
+
 	// SendKeepalive sends a NAT keepalive packet.
 	SendKeepalive() error
 

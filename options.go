@@ -33,6 +33,10 @@ type Config struct {
 	PCMRate      int
 	DtmfMode     DtmfMode
 
+	// VoicemailURI is the SIP URI to subscribe for MWI (RFC 3842).
+	// Example: "sip:*97@pbx.local". When set, the phone auto-subscribes on connect.
+	VoicemailURI string
+
 	Logger *slog.Logger
 }
 
@@ -240,6 +244,16 @@ func WithPCMRate(rate int) PhoneOption {
 func WithDtmfMode(mode DtmfMode) PhoneOption {
 	return func(c *Config) {
 		c.DtmfMode = mode
+	}
+}
+
+// WithVoicemailURI sets the voicemail server URI for MWI SUBSCRIBE (RFC 3842).
+// When set, the phone subscribes to voicemail notifications on Connect()
+// and fires the OnVoicemail callback when the mailbox status changes.
+// Example: "sip:*97@pbx.local"
+func WithVoicemailURI(uri string) PhoneOption {
+	return func(c *Config) {
+		c.VoicemailURI = uri
 	}
 }
 

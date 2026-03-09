@@ -45,3 +45,15 @@ const (
 	DirectionInbound Direction = iota
 	DirectionOutbound
 )
+
+// VoicemailStatus represents the state of a voicemail mailbox (RFC 3842 MWI).
+type VoicemailStatus struct {
+	// MessagesWaiting indicates whether new messages are waiting.
+	MessagesWaiting bool
+	// Account is the optional message account URI (e.g. "sip:*97@pbx.local").
+	Account string
+	// NewMessages is the count of new (unheard) voice messages.
+	NewMessages int
+	// OldMessages is the count of old (heard) voice messages.
+	OldMessages int
+}

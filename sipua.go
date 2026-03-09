@@ -89,6 +89,9 @@ type sipUA struct {
 	// onMWINotify is called when an inbound NOTIFY with application/simple-message-summary
 	// Content-Type is received (MWI). The callback receives the raw body string.
 	onMWINotify func(body string)
+
+	// onMessage is called when an inbound SIP MESSAGE is received (RFC 3428).
+	onMessage func(from, to, contentType, body string)
 }
 
 // newSipUA creates a sipgo-backed SIP transport.
@@ -454,6 +457,31 @@ func (s *sipUA) startServer() {
 			go fn(callID, code)
 		}
 	})
+
+	s.server.OnMessage(func(req *sip.Request, tx sip.ServerTransaction) {
+		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+		tx.Respond(res)
+
+		from := ""
+		if f := req.From(); f != nil {
+			from = f.Address.String()
+		}
+		to := ""
+		if t := req.To(); t != nil {
+			to = t.Address.String()
+		}
+		ct := contentTypeTextPlain
+		if h := req.ContentType(); h != nil {
+			ct = h.Value()
+		}
+
+		s.mu.Lock()
+		fn := s.onMessage
+		s.mu.Unlock()
+		if fn != nil {
+			go fn(from, to, ct, string(req.Body()))
+		}
+	})
 }
 
 // --- sipTransport interface ---
@@ -549,9 +577,11 @@ func (s *sipUA) OnIncoming(fn func(from, to string)) {
 	s.incomingHandler = fn
 }
 
-func (s *sipUA) SendSubscribe(ctx context.Context, uri string, headers map[string]string) (int, string, error) {
+// buildOutboundRequest constructs a SIP request with From (tagged), To, and
+// caller-provided headers. Shared by SendSubscribe and SendMessage.
+func (s *sipUA) buildOutboundRequest(method sip.RequestMethod, uri string, headers map[string]string) *sip.Request {
 	recipient := parseSIPTarget(uri, s.cfg.Host, s.cfg.Port)
-	req := sip.NewRequest(sip.SUBSCRIBE, recipient)
+	req := sip.NewRequest(method, recipient)
 
 	from := sip.FromHeader{
 		Address: sip.Uri{Scheme: "sip", User: s.cfg.Username, Host: s.cfg.Host},
@@ -562,14 +592,19 @@ func (s *sipUA) SendSubscribe(ctx context.Context, uri string, headers map[strin
 	to := sip.ToHeader{Address: recipient}
 	req.AppendHeader(&to)
 
+	for k, v := range headers {
+		req.AppendHeader(sip.NewHeader(k, v))
+	}
+	return req
+}
+
+func (s *sipUA) SendSubscribe(ctx context.Context, uri string, headers map[string]string) (int, string, error) {
+	req := s.buildOutboundRequest(sip.SUBSCRIBE, uri, headers)
+
 	contact := sip.ContactHeader{
 		Address: sip.Uri{Scheme: "sip", User: s.cfg.Username, Host: s.localIP},
 	}
 	req.AppendHeader(&contact)
-
-	for k, v := range headers {
-		req.AppendHeader(sip.NewHeader(k, v))
-	}
 
 	return s.doWithAuth(ctx, req)
 }
@@ -578,6 +613,19 @@ func (s *sipUA) OnMWINotify(fn func(body string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onMWINotify = fn
+}
+
+func (s *sipUA) SendMessage(ctx context.Context, uri string, contentType string, body string, headers map[string]string) (int, string, error) {
+	req := s.buildOutboundRequest(sip.MESSAGE, uri, headers)
+	req.AppendHeader(sip.NewHeader("Content-Type", contentType))
+	req.SetBody([]byte(body))
+	return s.doWithAuth(ctx, req)
+}
+
+func (s *sipUA) OnMessage(fn func(from, to, contentType, body string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onMessage = fn
 }
 
 func (s *sipUA) Close() error {

@@ -46,6 +46,14 @@ const (
 	DirectionOutbound
 )
 
+// SipMessage represents an incoming or outgoing SIP MESSAGE (RFC 3428).
+type SipMessage struct {
+	From        string
+	To          string
+	ContentType string
+	Body        string
+}
+
 // VoicemailStatus represents the state of a voicemail mailbox (RFC 3842 MWI).
 type VoicemailStatus struct {
 	// MessagesWaiting indicates whether new messages are waiting.

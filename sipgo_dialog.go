@@ -12,6 +12,7 @@ import (
 const contentTypeSDP = "application/sdp"
 const contentTypeDTMFRelay = "application/dtmf-relay"
 const contentTypeMWI = "application/simple-message-summary"
+const contentTypeTextPlain = "text/plain"
 const eventMWI = "message-summary"
 
 // sipRequestTimeout is the deadline for SIP dialog operations (BYE, re-INVITE, REFER).

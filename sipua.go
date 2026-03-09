@@ -85,6 +85,10 @@ type sipUA struct {
 	// onDialogInfo is called when an inbound INFO with application/dtmf-relay is received.
 	// The phone uses this to fire DTMF callbacks on the call.
 	onDialogInfo func(callID string, digit string)
+
+	// onMWINotify is called when an inbound NOTIFY with application/simple-message-summary
+	// Content-Type is received (MWI). The callback receives the raw body string.
+	onMWINotify func(body string)
 }
 
 // newSipUA creates a sipgo-backed SIP transport.
@@ -410,7 +414,29 @@ func (s *sipUA) startServer() {
 		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
 		tx.Respond(res)
 
-		// Parse status code from sipfrag body (e.g. "SIP/2.0 200 OK").
+		// Dispatch by Content-Type: MWI vs REFER progress (sipfrag).
+		ct := ""
+		if h := req.ContentType(); h != nil {
+			ct = h.Value()
+		}
+		mediaType := ct
+		if semi := strings.IndexByte(ct, ';'); semi >= 0 {
+			mediaType = ct[:semi]
+		}
+		mediaType = strings.TrimSpace(mediaType)
+
+		if strings.EqualFold(mediaType, contentTypeMWI) {
+			// MWI NOTIFY — dispatch to MWI handler.
+			s.mu.Lock()
+			fn := s.onMWINotify
+			s.mu.Unlock()
+			if fn != nil {
+				go fn(string(req.Body()))
+			}
+			return
+		}
+
+		// REFER progress (message/sipfrag) — parse status code and dispatch.
 		code := parseSipfragStatus(string(req.Body()))
 		if code <= 0 {
 			return
@@ -431,6 +457,25 @@ func (s *sipUA) startServer() {
 }
 
 // --- sipTransport interface ---
+
+// doWithAuth sends a SIP request and handles 401/407 digest auth challenges.
+func (s *sipUA) doWithAuth(ctx context.Context, req *sip.Request, opts ...sipgo.ClientRequestOption) (int, string, error) {
+	res, err := s.client.Do(ctx, req, opts...)
+	if err != nil {
+		return 0, "", err
+	}
+	if res.StatusCode == 401 || res.StatusCode == 407 {
+		authRes, err := s.client.DoDigestAuth(ctx, req, res, sipgo.DigestAuth{
+			Username: s.cfg.Username,
+			Password: s.cfg.Password,
+		})
+		if err != nil {
+			return 0, "", err
+		}
+		return authRes.StatusCode, authRes.Reason, nil
+	}
+	return res.StatusCode, res.Reason, nil
+}
 
 func (s *sipUA) SendRequest(ctx context.Context, method string, headers map[string]string) (int, string, error) {
 	recipientUri := sip.Uri{
@@ -472,25 +517,7 @@ func (s *sipUA) SendRequest(ctx context.Context, method string, headers map[stri
 		opts = append(opts, sipgo.ClientRequestRegisterBuild)
 	}
 
-	// Send and wait for final response (skips provisional 1xx).
-	res, err := s.client.Do(ctx, req, opts...)
-	if err != nil {
-		return 0, "", err
-	}
-
-	// Handle 401/407 with digest authentication automatically.
-	if res.StatusCode == 401 || res.StatusCode == 407 {
-		authRes, err := s.client.DoDigestAuth(ctx, req, res, sipgo.DigestAuth{
-			Username: s.cfg.Username,
-			Password: s.cfg.Password,
-		})
-		if err != nil {
-			return 0, "", err
-		}
-		return authRes.StatusCode, authRes.Reason, nil
-	}
-
-	return res.StatusCode, res.Reason, nil
+	return s.doWithAuth(ctx, req, opts...)
 }
 
 // ReadResponse is unused in the production sipgo path (dialogs handle responses
@@ -520,6 +547,37 @@ func (s *sipUA) OnIncoming(fn func(from, to string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.incomingHandler = fn
+}
+
+func (s *sipUA) SendSubscribe(ctx context.Context, uri string, headers map[string]string) (int, string, error) {
+	recipient := parseSIPTarget(uri, s.cfg.Host, s.cfg.Port)
+	req := sip.NewRequest(sip.SUBSCRIBE, recipient)
+
+	from := sip.FromHeader{
+		Address: sip.Uri{Scheme: "sip", User: s.cfg.Username, Host: s.cfg.Host},
+	}
+	from.Params.Add("tag", sip.GenerateTagN(16))
+	req.AppendHeader(&from)
+
+	to := sip.ToHeader{Address: recipient}
+	req.AppendHeader(&to)
+
+	contact := sip.ContactHeader{
+		Address: sip.Uri{Scheme: "sip", User: s.cfg.Username, Host: s.localIP},
+	}
+	req.AppendHeader(&contact)
+
+	for k, v := range headers {
+		req.AppendHeader(sip.NewHeader(k, v))
+	}
+
+	return s.doWithAuth(ctx, req)
+}
+
+func (s *sipUA) OnMWINotify(fn func(body string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onMWINotify = fn
 }
 
 func (s *sipUA) Close() error {

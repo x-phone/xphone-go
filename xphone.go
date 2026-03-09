@@ -29,6 +29,7 @@ type Phone interface {
 	OnCallState(func(call Call, state CallState))
 	OnCallEnded(func(call Call, reason EndReason))
 	OnCallDTMF(func(call Call, digit string))
+	OnVoicemail(func(status VoicemailStatus))
 	AttendedTransfer(callA Call, callB Call) error
 	FindCall(callID string) Call
 	Calls() []Call
@@ -64,6 +65,10 @@ type phone struct {
 	onCallStateFn func(Call, CallState)
 	onCallEndedFn func(Call, EndReason)
 	onCallDTMFFn  func(Call, string)
+
+	// MWI (voicemail) state.
+	onVoicemailFn func(VoicemailStatus)
+	mwi           *mwiSubscriber
 }
 
 // codecPrefsToInts converts []Codec to []int for SDP/negotiation.
@@ -200,7 +205,21 @@ func (p *phone) connectWithTransport(tr sipTransport) {
 	} else {
 		p.state = PhoneStateRegistrationFailed
 	}
+	voicemailURI := p.cfg.VoicemailURI
+	voicemailFn := p.onVoicemailFn
 	p.mu.Unlock()
+
+	// Auto-start MWI subscription if configured and registration succeeded.
+	if err == nil && voicemailURI != "" {
+		sub := newMWISubscriber(tr, voicemailURI, p.logger)
+		if voicemailFn != nil {
+			sub.setOnVoicemail(voicemailFn)
+		}
+		sub.start()
+		p.mu.Lock()
+		p.mwi = sub
+		p.mu.Unlock()
+	}
 
 	p.logger.Info("phone connected")
 }
@@ -264,9 +283,11 @@ func (p *phone) Disconnect() error {
 	}
 	reg := p.reg
 	tr := p.tr
+	mwi := p.mwi
 	p.state = PhoneStateDisconnected
 	p.reg = nil
 	p.tr = nil
+	p.mwi = nil
 	fn := p.onUnregisteredFn
 
 	// Snapshot and clear active calls so we can end them outside the lock.
@@ -280,6 +301,11 @@ func (p *phone) Disconnect() error {
 	// End all active calls.
 	for _, c := range activeCalls {
 		c.End()
+	}
+
+	// Stop MWI subscription (sends Expires: 0 unsubscribe).
+	if mwi != nil {
+		mwi.stop()
 	}
 
 	// Stop the registry (cancels refresh loop and re-registration goroutines).
@@ -687,6 +713,17 @@ func (p *phone) OnCallDTMF(fn func(Call, string)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.onCallDTMFFn = fn
+}
+
+func (p *phone) OnVoicemail(fn func(VoicemailStatus)) {
+	p.mu.Lock()
+	p.onVoicemailFn = fn
+	mwi := p.mwi
+	p.mu.Unlock()
+	// If already subscribed, apply the callback immediately.
+	if mwi != nil {
+		mwi.setOnVoicemail(fn)
+	}
 }
 
 func (p *phone) State() PhoneState {

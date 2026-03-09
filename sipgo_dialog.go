@@ -11,6 +11,8 @@ import (
 
 const contentTypeSDP = "application/sdp"
 const contentTypeDTMFRelay = "application/dtmf-relay"
+const contentTypeMWI = "application/simple-message-summary"
+const eventMWI = "message-summary"
 
 // sipRequestTimeout is the deadline for SIP dialog operations (BYE, re-INVITE, REFER).
 const sipRequestTimeout = 5 * time.Second

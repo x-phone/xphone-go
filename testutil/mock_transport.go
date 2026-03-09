@@ -10,6 +10,7 @@ import (
 // SentMessage represents a sent SIP message for inspection.
 type SentMessage struct {
 	Method  string
+	URI     string
 	headers map[string]string
 }
 
@@ -40,6 +41,7 @@ type MockTransport struct {
 	inviteFunc      func()
 	dropHandler     func()
 	incomingHandler func(from, to string)
+	mwiNotifyFn     func(body string)
 	responseCh      map[int][]chan bool
 
 	// responseReady is signaled when a new response is queued,
@@ -227,6 +229,48 @@ func (m *MockTransport) OnIncoming(fn func(from, to string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.incomingHandler = fn
+}
+
+// SendSubscribe records a SUBSCRIBE request and returns the next queued response.
+func (m *MockTransport) SendSubscribe(ctx context.Context, uri string, headers map[string]string) (int, string, error) {
+	m.mu.Lock()
+
+	// Copy headers to avoid the caller mutating our stored reference.
+	var hdrCopy map[string]string
+	if headers != nil {
+		hdrCopy = make(map[string]string, len(headers))
+		for k, v := range headers {
+			hdrCopy[k] = v
+		}
+	}
+
+	m.sent = append(m.sent, SentMessage{Method: "SUBSCRIBE", URI: uri, headers: hdrCopy})
+
+	if m.failRemain > 0 {
+		m.failRemain--
+		m.mu.Unlock()
+		return 0, "", errors.New("transport error")
+	}
+	m.mu.Unlock()
+
+	return m.awaitResponse(ctx)
+}
+
+// OnMWINotify registers a handler for incoming MWI NOTIFY bodies.
+func (m *MockTransport) OnMWINotify(fn func(body string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mwiNotifyFn = fn
+}
+
+// SimulateMWINotify simulates an incoming MWI NOTIFY with the given body.
+func (m *MockTransport) SimulateMWINotify(body string) {
+	m.mu.Lock()
+	fn := m.mwiNotifyFn
+	m.mu.Unlock()
+	if fn != nil {
+		fn(body)
+	}
 }
 
 // --- Test simulation methods ---

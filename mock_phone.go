@@ -18,6 +18,7 @@ type MockPhone struct {
 	onCallStateFn  func(Call, CallState)
 	onCallEndedFn  func(Call, EndReason)
 	onCallDTMFFn   func(Call, string)
+	onVoicemailFn  func(VoicemailStatus)
 	lastCall       Call
 	calls          map[string]Call
 }
@@ -131,6 +132,12 @@ func (p *MockPhone) OnCallDTMF(fn func(Call, string)) {
 	p.onCallDTMFFn = fn
 }
 
+func (p *MockPhone) OnVoicemail(fn func(VoicemailStatus)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onVoicemailFn = fn
+}
+
 // wireCallCallbacks hooks phone-level call callbacks onto a MockCall's
 // internal fields so they coexist with user-set per-call callbacks.
 // Must be called with p.mu held.
@@ -220,6 +227,16 @@ func (p *MockPhone) SimulateError(err error) {
 	p.mu.Unlock()
 	if fn != nil {
 		fn(err)
+	}
+}
+
+// SimulateMWI fires the OnVoicemail callback with the given status.
+func (p *MockPhone) SimulateMWI(status VoicemailStatus) {
+	p.mu.Lock()
+	fn := p.onVoicemailFn
+	p.mu.Unlock()
+	if fn != nil {
+		fn(status)
 	}
 }
 

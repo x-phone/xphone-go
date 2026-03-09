@@ -633,3 +633,135 @@ func TestDtmfModeDefaultIsRfc4733(t *testing.T) {
 	p := New().(*phone)
 	assert.Equal(t, DtmfRfc4733, p.cfg.DtmfMode)
 }
+
+// --- Calls() ---
+
+func TestPhone_CallsReturnsEmpty(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	assert.Empty(t, p.Calls())
+}
+
+func TestPhone_CallsReturnsSingleCall(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	incoming := make(chan Call, 1)
+	p.OnIncoming(func(c Call) { incoming <- c })
+	tr.SimulateInvite("sip:1001@pbx", "sip:1002@pbx")
+
+	c := <-incoming
+	calls := p.Calls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, c.ID(), calls[0].ID())
+}
+
+func TestPhone_ConcurrentIncomingCalls(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	var received []Call
+	p.OnIncoming(func(c Call) { received = append(received, c) })
+
+	tr.SimulateInvite("sip:1001@pbx", "sip:1002@pbx")
+	tr.SimulateInvite("sip:1003@pbx", "sip:1002@pbx")
+
+	require.Len(t, received, 2)
+	calls := p.Calls()
+	assert.Len(t, calls, 2)
+
+	// Both calls should have unique Call-IDs.
+	assert.NotEqual(t, received[0].CallID(), received[1].CallID())
+}
+
+func TestPhone_ByeOneCallLeavesOtherActive(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	p := newPhone(testConfig())
+
+	// Set OnCallEnded before calls are created so it gets wired via registerCall.
+	ended := make(chan struct{}, 2)
+	p.OnCallEnded(func(_ Call, _ EndReason) { ended <- struct{}{} })
+
+	p.connectWithTransport(tr)
+
+	var received []Call
+	p.OnIncoming(func(c Call) { received = append(received, c) })
+
+	tr.SimulateInvite("sip:1001@pbx", "sip:1002@pbx")
+	tr.SimulateInvite("sip:1003@pbx", "sip:1002@pbx")
+
+	require.Len(t, received, 2)
+	require.NoError(t, received[0].Accept())
+	require.NoError(t, received[1].Accept())
+
+	// End call 1.
+	require.NoError(t, received[0].End())
+
+	// Wait for call end cleanup to propagate (dispatched via callback goroutine).
+	select {
+	case <-ended:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnCallEnded never fired")
+	}
+
+	// Call 2 should still be active, call 1 removed from tracking.
+	calls := p.Calls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, received[1].ID(), calls[0].ID())
+	assert.Equal(t, StateActive, received[1].State())
+	assert.Equal(t, StateEnded, received[0].State())
+}
+
+func TestPhone_DisconnectEndsAllCalls(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	var received []Call
+	p.OnIncoming(func(c Call) { received = append(received, c) })
+
+	tr.SimulateInvite("sip:1001@pbx", "sip:1002@pbx")
+	tr.SimulateInvite("sip:1003@pbx", "sip:1002@pbx")
+
+	require.Len(t, received, 2)
+	require.NoError(t, received[0].Accept())
+	require.NoError(t, received[1].Accept())
+
+	require.NoError(t, p.Disconnect())
+
+	assert.Equal(t, StateEnded, received[0].State())
+	assert.Equal(t, StateEnded, received[1].State())
+}
+
+func TestPhone_CallsUpdatedAfterDial(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+	tr.OnInvite(func() {
+		tr.RespondWith(180, "Ringing")
+		tr.RespondWith(200, "OK")
+	})
+
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	c, err := p.Dial(context.Background(), "sip:1002@pbx")
+	require.NoError(t, err)
+
+	calls := p.Calls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, c.ID(), calls[0].ID())
+}

@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"crypto/rand"
 	"fmt"
 	"strings"
 	"sync"
@@ -31,9 +32,15 @@ type MockDialog struct {
 // NewMockDialog creates a new MockDialog with defaults.
 func NewMockDialog() *MockDialog {
 	return &MockDialog{
-		callID:  "mock-call-id",
+		callID:  mockCallID(),
 		headers: make(map[string][]string),
 	}
+}
+
+func mockCallID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return fmt.Sprintf("mock-%x", b)
 }
 
 // NewMockDialogWithCallID creates a MockDialog with a specific Call-ID.

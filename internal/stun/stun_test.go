@@ -11,25 +11,25 @@ import (
 // --- Test helpers ---
 
 func buildTestResponse(txnID [12]byte, attrs []byte) []byte {
-	resp := make([]byte, headerSize+len(attrs))
-	binary.BigEndian.PutUint16(resp[0:2], bindingResponse)
+	resp := make([]byte, HeaderSize+len(attrs))
+	binary.BigEndian.PutUint16(resp[0:2], BindingResponse)
 	binary.BigEndian.PutUint16(resp[2:4], uint16(len(attrs)))
-	binary.BigEndian.PutUint32(resp[4:8], magicCookie)
+	binary.BigEndian.PutUint32(resp[4:8], MagicCookie)
 	copy(resp[8:20], txnID[:])
-	copy(resp[headerSize:], attrs)
+	copy(resp[HeaderSize:], attrs)
 	return resp
 }
 
 func buildXORMappedAttr(ip [4]byte, port uint16) []byte {
 	ipVal := uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
-	xorPort := port ^ uint16(magicCookie>>16)
-	xorIP := ipVal ^ magicCookie
+	xorPort := port ^ uint16(MagicCookie>>16)
+	xorIP := ipVal ^ MagicCookie
 
 	attr := make([]byte, 12) // 4 header + 8 value
-	binary.BigEndian.PutUint16(attr[0:2], attrXORMappedAddress)
+	binary.BigEndian.PutUint16(attr[0:2], AttrXORMappedAddress)
 	binary.BigEndian.PutUint16(attr[2:4], 8)
 	attr[4] = 0x00 // reserved
-	attr[5] = familyIPv4
+	attr[5] = FamilyIPv4
 	binary.BigEndian.PutUint16(attr[6:8], xorPort)
 	binary.BigEndian.PutUint32(attr[8:12], xorIP)
 	return attr
@@ -37,10 +37,10 @@ func buildXORMappedAttr(ip [4]byte, port uint16) []byte {
 
 func buildMappedAttr(ip [4]byte, port uint16) []byte {
 	attr := make([]byte, 12)
-	binary.BigEndian.PutUint16(attr[0:2], attrMappedAddress)
+	binary.BigEndian.PutUint16(attr[0:2], AttrMappedAddress)
 	binary.BigEndian.PutUint16(attr[2:4], 8)
 	attr[4] = 0x00 // reserved
-	attr[5] = familyIPv4
+	attr[5] = FamilyIPv4
 	binary.BigEndian.PutUint16(attr[6:8], port)
 	copy(attr[8:12], ip[:])
 	return attr
@@ -50,12 +50,12 @@ func buildMappedAttr(ip [4]byte, port uint16) []byte {
 
 func TestBuildRequestFormat(t *testing.T) {
 	txnID := [12]byte{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}
-	req := buildBindingRequest(txnID)
+	req := BuildMessage(BindingRequest, txnID, nil)
 
-	assert.Equal(t, headerSize, len(req))
-	assert.Equal(t, bindingRequest, binary.BigEndian.Uint16(req[0:2]))
+	assert.Equal(t, HeaderSize, len(req))
+	assert.Equal(t, BindingRequest, binary.BigEndian.Uint16(req[0:2]))
 	assert.Equal(t, uint16(0), binary.BigEndian.Uint16(req[2:4]))
-	assert.Equal(t, magicCookie, binary.BigEndian.Uint32(req[4:8]))
+	assert.Equal(t, MagicCookie, binary.BigEndian.Uint32(req[4:8]))
 	assert.Equal(t, txnID[:], req[8:20])
 }
 
@@ -93,10 +93,10 @@ func TestRejectWrongTxnID(t *testing.T) {
 
 func TestRejectWrongMessageType(t *testing.T) {
 	txnID := [12]byte{0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE}
-	resp := make([]byte, headerSize)
+	resp := make([]byte, HeaderSize)
 	binary.BigEndian.PutUint16(resp[0:2], 0x0111) // Binding Error Response
 	binary.BigEndian.PutUint16(resp[2:4], 0)
-	binary.BigEndian.PutUint32(resp[4:8], magicCookie)
+	binary.BigEndian.PutUint32(resp[4:8], MagicCookie)
 	copy(resp[8:20], txnID[:])
 
 	_, _, err := parseBindingResponse(resp, txnID)
@@ -111,7 +111,7 @@ func TestRejectTruncatedResponse(t *testing.T) {
 }
 
 func TestXORMappedAddressTooShort(t *testing.T) {
-	_, _, err := parseXORMappedAddress(make([]byte, 4))
+	_, err := ParseXORAddr(make([]byte, 4))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "too short")
 }
@@ -163,8 +163,8 @@ func TestPaddedAttributes(t *testing.T) {
 
 func TestRejectBadMagicCookie(t *testing.T) {
 	txnID := [12]byte{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA}
-	resp := make([]byte, headerSize)
-	binary.BigEndian.PutUint16(resp[0:2], bindingResponse)
+	resp := make([]byte, HeaderSize)
+	binary.BigEndian.PutUint16(resp[0:2], BindingResponse)
 	binary.BigEndian.PutUint16(resp[2:4], 0)
 	binary.BigEndian.PutUint32(resp[4:8], 0xDEADBEEF) // wrong cookie
 	copy(resp[8:20], txnID[:])
@@ -177,7 +177,7 @@ func TestRejectBadMagicCookie(t *testing.T) {
 func TestRejectIPv6Family(t *testing.T) {
 	data := []byte{0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 
-	_, _, err := parseXORMappedAddress(data)
+	_, err := ParseXORAddr(data)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported address family")
 
@@ -191,7 +191,7 @@ func TestRejectTruncatedAttribute(t *testing.T) {
 
 	// Attribute header claims 100 bytes but only 4 bytes follow.
 	attr := make([]byte, 8)
-	binary.BigEndian.PutUint16(attr[0:2], attrMappedAddress)
+	binary.BigEndian.PutUint16(attr[0:2], AttrMappedAddress)
 	binary.BigEndian.PutUint16(attr[2:4], 100)
 
 	resp := buildTestResponse(txnID, attr)

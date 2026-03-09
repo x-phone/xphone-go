@@ -24,6 +24,16 @@ type Config struct {
 	StunServer string
 	SRTP       bool
 
+	// TurnServer is the TURN server address (host:port) for relay allocation.
+	// When set with TurnUsername/TurnPassword, the phone allocates a TURN relay
+	// during call setup for symmetric NAT traversal.
+	TurnServer   string
+	TurnUsername string
+	TurnPassword string
+
+	// ICE enables ICE-Lite candidate gathering and STUN responder on the media socket.
+	ICE bool
+
 	RTPPortMin   int
 	RTPPortMax   int
 	CodecPrefs   []Codec
@@ -221,6 +231,31 @@ func WithNATKeepalive(d time.Duration) PhoneOption {
 func WithStunServer(server string) PhoneOption {
 	return func(c *Config) {
 		c.StunServer = server
+	}
+}
+
+// WithTurnServer sets the TURN server for relay allocation (RFC 5766).
+// Format: "host:port" (e.g. "turn.example.com:3478").
+// Must be used with WithTurnCredentials.
+func WithTurnServer(server string) PhoneOption {
+	return func(c *Config) {
+		c.TurnServer = server
+	}
+}
+
+// WithTurnCredentials sets the TURN long-term credentials.
+func WithTurnCredentials(username, password string) PhoneOption {
+	return func(c *Config) {
+		c.TurnUsername = username
+		c.TurnPassword = password
+	}
+}
+
+// WithICE enables ICE-Lite candidate gathering and STUN connectivity
+// check responder on the media socket (RFC 8445 section 2.2).
+func WithICE(enabled bool) PhoneOption {
+	return func(c *Config) {
+		c.ICE = enabled
 	}
 }
 

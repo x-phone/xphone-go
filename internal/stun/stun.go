@@ -1,14 +1,8 @@
-// Package stun implements a minimal STUN Binding client (RFC 5389).
-//
-// It sends a STUN Binding Request to a public STUN server and parses the
-// response to discover the NAT-mapped (server-reflexive) address.
-// Only the bare minimum of RFC 5389 is implemented — no authentication,
-// no FINGERPRINT, no long-term credentials. This covers the common case
-// of discovering a mapped address for SIP/RTP NAT traversal.
+// Package stun implements a STUN Binding client (RFC 5389) and provides
+// shared STUN message primitives used by the TURN and ICE packages.
 package stun
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -16,16 +10,6 @@ import (
 )
 
 const (
-	bindingRequest  uint16 = 0x0001
-	bindingResponse uint16 = 0x0101
-	magicCookie     uint32 = 0x2112A442
-	headerSize             = 20
-
-	attrMappedAddress    uint16 = 0x0001
-	attrXORMappedAddress uint16 = 0x0020
-
-	familyIPv4 byte = 0x01
-
 	// DefaultServer is Google's public STUN server.
 	DefaultServer = "stun.l.google.com:19302"
 
@@ -48,12 +32,9 @@ func MappedAddr(server string, timeout time.Duration) (ip string, port int, err 
 	}
 	defer conn.Close()
 
-	var txnID [12]byte
-	if _, err := rand.Read(txnID[:]); err != nil {
-		return "", 0, fmt.Errorf("stun: random: %w", err)
-	}
+	txnID := GenerateTxnID()
 
-	req := buildBindingRequest(txnID)
+	req := BuildMessage(BindingRequest, txnID, nil)
 	if _, err := conn.WriteTo(req, addr); err != nil {
 		return "", 0, fmt.Errorf("stun: send: %w", err)
 	}
@@ -107,31 +88,21 @@ func resolveServer(server string) (*net.UDPAddr, error) {
 	return nil, fmt.Errorf("stun: no addresses for %q", server)
 }
 
-// buildBindingRequest creates a STUN Binding Request message.
-func buildBindingRequest(txnID [12]byte) []byte {
-	buf := make([]byte, headerSize)
-	binary.BigEndian.PutUint16(buf[0:2], bindingRequest)
-	binary.BigEndian.PutUint16(buf[2:4], 0) // no attributes
-	binary.BigEndian.PutUint32(buf[4:8], magicCookie)
-	copy(buf[8:20], txnID[:])
-	return buf
-}
-
 // parseBindingResponse parses a STUN Binding Response and extracts the
 // mapped address. Prefers XOR-MAPPED-ADDRESS over MAPPED-ADDRESS.
 func parseBindingResponse(data []byte, expectedTxnID [12]byte) (string, int, error) {
-	if len(data) < headerSize {
+	if len(data) < HeaderSize {
 		return "", 0, fmt.Errorf("stun: response too short")
 	}
 
 	msgType := binary.BigEndian.Uint16(data[0:2])
-	if msgType != bindingResponse {
+	if msgType != BindingResponse {
 		return "", 0, fmt.Errorf("stun: unexpected message type: 0x%04x", msgType)
 	}
 
 	msgLen := int(binary.BigEndian.Uint16(data[2:4]))
 	cookie := binary.BigEndian.Uint32(data[4:8])
-	if cookie != magicCookie {
+	if cookie != MagicCookie {
 		return "", 0, fmt.Errorf("stun: bad magic cookie")
 	}
 
@@ -141,12 +112,12 @@ func parseBindingResponse(data []byte, expectedTxnID [12]byte) (string, int, err
 		return "", 0, fmt.Errorf("stun: transaction ID mismatch")
 	}
 
-	if len(data) < headerSize+msgLen {
+	if len(data) < HeaderSize+msgLen {
 		return "", 0, fmt.Errorf("stun: truncated response")
 	}
 
 	// Parse attributes looking for XOR-MAPPED-ADDRESS (preferred) or MAPPED-ADDRESS.
-	attrs := data[headerSize : headerSize+msgLen]
+	attrs := data[HeaderSize : HeaderSize+msgLen]
 	var mappedIP string
 	var mappedPort int
 
@@ -163,24 +134,23 @@ func parseBindingResponse(data []byte, expectedTxnID [12]byte) (string, int, err
 		attrData := attrs[attrStart : attrStart+attrLen]
 
 		switch attrType {
-		case attrXORMappedAddress:
-			// XOR-MAPPED-ADDRESS is preferred — return immediately.
-			return parseXORMappedAddress(attrData)
-		case attrMappedAddress:
-			// Fall back to MAPPED-ADDRESS if no XOR variant found.
+		case AttrXORMappedAddress:
+			addr, err := ParseXORAddr(attrData)
+			if err != nil {
+				return "", 0, err
+			}
+			return addr.IP.String(), addr.Port, nil
+		case AttrMappedAddress:
 			if ip, port, err := parseMappedAddress(attrData); err == nil {
 				mappedIP = ip
 				mappedPort = port
 			}
 		default:
 			if attrType < 0x8000 {
-				// Unknown comprehension-required attribute (RFC 5389 §15).
 				return "", 0, fmt.Errorf("stun: unknown comprehension-required attribute: 0x%04x", attrType)
 			}
-			// Skip comprehension-optional attributes.
 		}
 
-		// Attributes are padded to 4-byte boundaries (RFC 5389 §15).
 		paddedLen := (attrLen + 3) & ^3
 		offset = attrStart + paddedLen
 	}
@@ -191,38 +161,14 @@ func parseBindingResponse(data []byte, expectedTxnID [12]byte) (string, int, err
 	return "", 0, fmt.Errorf("stun: no mapped address in response")
 }
 
-// parseXORMappedAddress parses a STUN XOR-MAPPED-ADDRESS attribute value.
-func parseXORMappedAddress(data []byte) (string, int, error) {
-	if len(data) < 8 {
-		return "", 0, fmt.Errorf("stun: XOR-MAPPED-ADDRESS too short")
-	}
-
-	family := data[1]
-	if family != familyIPv4 {
-		return "", 0, fmt.Errorf("stun: unsupported address family: %d", family)
-	}
-
-	// Port is XOR'd with top 16 bits of magic cookie.
-	xorPort := binary.BigEndian.Uint16(data[2:4])
-	port := xorPort ^ uint16(magicCookie>>16)
-
-	// IPv4 address is XOR'd with the magic cookie.
-	xorIP := binary.BigEndian.Uint32(data[4:8])
-	ip := xorIP ^ magicCookie
-
-	addr := net.IPv4(byte(ip>>24), byte(ip>>16), byte(ip>>8), byte(ip))
-	return addr.String(), int(port), nil
-}
-
 // parseMappedAddress parses a STUN MAPPED-ADDRESS attribute value.
 func parseMappedAddress(data []byte) (string, int, error) {
 	if len(data) < 8 {
 		return "", 0, fmt.Errorf("stun: MAPPED-ADDRESS too short")
 	}
 
-	family := data[1]
-	if family != familyIPv4 {
-		return "", 0, fmt.Errorf("stun: unsupported address family: %d", family)
+	if data[1] != FamilyIPv4 {
+		return "", 0, fmt.Errorf("stun: unsupported address family: %d", data[1])
 	}
 
 	port := binary.BigEndian.Uint16(data[2:4])

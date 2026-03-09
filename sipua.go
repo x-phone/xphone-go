@@ -86,6 +86,10 @@ type sipUA struct {
 	// The phone uses this to fire DTMF callbacks on the call.
 	onDialogInfo func(callID string, digit string)
 
+	// onNotify is the general NOTIFY callback for SUBSCRIBE/NOTIFY (RFC 6665).
+	// Receives event, from, contentType, body, subscriptionState.
+	onNotify func(event, from, contentType, body, subscriptionState string)
+
 	// onMWINotify is called when an inbound NOTIFY with application/simple-message-summary
 	// Content-Type is received (MWI). The callback receives the raw body string.
 	onMWINotify func(body string)
@@ -417,7 +421,7 @@ func (s *sipUA) startServer() {
 		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
 		tx.Respond(res)
 
-		// Dispatch by Content-Type: MWI vs REFER progress (sipfrag).
+		// Extract common headers for dispatch.
 		ct := ""
 		if h := req.ContentType(); h != nil {
 			ct = h.Value()
@@ -428,8 +432,13 @@ func (s *sipUA) startServer() {
 		}
 		mediaType = strings.TrimSpace(mediaType)
 
+		event := ""
+		if h := req.GetHeader("Event"); h != nil {
+			event = h.Value()
+		}
+
+		// MWI dispatch (legacy dedicated handler).
 		if strings.EqualFold(mediaType, contentTypeMWI) {
-			// MWI NOTIFY — dispatch to MWI handler.
 			s.mu.Lock()
 			fn := s.onMWINotify
 			s.mu.Unlock()
@@ -441,20 +450,35 @@ func (s *sipUA) startServer() {
 
 		// REFER progress (message/sipfrag) — parse status code and dispatch.
 		code := parseSipfragStatus(string(req.Body()))
-		if code <= 0 {
+		if code > 0 {
+			callID := ""
+			if h := req.CallID(); h != nil {
+				callID = h.Value()
+			}
+			s.mu.Lock()
+			fn := s.onDialogNotify
+			s.mu.Unlock()
+			if fn != nil && callID != "" {
+				go fn(callID, code)
+			}
 			return
 		}
 
-		callID := ""
-		if h := req.CallID(); h != nil {
-			callID = h.Value()
-		}
-
+		// General NOTIFY dispatch (for SubscriptionManager).
+		// Only reached for non-MWI, non-REFER NOTIFYs.
 		s.mu.Lock()
-		fn := s.onDialogNotify
+		generalFn := s.onNotify
 		s.mu.Unlock()
-		if fn != nil && callID != "" {
-			go fn(callID, code)
+		if generalFn != nil {
+			from := ""
+			if f := req.From(); f != nil {
+				from = f.Address.String()
+			}
+			subState := ""
+			if h := req.GetHeader("Subscription-State"); h != nil {
+				subState = h.Value()
+			}
+			go generalFn(event, from, ct, string(req.Body()), subState)
 		}
 	})
 
@@ -607,6 +631,12 @@ func (s *sipUA) SendSubscribe(ctx context.Context, uri string, headers map[strin
 	req.AppendHeader(&contact)
 
 	return s.doWithAuth(ctx, req)
+}
+
+func (s *sipUA) OnNotify(fn func(event, from, contentType, body, subscriptionState string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onNotify = fn
 }
 
 func (s *sipUA) OnMWINotify(fn func(body string)) {

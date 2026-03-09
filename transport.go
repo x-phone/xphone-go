@@ -28,6 +28,10 @@ type sipTransport interface {
 	// Parameters: from, to, contentType, body.
 	OnMessage(fn func(from, to, contentType, body string))
 
+	// OnNotify registers a callback for incoming NOTIFY requests (general).
+	// Parameters: event, from, contentType, body, subscriptionState.
+	OnNotify(fn func(event, from, contentType, body, subscriptionState string))
+
 	// OnMWINotify registers a callback for incoming MWI NOTIFY bodies.
 	// The callback receives the raw application/simple-message-summary body.
 	OnMWINotify(fn func(body string))

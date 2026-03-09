@@ -153,6 +153,22 @@ func (p *MockPhone) SendMessageWithType(_ context.Context, _ string, _ string, _
 	return nil
 }
 
+func (p *MockPhone) Watch(_ context.Context, _ string, _ func(string, ExtensionState, ExtensionState)) (string, error) {
+	return newCallID(), nil
+}
+
+func (p *MockPhone) Unwatch(_ string) error {
+	return nil
+}
+
+func (p *MockPhone) SubscribeEvent(_ context.Context, _ string, _ string, _ int, _ func(NotifyEvent)) (string, error) {
+	return newCallID(), nil
+}
+
+func (p *MockPhone) UnsubscribeEvent(_ string) error {
+	return nil
+}
+
 // wireCallCallbacks hooks phone-level call callbacks onto a MockCall's
 // internal fields so they coexist with user-set per-call callbacks.
 // Must be called with p.mu held.

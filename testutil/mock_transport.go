@@ -42,6 +42,7 @@ type MockTransport struct {
 	dropHandler     func()
 	incomingHandler func(from, to string)
 	mwiNotifyFn     func(body string)
+	messageFn       func(from, to, contentType, body string)
 	responseCh      map[int][]chan bool
 
 	// responseReady is signaled when a new response is queued,
@@ -115,6 +116,18 @@ func (m *MockTransport) OnInvite(fn func()) {
 	m.inviteFunc = fn
 }
 
+// copyHeaders returns a shallow copy of the headers map, or nil if headers is nil.
+func copyHeaders(headers map[string]string) map[string]string {
+	if headers == nil {
+		return nil
+	}
+	cp := make(map[string]string, len(headers))
+	for k, v := range headers {
+		cp[k] = v
+	}
+	return cp
+}
+
 // --- sipTransport interface ---
 
 // SendRequest sends a SIP request and waits for a response.
@@ -124,17 +137,8 @@ func (m *MockTransport) OnInvite(fn func()) {
 func (m *MockTransport) SendRequest(ctx context.Context, method string, headers map[string]string) (int, string, error) {
 	m.mu.Lock()
 
-	// Copy headers to avoid the caller mutating our stored reference.
-	var hdrCopy map[string]string
-	if headers != nil {
-		hdrCopy = make(map[string]string, len(headers))
-		for k, v := range headers {
-			hdrCopy[k] = v
-		}
-	}
-
 	// Record the sent message (even for failed attempts, so CountSent is accurate).
-	m.sent = append(m.sent, SentMessage{Method: method, headers: hdrCopy})
+	m.sent = append(m.sent, SentMessage{Method: method, headers: copyHeaders(headers)})
 
 	// Check for simulated transport failures.
 	if m.failRemain > 0 {
@@ -235,16 +239,7 @@ func (m *MockTransport) OnIncoming(fn func(from, to string)) {
 func (m *MockTransport) SendSubscribe(ctx context.Context, uri string, headers map[string]string) (int, string, error) {
 	m.mu.Lock()
 
-	// Copy headers to avoid the caller mutating our stored reference.
-	var hdrCopy map[string]string
-	if headers != nil {
-		hdrCopy = make(map[string]string, len(headers))
-		for k, v := range headers {
-			hdrCopy[k] = v
-		}
-	}
-
-	m.sent = append(m.sent, SentMessage{Method: "SUBSCRIBE", URI: uri, headers: hdrCopy})
+	m.sent = append(m.sent, SentMessage{Method: "SUBSCRIBE", URI: uri, headers: copyHeaders(headers)})
 
 	if m.failRemain > 0 {
 		m.failRemain--
@@ -261,6 +256,45 @@ func (m *MockTransport) OnMWINotify(fn func(body string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.mwiNotifyFn = fn
+}
+
+// SendMessage records a MESSAGE request and returns the next queued response.
+func (m *MockTransport) SendMessage(ctx context.Context, uri string, contentType string, body string, headers map[string]string) (int, string, error) {
+	m.mu.Lock()
+
+	hdrCopy := make(map[string]string, len(headers)+1)
+	for k, v := range headers {
+		hdrCopy[k] = v
+	}
+	hdrCopy["Content-Type"] = contentType
+
+	m.sent = append(m.sent, SentMessage{Method: "MESSAGE", URI: uri, headers: hdrCopy})
+
+	if m.failRemain > 0 {
+		m.failRemain--
+		m.mu.Unlock()
+		return 0, "", errors.New("transport error")
+	}
+	m.mu.Unlock()
+
+	return m.awaitResponse(ctx)
+}
+
+// OnMessage registers a handler for incoming SIP MESSAGE requests.
+func (m *MockTransport) OnMessage(fn func(from, to, contentType, body string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messageFn = fn
+}
+
+// SimulateMessage simulates an incoming SIP MESSAGE.
+func (m *MockTransport) SimulateMessage(from, to, contentType, body string) {
+	m.mu.Lock()
+	fn := m.messageFn
+	m.mu.Unlock()
+	if fn != nil {
+		fn(from, to, contentType, body)
+	}
 }
 
 // SimulateMWINotify simulates an incoming MWI NOTIFY with the given body.

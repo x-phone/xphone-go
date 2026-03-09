@@ -31,6 +31,9 @@ type Phone interface {
 	OnCallEnded(func(call Call, reason EndReason))
 	OnCallDTMF(func(call Call, digit string))
 	OnVoicemail(func(status VoicemailStatus))
+	OnMessage(func(msg SipMessage))
+	SendMessage(ctx context.Context, target string, body string) error
+	SendMessageWithType(ctx context.Context, target string, contentType string, body string) error
 	AttendedTransfer(callA Call, callB Call) error
 	FindCall(callID string) Call
 	Calls() []Call
@@ -67,6 +70,9 @@ type phone struct {
 	onCallStateFn func(Call, CallState)
 	onCallEndedFn func(Call, EndReason)
 	onCallDTMFFn  func(Call, string)
+
+	// SIP MESSAGE callback.
+	onMessageFn func(SipMessage)
 
 	// MWI (voicemail) state.
 	onVoicemailFn func(VoicemailStatus)
@@ -202,8 +208,9 @@ func (p *phone) connectWithTransport(tr sipTransport) {
 	// Perform registration (consumes the pre-queued 200 OK in tests).
 	err := p.reg.Start(context.Background())
 
-	// Wire up incoming INVITE handling on the transport.
+	// Wire up incoming INVITE and MESSAGE handling on the transport.
 	tr.OnIncoming(p.handleIncoming)
+	tr.OnMessage(p.handleMessage)
 
 	p.mu.Lock()
 	if err == nil {
@@ -734,6 +741,42 @@ func (p *phone) OnVoicemail(fn func(VoicemailStatus)) {
 	// If already subscribed, apply the callback immediately.
 	if mwi != nil {
 		mwi.setOnVoicemail(fn)
+	}
+}
+
+func (p *phone) OnMessage(fn func(SipMessage)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onMessageFn = fn
+}
+
+func (p *phone) SendMessage(ctx context.Context, target string, body string) error {
+	return p.SendMessageWithType(ctx, target, contentTypeTextPlain, body)
+}
+
+func (p *phone) SendMessageWithType(ctx context.Context, target string, contentType string, body string) error {
+	p.mu.Lock()
+	tr := p.tr
+	p.mu.Unlock()
+	if tr == nil {
+		return ErrNotConnected
+	}
+	code, reason, err := tr.SendMessage(ctx, target, contentType, body, nil)
+	if err != nil {
+		return err
+	}
+	if code < 200 || code >= 300 {
+		return fmt.Errorf("MESSAGE %d %s", code, reason)
+	}
+	return nil
+}
+
+func (p *phone) handleMessage(from, to, contentType, body string) {
+	p.mu.Lock()
+	fn := p.onMessageFn
+	p.mu.Unlock()
+	if fn != nil {
+		fn(SipMessage{From: from, To: to, ContentType: contentType, Body: body})
 	}
 }
 

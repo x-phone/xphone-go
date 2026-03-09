@@ -20,6 +20,14 @@ type sipTransport interface {
 	// Used for MWI (RFC 3842). Returns (response code, reason, error).
 	SendSubscribe(ctx context.Context, uri string, headers map[string]string) (int, string, error)
 
+	// SendMessage sends a SIP MESSAGE to the given URI with optional headers.
+	// Returns (response code, reason, error).
+	SendMessage(ctx context.Context, uri string, contentType string, body string, headers map[string]string) (int, string, error)
+
+	// OnMessage registers a callback for incoming SIP MESSAGE requests.
+	// Parameters: from, to, contentType, body.
+	OnMessage(fn func(from, to, contentType, body string))
+
 	// OnMWINotify registers a callback for incoming MWI NOTIFY bodies.
 	// The callback receives the raw application/simple-message-summary body.
 	OnMWINotify(fn func(body string))

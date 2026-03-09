@@ -642,7 +642,7 @@ func (m model) renderCommandArea(w int) string {
 
 	inputLine := promptStyle.Render(" > ") + m.input + cursorStyle.Render("_")
 
-	helpText := "dial(d) accept(a) reject hangup(h) hold resume mute unmute dtmf transfer(xfer) echo speaker mic 1/2/3 quit(q)"
+	helpText := "dial(d) accept(a) reject hangup(h) hold resume mute unmute dtmf transfer(xfer) msg echo speaker mic 1/2/3 quit(q)"
 	helpLine := "   " + dimStyle.Render(helpText)
 
 	cmdTitle := titleStyle.Render(" Command ")
@@ -695,6 +695,8 @@ func styleEvent(line string) string {
 		return greenStyle.Render(line)
 	case strings.HasPrefix(content, "DTMF"):
 		return magentaStyle.Render(line)
+	case strings.HasPrefix(content, "MSG from"):
+		return incomingStyle.Render(line)
 	case strings.HasPrefix(content, "dialing"),
 		strings.HasPrefix(content, "ringing"),
 		strings.HasPrefix(content, "early media"):
@@ -835,6 +837,23 @@ func (m model) execCommand(input string) (model, tea.Cmd) {
 		return m, callAction(&m, "transfer to "+arg, -1, func(c xphone.Call) error {
 			return c.BlindTransfer(target)
 		})
+
+	case "msg":
+		// msg <target> <body...>
+		if len(parts) < 3 {
+			m.err = "usage: msg <target> <message>"
+			return m, nil
+		}
+		target := parts[1]
+		body := strings.Join(parts[2:], " ")
+		m.pushEvent(fmt.Sprintf("sending message to %s...", target))
+		ph := m.phone
+		return m, func() tea.Msg {
+			if err := ph.SendMessage(context.Background(), target, body); err != nil {
+				return msgLog(fmt.Sprintf("ERROR msg: %s", err))
+			}
+			return msgLog(fmt.Sprintf("message sent to %s", target))
+		}
 
 	case "echo":
 		m.ensureAudio()
@@ -1021,6 +1040,9 @@ func wirePhoneEvents(phone xphone.Phone) {
 		wireCallEvents(call)
 		prog.Send(msgLog(fmt.Sprintf("incoming from %s — type 'accept' or 'reject'", callLabel(call))))
 		prog.Send(msgCallRef{call: call})
+	})
+	phone.OnMessage(func(msg xphone.SipMessage) {
+		prog.Send(msgLog(fmt.Sprintf("MSG from %s: %s", msg.From, msg.Body)))
 	})
 }
 

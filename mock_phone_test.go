@@ -217,3 +217,38 @@ func TestMockPhone_FindCallReturnsNilForUnknown(t *testing.T) {
 	p := NewMockPhone()
 	assert.Nil(t, p.FindCall("nonexistent"))
 }
+
+// --- Calls() ---
+
+func TestMockPhone_CallsReturnsEmpty(t *testing.T) {
+	p := NewMockPhone()
+	p.Connect(context.Background())
+	assert.Empty(t, p.Calls())
+}
+
+func TestMockPhone_CallsReturnsConcurrentCalls(t *testing.T) {
+	p := NewMockPhone()
+	p.Connect(context.Background())
+
+	c1, _ := p.Dial(context.Background(), "sip:1001@pbx")
+	c2, _ := p.Dial(context.Background(), "sip:1002@pbx")
+
+	calls := p.Calls()
+	assert.Len(t, calls, 2)
+
+	ids := map[string]bool{c1.ID(): true, c2.ID(): true}
+	for _, c := range calls {
+		assert.True(t, ids[c.ID()])
+	}
+}
+
+func TestMockPhone_CallsIncludesIncoming(t *testing.T) {
+	p := NewMockPhone()
+	p.Connect(context.Background())
+
+	p.OnIncoming(func(Call) {})
+	p.SimulateIncoming("sip:1001@pbx")
+	p.SimulateIncoming("sip:1003@pbx")
+
+	assert.Len(t, p.Calls(), 2)
+}

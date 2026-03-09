@@ -29,6 +29,7 @@ type Phone interface {
 	OnCallEnded(func(call Call, reason EndReason))
 	OnCallDTMF(func(call Call, digit string))
 	FindCall(callID string) Call
+	Calls() []Call
 	State() PhoneState
 }
 
@@ -431,6 +432,17 @@ func (p *phone) findCall(callID string) *call {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.calls[callID]
+}
+
+// Calls returns a snapshot of all active calls.
+func (p *phone) Calls() []Call {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	result := make([]Call, 0, len(p.calls))
+	for _, c := range p.calls {
+		result = append(result, c)
+	}
+	return result
 }
 
 // FindCall returns an active call by its SIP Call-ID, or nil if not found.

@@ -33,17 +33,18 @@ type MockCall struct {
 	transferTo  string
 	headers     map[string][]string
 
-	onDTMFFn     func(string)
-	onHoldFn     func()
-	onResumeFn   func()
-	onMuteFn     func()
-	onUnmuteFn   func()
-	onMediaFn    func()
-	onStateFn    func(CallState)
-	onEndedFn    func(EndReason)
-	onStatePhone func(CallState) // internal: phone-level OnCallState
-	onEndedPhone func(EndReason) // internal: phone-level OnCallEnded
-	onDTMFPhone  func(string)    // internal: phone-level OnCallDTMF
+	onDTMFFn       func(string)
+	onHoldFn       func()
+	onResumeFn     func()
+	onMuteFn       func()
+	onUnmuteFn     func()
+	onMediaFn      func()
+	onStateFn      func(CallState)
+	onEndedFn      func(EndReason)
+	onEndedCleanup func(EndReason) // internal: call tracking cleanup
+	onStatePhone   func(CallState) // internal: phone-level OnCallState
+	onEndedPhone   func(EndReason) // internal: phone-level OnCallEnded
+	onDTMFPhone    func(string)    // internal: phone-level OnCallDTMF
 
 	rtpRawReader chan *rtp.Packet
 	rtpReader    chan *rtp.Packet
@@ -56,7 +57,7 @@ type MockCall struct {
 func NewMockCall() *MockCall {
 	return &MockCall{
 		id:           newCallID(),
-		callID:       "mock-call-id",
+		callID:       newCallID(),
 		state:        StateRinging,
 		direction:    DirectionInbound,
 		headers:      make(map[string][]string),
@@ -223,11 +224,15 @@ func (c *MockCall) Reject(code int, reason string) error {
 		return ErrInvalidState
 	}
 	c.state = StateEnded
+	cleanupFn := c.onEndedCleanup
 	statePhoneFn := c.onStatePhone
 	stateFn := c.onStateFn
 	endPhoneFn := c.onEndedPhone
 	endFn := c.onEndedFn
 	c.mu.Unlock()
+	if cleanupFn != nil {
+		cleanupFn(EndedByRejected)
+	}
 	if statePhoneFn != nil {
 		statePhoneFn(StateEnded)
 	}
@@ -256,11 +261,15 @@ func (c *MockCall) End() error {
 		return ErrInvalidState
 	}
 	c.state = StateEnded
+	cleanupFn := c.onEndedCleanup
 	statePhoneFn := c.onStatePhone
 	stateFn := c.onStateFn
 	endPhoneFn := c.onEndedPhone
 	endFn := c.onEndedFn
 	c.mu.Unlock()
+	if cleanupFn != nil {
+		cleanupFn(reason)
+	}
 	if statePhoneFn != nil {
 		statePhoneFn(StateEnded)
 	}

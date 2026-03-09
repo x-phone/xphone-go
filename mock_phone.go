@@ -53,7 +53,15 @@ func (p *MockPhone) Disconnect() error {
 	}
 	p.state = PhoneStateDisconnected
 	fn := p.onUnregFn
+	activeCalls := make([]*MockCall, 0, len(p.calls))
+	for _, c := range p.calls {
+		activeCalls = append(activeCalls, c.(*MockCall))
+	}
+	p.calls = make(map[string]Call)
 	p.mu.Unlock()
+	for _, c := range activeCalls {
+		c.End()
+	}
 	if fn != nil {
 		fn()
 	}
@@ -74,6 +82,8 @@ func (p *MockPhone) Dial(_ context.Context, target string, opts ...DialOption) (
 	p.lastCall = c
 	p.calls[c.CallID()] = c
 	p.wireCallCallbacks(c)
+	callID := c.CallID()
+	c.onEndedCleanup = func(_ EndReason) { p.untrackCall(callID) }
 	p.mu.Unlock()
 
 	return c, nil
@@ -139,6 +149,16 @@ func (p *MockPhone) wireCallCallbacks(c *MockCall) {
 	}
 }
 
+func (p *MockPhone) Calls() []Call {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	result := make([]Call, 0, len(p.calls))
+	for _, c := range p.calls {
+		result = append(result, c)
+	}
+	return result
+}
+
 func (p *MockPhone) FindCall(callID string) Call {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -155,6 +175,13 @@ func (p *MockPhone) State() PhoneState {
 	return p.state
 }
 
+// untrackCall removes a call from the active calls map.
+func (p *MockPhone) untrackCall(callID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.calls, callID)
+}
+
 // --- Test simulation methods ---
 
 // SimulateIncoming creates an incoming MockCall and fires the OnIncoming callback.
@@ -166,6 +193,8 @@ func (p *MockPhone) SimulateIncoming(from string) {
 	p.lastCall = c
 	p.calls[c.CallID()] = c
 	p.wireCallCallbacks(c)
+	callID := c.CallID()
+	c.onEndedCleanup = func(_ EndReason) { p.untrackCall(callID) }
 	fn := p.onIncomingFn
 	p.mu.Unlock()
 

@@ -314,6 +314,7 @@ func (p *phone) Connect(ctx context.Context) error {
 	// Wire inbound INVITE, BYE, and NOTIFY handlers for sipgo path.
 	tr.mu.Lock()
 	tr.onDialogInvite = p.handleDialogInvite
+	tr.onDialogReInvite = p.handleDialogReInvite
 	tr.onDialogBye = p.handleDialogBye
 	tr.onDialogCancel = p.handleDialogCancel
 	tr.onDialogNotify = p.handleDialogNotify
@@ -675,6 +676,18 @@ func (p *phone) handleDialogInvite(dlg dialog, from, to, sdpBody string) {
 	if fn != nil {
 		fn(c)
 	}
+}
+
+// handleDialogReInvite is called by sipUA's OnInvite handler when an INVITE
+// arrives with a Call-ID that may match an existing call. Returns true if the
+// re-INVITE was handled (existing call found).
+func (p *phone) handleDialogReInvite(callID string, responder reInviteResponder, sdpBody string) bool {
+	c := p.findCall(callID)
+	if c == nil {
+		return false // not a re-INVITE — fall through to new call handling
+	}
+	c.handleReInvite(responder, sdpBody)
+	return true
 }
 
 // handleDialogBye is called by sipUA's OnBye handler when a BYE is received

@@ -136,6 +136,9 @@ type Call interface {
 	MuteVideo() error
 	UnmuteVideo() error
 	RequestKeyframe() error
+	AddVideo(codecs ...VideoCodec) error
+	OnVideoRequest(func(*VideoUpgradeRequest))
+	OnVideo(func())
 	OnMedia(func())
 	OnState(func(state CallState))
 	OnEnded(func(reason EndReason))
@@ -153,18 +156,21 @@ type call struct {
 	startTime time.Time
 	logger    *slog.Logger
 
-	onEndedFn      func(EndReason)
-	onEndedCleanup func(EndReason) // internal: call tracking (untrackCall)
-	onStatePhone   func(CallState) // internal: phone-level OnCallState
-	onEndedPhone   func(EndReason) // internal: phone-level OnCallEnded
-	onDTMFPhone    func(string)    // internal: phone-level OnCallDTMF
-	onMediaFn      func()
-	onStateFn      func(CallState)
-	onDTMFFn       func(string)
-	onHoldFn       func()
-	onResumeFn     func()
-	onMuteFn       func()
-	onUnmuteFn     func()
+	onEndedFn           func(EndReason)
+	onEndedCleanup      func(EndReason) // internal: call tracking (untrackCall)
+	onStatePhone        func(CallState) // internal: phone-level OnCallState
+	onEndedPhone        func(EndReason) // internal: phone-level OnCallEnded
+	onDTMFPhone         func(string)    // internal: phone-level OnCallDTMF
+	onMediaFn           func()
+	onStateFn           func(CallState)
+	onDTMFFn            func(string)
+	onHoldFn            func()
+	onResumeFn          func()
+	onMuteFn            func()
+	onUnmuteFn          func()
+	onVideoRequestFn    func(*VideoUpgradeRequest)
+	onVideoFn           func()
+	pendingVideoUpgrade *VideoUpgradeRequest
 
 	audioStream    *mediaStream
 	videoStream    *mediaStream
@@ -229,6 +235,7 @@ type call struct {
 	videoRTPPort      int              // allocated video RTP port
 	videoRemoteAddr   net.Addr         // remote video RTP endpoint
 	videoDone         chan struct{}    // signals video goroutine to stop
+	videoWg           sync.WaitGroup   // waits for video goroutine to exit
 	closeVideoChOnce  sync.Once        // ensures video output channels are closed exactly once
 }
 
@@ -673,7 +680,13 @@ func (c *call) buildAnswerSDP(remote *sdp.Session, direction string) string {
 // Also negotiates video if a video m= line is present.
 // Must be called with c.mu held.
 func (c *call) negotiateCodec(sess *sdp.Session) {
-	// Negotiate audio from the first audio m= line.
+	c.negotiateAudioCodec(sess)
+	c.negotiateVideoCodec(sess)
+}
+
+// negotiateAudioCodec updates c.codec from the audio m= line only.
+// Must be called with c.mu held.
+func (c *call) negotiateAudioCodec(sess *sdp.Session) {
 	var remoteCodecs []int
 	if am := sess.AudioMedia(); am != nil {
 		remoteCodecs = am.Codecs
@@ -682,9 +695,6 @@ func (c *call) negotiateCodec(sess *sdp.Session) {
 		c.codec = Codec(pt)
 	}
 	c.logger.Debug("codec negotiated", "id", c.id, "codec", int(c.codec), "local_prefs", c.resolveCodecPrefs(), "remote_codecs", remoteCodecs)
-
-	// Negotiate video.
-	c.negotiateVideoCodec(sess)
 }
 
 // buildICEParams creates ICE SDP parameters and initializes the ICE agent.
@@ -748,6 +758,7 @@ func (c *call) initVideoChannels() {
 	c.videoReader = make(chan VideoFrame, 256)
 	c.videoWriter = make(chan VideoFrame, 256)
 	c.videoStream = &mediaStream{call: c, outSSRC: randUint32()}
+	c.closeVideoChOnce = sync.Once{} // reset for re-upgrade after downgrade
 }
 
 // ensureVideoRTPPort lazily allocates a UDP socket for video RTP.
@@ -809,11 +820,18 @@ func (c *call) setVideoRemoteEndpoint(sess *sdp.Session) {
 }
 
 // closeVideoOutputChannels closes the consumer-facing video channels exactly once.
+// Safe to call after channels have been nil'd (e.g. by stopVideoPipeline).
 func (c *call) closeVideoOutputChannels() {
 	c.closeVideoChOnce.Do(func() {
-		close(c.videoRTPReader)
-		close(c.videoRTPRawReader)
-		close(c.videoReader)
+		if c.videoRTPReader != nil {
+			close(c.videoRTPReader)
+		}
+		if c.videoRTPRawReader != nil {
+			close(c.videoRTPRawReader)
+		}
+		if c.videoReader != nil {
+			close(c.videoReader)
+		}
 	})
 }
 
@@ -961,6 +979,12 @@ func (c *call) fireOnEnded(reason EndReason) {
 	}
 	if c.videoDone == nil && c.videoRTPReader != nil {
 		c.closeVideoOutputChannels()
+	}
+	// Reject any pending video upgrade request.
+	if c.pendingVideoUpgrade != nil {
+		req := c.pendingVideoUpgrade
+		c.pendingVideoUpgrade = nil
+		go req.Reject()
 	}
 	// Clear OnNotify to break closure reference cycles.
 	c.dlg.OnNotify(nil)

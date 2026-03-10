@@ -86,6 +86,10 @@ type sipUA struct {
 	// The phone uses this to fire DTMF callbacks on the call.
 	onDialogInfo func(callID string, digit string)
 
+	// onDialogReInvite is called when an inbound re-INVITE is received for an
+	// existing dialog. Returns true if the call was found and handled.
+	onDialogReInvite func(callID string, responder reInviteResponder, sdpBody string) bool
+
 	// onNotify is the general NOTIFY callback for SUBSCRIBE/NOTIFY (RFC 6665).
 	// Receives event, from, contentType, body, subscriptionState.
 	onNotify func(event, from, contentType, body, subscriptionState string)
@@ -316,6 +320,35 @@ func (s *sipUA) startServer() {
 			return
 		}
 
+		// Extract Call-ID and SDP body.
+		callID := ""
+		if h := req.CallID(); h != nil {
+			callID = h.Value()
+		}
+		sdpBody := string(req.Body())
+
+		// Check if this is a re-INVITE for an existing call.
+		s.mu.Lock()
+		reInvFn := s.onDialogReInvite
+		s.mu.Unlock()
+		if reInvFn != nil && callID != "" {
+			responder := &sipgoDialogUAS{
+				dialogBase: dialogBase{sess: sess, invite: req},
+			}
+			if reInvFn(callID, responder, sdpBody) {
+				// Re-INVITE handled — wait for confirmed state.
+				stateCh := sess.StateRead()
+				for state := range stateCh {
+					if state >= sip.DialogStateConfirmed {
+						break
+					}
+				}
+				tx.Terminate()
+				return
+			}
+		}
+
+		// Not a re-INVITE — handle as new INVITE.
 		// Send 100 Trying immediately to stop INVITE retransmissions.
 		sess.Respond(100, "Trying", nil)
 
@@ -335,9 +368,6 @@ func (s *sipUA) startServer() {
 				invite: req,
 			},
 		}
-
-		// Extract SDP body from INVITE.
-		sdpBody := string(req.Body())
 
 		s.mu.Lock()
 		fn := s.onDialogInvite

@@ -40,4 +40,6 @@ var (
 	ErrSubscriptionRejected = errors.New("xphone: subscription rejected")
 	// ErrSubscriptionNotFound is returned when UnsubscribeEvent is called with an unknown ID.
 	ErrSubscriptionNotFound = errors.New("xphone: subscription not found")
+	// ErrVideoAlreadyActive is returned when AddVideo is called on a call that already has video.
+	ErrVideoAlreadyActive = errors.New("xphone: video already active")
 )

@@ -11,10 +11,10 @@ import (
 	"github.com/x-phone/xphone-go/testutil"
 )
 
-// activeVideoCall creates an inbound call in StateActive with both audio and
+// activeVideoCallWithCodec creates an inbound call in StateActive with both audio and
 // video media pipelines ready. sentRTP and videoSentRTP are initialized so
 // tests can observe outbound packets.
-func activeVideoCall(t *testing.T) *call {
+func activeVideoCallWithCodec(t *testing.T, codec VideoCodec) *call {
 	t.Helper()
 	c := newInboundCall(testutil.NewMockDialog())
 	t.Cleanup(c.cleanup)
@@ -22,7 +22,7 @@ func activeVideoCall(t *testing.T) *call {
 
 	// Set up video state before Accept.
 	c.hasVideo = true
-	c.videoCodecType = VideoCodecH264
+	c.videoCodecType = codec
 	c.initVideoChannels()
 	c.videoSentRTP = make(chan *rtp.Packet, 256)
 
@@ -39,6 +39,11 @@ func activeVideoCall(t *testing.T) *call {
 	c.startMedia()
 	c.startVideoMedia()
 	return c
+}
+
+func activeVideoCall(t *testing.T) *call {
+	t.Helper()
+	return activeVideoCallWithCodec(t, VideoCodecH264)
 }
 
 // --- Video negotiation tests ---
@@ -176,6 +181,173 @@ func TestVideoMedia_OutboundRTPWriter(t *testing.T) {
 	assert.Equal(t, uint16(99), sent.SequenceNumber)
 	assert.Equal(t, uint8(96), sent.PayloadType)
 	assert.Equal(t, []byte{0xDE, 0xAD}, sent.Payload)
+}
+
+// --- Depacketizer integration tests ---
+
+func TestVideoMedia_H264Depacketize(t *testing.T) {
+	c := activeVideoCall(t)
+	defer c.stopMedia()
+	defer c.videoRTPConn.Close()
+
+	// Inject an H.264 IDR NAL as a single RTP packet (marker set).
+	nal := []byte{0x65, 0xAA, 0xBB, 0xCC} // NAL type 5 = IDR
+	pkt := &rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 1, PayloadType: 96, Timestamp: 90000, SSRC: 0x1234, Marker: true},
+		Payload: nal,
+	}
+	c.videoRTPInbound <- pkt
+
+	// Should appear as an assembled VideoFrame on videoReader.
+	select {
+	case frame := <-c.VideoReader():
+		assert.True(t, frame.IsKeyframe, "IDR should be detected as keyframe")
+		assert.Equal(t, uint32(90000), frame.Timestamp)
+		assert.Equal(t, VideoCodecH264, frame.Codec)
+		// Frame data should contain Annex-B start code + NAL.
+		assert.True(t, len(frame.Data) > 4, "frame should have start code + NAL")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("VideoReader did not receive assembled frame")
+	}
+}
+
+func TestVideoMedia_H264FUADepacketize(t *testing.T) {
+	c := activeVideoCall(t)
+	defer c.stopMedia()
+	defer c.videoRTPConn.Close()
+
+	// Simulate FU-A fragmentation of an IDR NAL.
+	nalHeader := byte(0x65) // NRI=3, type=5 (IDR)
+	fuIndicator := (nalHeader & 0xE0) | 28
+
+	// Fragment 1: S=1, E=0.
+	frag1 := append([]byte{fuIndicator, 0x80 | 0x05}, make([]byte, 100)...)
+	pkt1 := &rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 1, Timestamp: 90000, PayloadType: 96},
+		Payload: frag1,
+	}
+	c.videoRTPInbound <- pkt1
+
+	// Fragment 2: S=0, E=1, marker set.
+	frag2 := append([]byte{fuIndicator, 0x40 | 0x05}, make([]byte, 50)...)
+	pkt2 := &rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 2, Timestamp: 90000, PayloadType: 96, Marker: true},
+		Payload: frag2,
+	}
+	c.videoRTPInbound <- pkt2
+
+	// Should produce a single assembled keyframe.
+	select {
+	case frame := <-c.VideoReader():
+		assert.True(t, frame.IsKeyframe)
+		assert.Equal(t, uint32(90000), frame.Timestamp)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("VideoReader did not receive FU-A reassembled frame")
+	}
+}
+
+func TestVideoMedia_OutboundVideoFrame(t *testing.T) {
+	c := activeVideoCall(t)
+	defer c.stopMedia()
+	defer c.videoRTPConn.Close()
+
+	// Build an Annex-B encoded frame (SPS + IDR).
+	var frameData []byte
+	frameData = append(frameData, 0x00, 0x00, 0x00, 0x01) // start code
+	frameData = append(frameData, 0x67, 0x42, 0xE0, 0x1F) // SPS
+	frameData = append(frameData, 0x00, 0x00, 0x00, 0x01) // start code
+	frameData = append(frameData, 0x65)                   // IDR header
+	frameData = append(frameData, make([]byte, 50)...)    // IDR payload
+
+	frame := VideoFrame{
+		Codec:      VideoCodecH264,
+		Timestamp:  180000,
+		IsKeyframe: true,
+		Data:       frameData,
+	}
+
+	// Send via VideoWriter.
+	select {
+	case c.VideoWriter() <- frame:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("VideoWriter blocked")
+	}
+
+	// Should produce RTP packets on videoSentRTP.
+	time.Sleep(50 * time.Millisecond)
+	pkts := drainPackets(c.videoSentRTP)
+	require.True(t, len(pkts) >= 2, "expected at least 2 RTP packets (SPS + IDR), got %d", len(pkts))
+
+	// Last packet should have marker bit set.
+	assert.True(t, pkts[len(pkts)-1].Marker, "last packet should have marker bit")
+	// All packets should have the correct timestamp.
+	for _, p := range pkts {
+		assert.Equal(t, uint32(180000), p.Timestamp)
+		assert.Equal(t, uint8(96), p.PayloadType)
+	}
+}
+
+// --- VP8 pipeline tests ---
+
+func activeVP8VideoCall(t *testing.T) *call {
+	t.Helper()
+	return activeVideoCallWithCodec(t, VideoCodecVP8)
+}
+
+func TestVideoMedia_VP8Depacketize(t *testing.T) {
+	c := activeVP8VideoCall(t)
+	defer c.stopMedia()
+	defer c.videoRTPConn.Close()
+
+	// VP8 keyframe: descriptor S=1 (0x10), frame byte bit0=0 (keyframe).
+	pkt := &rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 1, PayloadType: 97, Timestamp: 90000, Marker: true},
+		Payload: []byte{0x10, 0x10, 0x00, 0x00, 0xAA, 0xBB}, // S=1, keyframe
+	}
+	c.videoRTPInbound <- pkt
+
+	select {
+	case frame := <-c.VideoReader():
+		assert.True(t, frame.IsKeyframe)
+		assert.Equal(t, VideoCodecVP8, frame.Codec)
+		assert.Equal(t, uint32(90000), frame.Timestamp)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("VP8 VideoReader did not receive frame")
+	}
+}
+
+func TestVideoMedia_VP8OutboundFrame(t *testing.T) {
+	c := activeVP8VideoCall(t)
+	defer c.stopMedia()
+	defer c.videoRTPConn.Close()
+
+	frameData := make([]byte, 200)
+	frameData[0] = 0x10 // keyframe (bit 0 = 0)
+	for i := 1; i < len(frameData); i++ {
+		frameData[i] = byte(i)
+	}
+
+	frame := VideoFrame{
+		Codec:      VideoCodecVP8,
+		Timestamp:  270000,
+		IsKeyframe: true,
+		Data:       frameData,
+	}
+
+	select {
+	case c.VideoWriter() <- frame:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("VP8 VideoWriter blocked")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	pkts := drainPackets(c.videoSentRTP)
+	require.True(t, len(pkts) >= 1, "expected at least 1 RTP packet")
+	assert.True(t, pkts[len(pkts)-1].Marker, "last packet should have marker bit")
+	for _, p := range pkts {
+		assert.Equal(t, uint32(270000), p.Timestamp)
+		assert.Equal(t, uint8(97), p.PayloadType)
+	}
 }
 
 // --- RequestKeyframe tests ---

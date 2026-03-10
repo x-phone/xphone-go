@@ -57,23 +57,13 @@ func clonePacket(pkt *rtp.Packet) *rtp.Packet {
 	return clone
 }
 
-// sendDropOldest sends pkt to ch; if full, drains one oldest entry first.
-func sendDropOldest(ch chan *rtp.Packet, pkt *rtp.Packet) {
+// sendDropOldest sends val to ch; if full, drains one oldest entry first.
+func sendDropOldest[T any](ch chan T, val T) {
 	select {
-	case ch <- pkt:
+	case ch <- val:
 	default:
 		<-ch // drop oldest
-		ch <- pkt
-	}
-}
-
-// sendDropOldestPCM sends samples to ch; if full, drains one oldest entry first.
-func sendDropOldestPCM(ch chan []int16, samples []int16) {
-	select {
-	case ch <- samples:
-	default:
-		<-ch // drop oldest
-		ch <- samples
+		ch <- val
 	}
 }
 
@@ -88,7 +78,7 @@ func (s *mediaStream) drainJB(jb *media.JitterBuffer, cp media.CodecProcessor) {
 		}
 		sendDropOldest(c.rtpReader, clonePacket(pkt))
 		if len(pkt.Payload) > 0 && cp != nil {
-			sendDropOldestPCM(c.pcmReader, cp.Decode(pkt.Payload))
+			sendDropOldest(c.pcmReader, cp.Decode(pkt.Payload))
 		}
 	}
 }
@@ -443,8 +433,34 @@ func (c *call) startMedia() {
 	go s.run(jb, cp, rtpClockRate)
 }
 
-// runVideo is the video media pipeline goroutine. Unlike audio, video uses
-// RTP passthrough only (no jitter buffer, no PCM, no DTMF).
+// newVideoDepacketizer creates a depacketizer for the given video codec.
+func newVideoDepacketizer(codec VideoCodec) media.VideoDepacketizer {
+	switch codec {
+	case VideoCodecH264:
+		return &media.H264Depacketizer{}
+	case VideoCodecVP8:
+		return &media.VP8Depacketizer{}
+	default:
+		return nil
+	}
+}
+
+// newVideoPacketizer creates a packetizer for the given video codec.
+func newVideoPacketizer(codec VideoCodec) media.VideoPacketizer {
+	switch codec {
+	case VideoCodecH264:
+		return &media.H264Packetizer{}
+	case VideoCodecVP8:
+		return &media.VP8Packetizer{}
+	default:
+		return nil
+	}
+}
+
+// runVideo is the video media pipeline goroutine. Handles:
+// - Inbound: RTP → depacketizer → VideoFrame assembly → videoReader + raw RTP taps
+// - Outbound: VideoFrame → packetizer → RTP; or raw RTP passthrough via videoRTPWriter
+// - RTCP SR/RR
 func (s *mediaStream) runVideo() {
 	c := s.call
 	conn := s.conn
@@ -453,6 +469,12 @@ func (s *mediaStream) runVideo() {
 	done := s.done
 
 	defer c.closeVideoOutputChannels()
+
+	// Create depacketizer and packetizer based on negotiated codec.
+	// videoCodecType is set before the pipeline starts and never modified while running.
+	codec := c.videoCodecType
+	depacketizer := newVideoDepacketizer(codec)
+	packetizer := newVideoPacketizer(codec)
 
 	// RTCP state for video (90kHz clock).
 	rtcpStats := rtcp.NewStats()
@@ -498,11 +520,68 @@ func (s *mediaStream) runVideo() {
 			sendDropOldest(c.videoRTPReader, clonePacket(pkt))
 			rtcpStats.RecordRTPReceived(pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC, 90000)
 
-		case <-c.videoWriter:
-			// VideoFrame write path — packetizer not yet implemented (PR 4).
-			// Drain to prevent writers from blocking.
+			// Depacketize into assembled VideoFrames. The depacketizer copies
+			// what it needs from pkt.Payload, so passing the original is safe.
+			if depacketizer != nil {
+				for _, mf := range depacketizer.Push(pkt) {
+					frame := VideoFrame{
+						Codec:      codec,
+						Timestamp:  mf.Timestamp,
+						IsKeyframe: mf.IsKeyframe,
+						Data:       mf.Data,
+					}
+					sendDropOldest(c.videoReader, frame)
+				}
+			}
+
+		case frame := <-c.videoWriter:
+			// Packetize VideoFrame into RTP packets.
+			// Skip if raw RTP writer is in use (mutual exclusion, same as audio).
+			// Drop frames with mismatched codec to prevent corrupt packetization.
+			if packetizer == nil || s.rtpWriterUsed || frame.Codec != codec {
+				continue
+			}
+			c.mu.Lock()
+			muted := s.muted
+			dst := c.videoRemoteAddr
+			srtpOut := c.videoSrtpOut
+			c.mu.Unlock()
+			if muted {
+				continue
+			}
+			payloads := packetizer.Packetize(frame.Data)
+			outPkt := rtp.Packet{
+				Header: rtp.Header{
+					Version:     2,
+					PayloadType: uint8(codec),
+					Timestamp:   frame.Timestamp,
+					SSRC:        s.outSSRC,
+				},
+			}
+			for i, payload := range payloads {
+				outPkt.Header.SequenceNumber = s.outSeq
+				outPkt.Header.Marker = i == len(payloads)-1
+				outPkt.Payload = payload
+				s.outSeq++
+				rtcpStats.RecordRTPSent(len(payload), outPkt.Timestamp)
+				if c.videoSentRTP != nil {
+					sendDropOldest(c.videoSentRTP, clonePacket(&outPkt))
+				}
+				if conn != nil && dst != nil {
+					if data, err := outPkt.Marshal(); err == nil {
+						if srtpOut != nil {
+							data, err = srtpOut.Protect(data)
+							if err != nil {
+								continue
+							}
+						}
+						conn.WriteTo(data, dst)
+					}
+				}
+			}
 
 		case pkt := <-c.videoRTPWriter:
+			s.rtpWriterUsed = true
 			c.mu.Lock()
 			muted := s.muted
 			dst := c.videoRemoteAddr

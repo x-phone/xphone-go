@@ -119,7 +119,6 @@ func (c *call) acceptVideoUpgrade(r *VideoUpgradeRequest) {
 		}
 	}
 
-	videoFn := c.onVideoFn
 	c.pendingVideoUpgrade = nil
 	c.mu.Unlock()
 
@@ -146,14 +145,9 @@ func (c *call) acceptVideoUpgrade(r *VideoUpgradeRequest) {
 		}
 	}
 
-	// Start video pipeline.
+	// Start video pipeline (also fires OnVideo callback).
 	c.startVideoMedia()
 	c.startVideoRTPReader()
-
-	// Fire OnVideo callback.
-	if videoFn != nil {
-		c.dispatch(videoFn)
-	}
 	c.logger.Info("video upgrade accepted", "id", c.id)
 }
 

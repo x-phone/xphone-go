@@ -532,3 +532,33 @@ func TestCall_Mute_InboundStillFlows(t *testing.T) {
 	raw := readPacket(t, c.RTPRawReader(), 200*time.Millisecond)
 	assert.NotNil(t, raw, "inbound RTP must still flow while muted")
 }
+
+// --- MuteAudio / UnmuteAudio tests ---
+
+func TestCall_MuteAudio_EquivalentToMute(t *testing.T) {
+	// MuteAudio + Unmute should work (they share the same flag).
+	c := activeCall(t)
+	defer c.stopMedia()
+
+	require.NoError(t, c.MuteAudio())
+	require.NoError(t, c.Unmute())
+
+	// And vice versa.
+	require.NoError(t, c.Mute())
+	require.NoError(t, c.UnmuteAudio())
+}
+
+func TestCall_MuteAudio_AlreadyMutedReturnsError(t *testing.T) {
+	c := activeCall(t)
+	defer c.stopMedia()
+
+	require.NoError(t, c.MuteAudio())
+	assert.Equal(t, ErrAlreadyMuted, c.MuteAudio())
+}
+
+func TestCall_UnmuteAudio_WhenNotMutedReturnsError(t *testing.T) {
+	c := activeCall(t)
+	defer c.stopMedia()
+
+	assert.Equal(t, ErrNotMuted, c.UnmuteAudio())
+}

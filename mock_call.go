@@ -369,6 +369,14 @@ func (c *MockCall) Unmute() error {
 	return nil
 }
 
+func (c *MockCall) MuteAudio() error {
+	return c.Mute()
+}
+
+func (c *MockCall) UnmuteAudio() error {
+	return c.Unmute()
+}
+
 func (c *MockCall) SendDTMF(digit string) error {
 	c.mu.Lock()
 	if c.state != StateActive {

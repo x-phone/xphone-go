@@ -112,6 +112,8 @@ type Call interface {
 	Resume() error
 	Mute() error
 	Unmute() error
+	MuteAudio() error
+	UnmuteAudio() error
 	SendDTMF(digit string) error
 	BlindTransfer(target string) error
 	RTPRawReader() <-chan *rtp.Packet
@@ -154,8 +156,8 @@ type call struct {
 	onMuteFn       func()
 	onUnmuteFn     func()
 
-	muted    bool
-	dtmfMode DtmfMode
+	audioStream *mediaStream
+	dtmfMode    DtmfMode
 
 	codecPrefs  []int          // codec preference order (payload types)
 	jitterDepth time.Duration  // jitter buffer depth (0 = default)
@@ -215,6 +217,7 @@ func newInboundCall(d dialog) *call {
 		pcmWriter:    make(chan []int16, 256),
 		callbackCh:   make(chan func(), 16),
 	}
+	c.audioStream = &mediaStream{call: c, outSSRC: randUint32()}
 	go c.runCallbackDispatcher()
 	return c
 }
@@ -236,6 +239,7 @@ func newOutboundCall(d dialog, dialOpts ...DialOption) *call {
 		pcmWriter:    make(chan []int16, 256),
 		callbackCh:   make(chan func(), 16),
 	}
+	c.audioStream = &mediaStream{call: c, outSSRC: randUint32()}
 	go c.runCallbackDispatcher()
 	return c
 }
@@ -948,11 +952,11 @@ func (c *call) Mute() error {
 		c.mu.Unlock()
 		return ErrInvalidState
 	}
-	if c.muted {
+	if c.audioStream.muted {
 		c.mu.Unlock()
 		return ErrAlreadyMuted
 	}
-	c.muted = true
+	c.audioStream.muted = true
 	fn := c.onMuteFn
 	c.mu.Unlock()
 	if fn != nil {
@@ -967,17 +971,25 @@ func (c *call) Unmute() error {
 		c.mu.Unlock()
 		return ErrInvalidState
 	}
-	if !c.muted {
+	if !c.audioStream.muted {
 		c.mu.Unlock()
 		return ErrNotMuted
 	}
-	c.muted = false
+	c.audioStream.muted = false
 	fn := c.onUnmuteFn
 	c.mu.Unlock()
 	if fn != nil {
 		c.dispatch(fn)
 	}
 	return nil
+}
+
+func (c *call) MuteAudio() error {
+	return c.Mute()
+}
+
+func (c *call) UnmuteAudio() error {
+	return c.Unmute()
 }
 func (c *call) SendDTMF(digit string) error {
 	c.mu.Lock()

@@ -178,27 +178,53 @@ go func() {
 
 | Feature | Status |
 |---|---|
+| **Calling** | |
 | SIP Registration (auth, keepalive, auto-reconnect) | Done |
 | Inbound & outbound calls | Done |
 | Hold / Resume (re-INVITE) | Done |
 | Blind transfer (REFER) | Done |
-| DTMF send/receive (RFC 4733) | Done |
+| Attended transfer (REFER with Replaces, RFC 3891) | Done |
+| Call waiting (`Phone.Calls()` API) | Done |
 | Session timers (RFC 4028) | Done |
 | Mute / Unmute | Done |
+| 302 redirect following | Done |
+| Early media (183 Session Progress) | Done |
+| **DTMF** | |
+| RFC 4733 (RTP telephone-events) | Done |
+| SIP INFO (RFC 2976) | Done |
+| **Audio codecs** | |
 | G.711 u-law (PCMU), G.711 A-law (PCMA) | Done |
-| G.722 wideband codec | Done |
-| Opus codec (optional, requires libopus) | Done |
+| G.722 wideband | Done |
+| Opus (optional, requires libopus) | Done |
+| G.729 (optional, requires bcg729) | Done |
 | PCM audio frames (`[]int16`) and raw RTP access | Done |
 | Jitter buffer | Done |
-| SRTP (encrypted media, AES_CM_128_HMAC_SHA1_80) | Done |
+| **Video** | |
+| H.264 (RFC 6184) and VP8 (RFC 7741) | Done |
+| Video RTP pipeline with depacketizer/packetizer | Done |
+| Mid-call video upgrade/downgrade (re-INVITE) | Done |
+| VideoReader / VideoWriter / VideoRTPReader / VideoRTPWriter | Done |
+| RTCP PLI/FIR for keyframe requests | Done |
+| **Security** | |
+| SRTP (AES_CM_128_HMAC_SHA1_80) with SDES key exchange | Done |
 | SRTP replay protection (RFC 3711) | Done |
-| RTCP Sender/Receiver Reports (RFC 3550) | Done |
-| 302 redirect following | Done |
+| SRTCP encryption (RFC 3711 §3.4) | Done |
+| Key material zeroization | Done |
+| Video SRTP (separate contexts for audio/video) | Done |
+| **Network** | |
 | TCP and TLS SIP transport | Done |
-| Early media (183 Session Progress) | Done |
 | STUN NAT traversal (RFC 5389) | Done |
+| TURN relay for symmetric NAT (RFC 5766) | Done |
+| ICE-Lite (RFC 8445 §2.2) | Done |
+| RTCP Sender/Receiver Reports (RFC 3550) | Done |
+| **Messaging** | |
+| SIP MESSAGE instant messaging (RFC 3428) | Done |
+| SIP SUBSCRIBE/NOTIFY (RFC 6665) | Done |
+| MWI / voicemail notification (RFC 3842) | Done |
+| BLF / Busy Lamp Field monitoring | Done |
+| SIP Presence (RFC 3856) | Done |
+| **Testing** | |
 | MockPhone & MockCall for unit testing | Done |
-| Attended transfer | Planned |
 
 ---
 
@@ -209,12 +235,16 @@ phone := xphone.New(
     xphone.WithCredentials("1001", "secret", "pbx.example.com"),
     xphone.WithTransport("udp", nil),                      // "udp" | "tcp" | "tls"
     xphone.WithRTPPorts(10000, 20000),                      // RTP port range
-    xphone.WithCodecs(xphone.CodecOpus, xphone.CodecPCMU),  // codec preference (Opus requires -tags opus)
+    xphone.WithCodecs(xphone.CodecOpus, xphone.CodecPCMU),  // codec preference
     xphone.WithJitterBuffer(50 * time.Millisecond),
     xphone.WithMediaTimeout(30 * time.Second),
     xphone.WithNATKeepalive(25 * time.Second),
     xphone.WithStunServer("stun.l.google.com:19302"),
     xphone.WithSRTP(),
+    xphone.WithDtmfMode(xphone.DtmfModeRFC4733),           // or DtmfModeSIPInfo
+    xphone.WithICE(true),                                   // ICE-Lite
+    xphone.WithTurnServer("turn.example.com:3478"),
+    xphone.WithTurnCredentials("user", "pass"),
     xphone.WithLogger(slog.Default()),
 )
 ```
@@ -223,9 +253,13 @@ See the [Go documentation](https://pkg.go.dev/github.com/x-phone/xphone-go) for 
 
 ---
 
-## NAT Traversal (STUN)
+## NAT Traversal
 
-If your application runs behind NAT (most deployments), configure a STUN server so xphone can discover your public IP and advertise it correctly in SIP and SDP:
+xphone supports three levels of NAT traversal, depending on your network environment:
+
+### STUN (most deployments)
+
+Discovers your public IP via a STUN Binding Request. Sufficient when your NAT allows direct UDP:
 
 ```go
 phone := xphone.New(
@@ -234,12 +268,33 @@ phone := xphone.New(
 )
 ```
 
-When `StunServer` is set, xphone sends a STUN Binding Request at startup to learn your external IP. If the STUN server is unreachable, it falls back to local IP detection automatically.
+Common public STUN servers: `stun.l.google.com:19302`, `stun1.l.google.com:19302`, `stun.cloudflare.com:3478`
 
-Common public STUN servers:
-- `stun.l.google.com:19302`
-- `stun1.l.google.com:19302`
-- `stun.cloudflare.com:3478`
+### TURN (symmetric NAT)
+
+For environments where STUN alone fails (cloud VMs, corporate firewalls with symmetric NAT), TURN relays media through an intermediary:
+
+```go
+phone := xphone.New(
+    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
+    xphone.WithTurnServer("turn.example.com:3478"),
+    xphone.WithTurnCredentials("user", "pass"),
+)
+```
+
+### ICE-Lite
+
+Enables ICE-Lite (RFC 8445 §2.2) for SDP-level candidate negotiation:
+
+```go
+phone := xphone.New(
+    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
+    xphone.WithICE(true),
+    xphone.WithStunServer("stun.l.google.com:19302"),
+)
+```
+
+> Only enable STUN/TURN/ICE when the SIP server is on the public internet. Do not enable it when connecting via VPN or private network, as the discovered address will be unreachable from the server.
 
 ---
 
@@ -397,6 +452,8 @@ call.RTPWriter() <- myRTPPacket
 
 ## Media Pipeline
 
+### Audio
+
 ```
 Inbound:
   SIP Trunk -> RTP/UDP -> RTPRawReader (pre-jitter)
@@ -408,9 +465,23 @@ Outbound (mutually exclusive):
   RTPWriter -> RTP/UDP -> SIP Trunk   (raw mode — PCMWriter ignored)
 ```
 
-All channels are buffered (256 entries). Inbound taps drop oldest on overflow; PCMWriter drops newest. Each frame is 160 samples at 8000 Hz = 20ms of audio.
+### Video
 
-The media pipeline runs on a dedicated goroutine per call, bridged to the rest of the application via Go channels.
+```
+Inbound:
+  SIP Trunk -> RTP/UDP -> Depacketizer (H.264/VP8) -> VideoReader (NAL units / frames)
+                        -> VideoRTPReader (raw video RTP packets)
+
+Outbound (mutually exclusive):
+  VideoWriter -> Packetizer (H.264/VP8) -> RTP/UDP -> SIP Trunk
+  VideoRTPWriter -> RTP/UDP -> SIP Trunk   (raw mode)
+```
+
+Video uses a separate RTP port and independent SRTP contexts. RTCP PLI/FIR requests trigger keyframe generation on the sender side.
+
+All channels are buffered (256 entries). Inbound taps drop oldest on overflow; outbound writers drop newest. Audio frames are 160 samples at 8000 Hz = 20ms. Video frames carry codec-specific NAL units (H.264) or encoded frames (VP8).
+
+Each pipeline runs on a dedicated goroutine per call, bridged to the application via Go channels.
 
 ---
 
@@ -424,6 +495,9 @@ call.Resume()
 // Blind transfer
 call.BlindTransfer("sip:1003@pbx.example.com")
 
+// Attended transfer (consult callB, then bridge)
+phone.AttendedTransfer(callA, callB)
+
 // Mute (suppresses outbound audio, inbound still flows)
 call.Mute()
 call.Unmute()
@@ -433,6 +507,18 @@ call.SendDTMF("5")
 call.OnDTMF(func(digit string) {
     fmt.Printf("Received: %s\n", digit)
 })
+
+// Mid-call video upgrade
+call.AddVideo(xphone.VideoCodecH264, xphone.VideoCodecVP8)
+call.OnVideoRequest(func(req *xphone.VideoUpgradeRequest) {
+    req.Accept() // or req.Reject()
+})
+call.OnVideo(func() {
+    // Video is now active — read frames from call.VideoReader()
+})
+
+// Instant messaging
+phone.SendMessage(ctx, "sip:1002@pbx", "Hello!")
 ```
 
 ---
@@ -528,65 +614,36 @@ If no logger is provided, `slog.Default()` is used. The library logs registratio
 | SIP Signaling | [sipgo](https://github.com/emiago/sipgo) |
 | RTP / SRTP | [pion/rtp](https://github.com/pion/rtp) + built-in SRTP (AES_CM_128_HMAC_SHA1_80) |
 | G.711 / G.722 | Built-in (PCMU, PCMA) + [gotranspile/g722](https://github.com/gotranspile/g722) |
+| G.729 | [AoiEnoki/bcg729](https://github.com/AoiEnoki/bcg729) (optional, build tag `g729`) |
 | Opus | [hraban/opus](https://github.com/hraban/opus) (optional, build tag `opus`) |
-| RTCP | Built-in (RFC 3550 SR/RR) |
+| H.264 / VP8 | Built-in packetizer/depacketizer (RFC 6184, RFC 7741) |
+| RTCP | Built-in (RFC 3550 SR/RR + PLI/FIR) |
 | Jitter Buffer | Built-in |
 | STUN | Built-in (RFC 5389) |
+| TURN | Built-in (RFC 5766) |
+| ICE-Lite | Built-in (RFC 8445 §2.2) |
 | TUI (sipcli) | [bubbletea](https://github.com/charmbracelet/bubbletea) + [lipgloss](https://github.com/charmbracelet/lipgloss) |
 
 ---
 
 ## Known Limitations
 
-This library is actively developed but not yet feature-complete. The gaps below are worth understanding before committing to it for a production deployment.
-
 ### Security
 
-**SRTP uses SDES key exchange only.** The `AES_CM_128_HMAC_SHA1_80` cipher suite is supported with replay protection (RFC 3711 sliding window). DTLS-SRTP key exchange is not supported. Key material zeroization and SRTCP encryption are not yet implemented.
+**SRTP uses SDES key exchange only.** DTLS-SRTP key exchange is not supported. SDES works well with most SIP trunks but is not suitable for WebRTC interop, which requires DTLS-SRTP.
 
 ### Codec coverage
 
-**Opus requires CGO and libopus.** Opus is supported but requires building with `-tags opus` and having `libopus-dev` installed. The default build is CGO-free. See [Opus Codec](#opus-codec) for details.
+**Opus and G.729 require CGO.** Both are optional build-tag codecs (`-tags opus`, `-tags g729`) that need C libraries installed. The default build is CGO-free with G.711 and G.722.
 
-**G.729 is not supported.** G.729 remains widely deployed in enterprise PBX environments (Cisco, Avaya, Mitel). If your SIP trunk or PBX requires G.729, xphone cannot currently interoperate with it.
-
-**PCM sample rate is fixed at 8 kHz (narrowband) or 16 kHz (G.722 wideband).** There is no configurable sample rate — codec selection determines the rate.
-
-### Call control
-
-**Attended (consultative) transfer is not implemented.** Only blind transfer via REFER is supported. Attended transfer requires coordinating two simultaneous call legs with a REFER/Replaces header.
-
-**DTMF is RFC 4733 (RTP telephone-events) only.** Some legacy PBXes use SIP INFO (RFC 2976) for DTMF instead. If your system requires SIP INFO DTMF, tones may not be received.
-
-**No call parking.** Park/retrieve functionality (common in office deployments) is not implemented.
-
-### Enterprise features
-
-**No MWI (Message Waiting Indicator).** SIP SUBSCRIBE/NOTIFY for the `message-summary` event package (RFC 3842) is not implemented. Applications cannot detect voicemail presence.
-
-**No presence or BLF.** SIP SUBSCRIBE/NOTIFY for presence (RFC 3856) and dialog state (RFC 4235 — Busy Lamp Field) are not implemented.
-
-**No SIP MESSAGE (RFC 3428).** Instant messaging over SIP is not supported.
-
-### Network & NAT
-
-**STUN is supported for NAT-mapped address discovery.** Configure `StunServer` to use a public STUN server (e.g. `stun.l.google.com:19302`) for discovering your external IP. STUN should only be used when the SIP server is on the public internet — do not enable it when connecting via VPN or private network, as the STUN-mapped address will be unreachable from the server.
-
-**No TURN or ICE.** TURN relay (RFC 5766) and full ICE (RFC 5245) are not implemented. In environments with symmetric NAT (common in cloud VMs and corporate firewalls), STUN alone may not be sufficient and RTP media may fail to flow.
-
-### Media
-
-**No video.** Only audio media (single `m=audio` line in SDP) is supported. H.264, VP8, and other video codecs are not implemented.
+**PCM sample rate is fixed at 8 kHz (narrowband) or 16 kHz (G.722 wideband).** Codec selection determines the rate — there is no configurable sample rate.
 
 ---
 
 ## Roadmap
 
-- DTLS-SRTP key exchange
-- Attended (consultative) transfer
-- SIP INFO DTMF (RFC 2976) for legacy PBX compatibility
-- TURN relay and full ICE for symmetric NAT
-- MWI (voicemail notification)
+- DTLS-SRTP key exchange (WebRTC interop)
+- Full ICE (RFC 5245)
 
 ---
 

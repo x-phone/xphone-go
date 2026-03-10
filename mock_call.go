@@ -670,6 +670,27 @@ func (c *MockCall) RequestKeyframe() error {
 	return nil
 }
 
+func (c *MockCall) AddVideo(codecs ...VideoCodec) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state != StateActive {
+		return ErrInvalidState
+	}
+	if c.hasVideo {
+		return ErrVideoAlreadyActive
+	}
+	c.hasVideo = true
+	if len(codecs) > 0 {
+		c.videoCodecType = codecs[0]
+	} else {
+		c.videoCodecType = VideoCodecH264
+	}
+	return nil
+}
+
+func (c *MockCall) OnVideoRequest(fn func(*VideoUpgradeRequest)) {}
+func (c *MockCall) OnVideo(fn func())                            {}
+
 // SetHasVideo enables or disables video on the mock call.
 func (c *MockCall) SetHasVideo(v bool) {
 	c.mu.Lock()

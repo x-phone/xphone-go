@@ -463,6 +463,7 @@ func newVideoPacketizer(codec VideoCodec) media.VideoPacketizer {
 // - RTCP SR/RR
 func (s *mediaStream) runVideo() {
 	c := s.call
+	defer c.videoWg.Done()
 	conn := s.conn
 	rtcpConn := s.rtcpConn
 	rtcpRemoteAddr := s.rtcpRemoteAddr
@@ -679,6 +680,7 @@ func (c *call) startVideoMedia() {
 	s.outTimestamp = 0
 	s.rtpWriterUsed = false
 	s.inboundCount = 0
+	c.videoWg.Add(1) // must be under lock so stopVideoPipeline.Wait() can't race
 	c.mu.Unlock()
 
 	c.logger.Debug("video pipeline started", "id", c.id)

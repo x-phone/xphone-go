@@ -73,6 +73,14 @@ const (
 	CodecOpus Codec = 111
 )
 
+// VideoCodec represents a video codec.
+type VideoCodec int
+
+const (
+	VideoCodecH264 VideoCodec = 96
+	VideoCodecVP8  VideoCodec = 97
+)
+
 // DialOption is a functional option for Dial().
 type DialOption func(*DialOptions)
 
@@ -83,6 +91,8 @@ type DialOptions struct {
 	EarlyMedia    bool
 	Timeout       time.Duration
 	CodecOverride []Codec
+	Video         bool         // enable video in SDP offer
+	VideoCodecs   []VideoCodec // video codec preferences (default: [H264, VP8])
 }
 
 func applyDialOptions(opts []DialOption) DialOptions {
@@ -123,6 +133,19 @@ func WithDialTimeout(d time.Duration) DialOption {
 // WithCodecOverride overrides the codec preference for an outbound call.
 func WithCodecOverride(codecs ...Codec) DialOption {
 	return func(o *DialOptions) { o.CodecOverride = codecs }
+}
+
+// WithVideo enables video in the SDP offer. If no codecs are specified,
+// defaults to [H264, VP8] preference order.
+func WithVideo(codecs ...VideoCodec) DialOption {
+	return func(o *DialOptions) {
+		o.Video = true
+		if len(codecs) > 0 {
+			o.VideoCodecs = codecs
+		} else {
+			o.VideoCodecs = []VideoCodec{VideoCodecH264, VideoCodecVP8}
+		}
+	}
 }
 
 // AcceptOption is a functional option for Accept().

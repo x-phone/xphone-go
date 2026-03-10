@@ -1,6 +1,7 @@
 package sdp
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -239,4 +240,187 @@ func TestParseICE_FromRawSDP(t *testing.T) {
 	assert.Equal(t, "abc123", s.IceUfrag)
 	assert.Equal(t, "password1234567890abcdef", s.IcePwd)
 	require.Len(t, s.Media[0].Candidates, 1)
+}
+
+// --- Video SDP tests ---
+
+func TestBuildOfferVideo_AudioAndVideo(t *testing.T) {
+	s := BuildOfferVideo("10.0.0.1", 5004, []int{0, 8}, 5006, []int{96, 97}, "sendrecv")
+	assert.Contains(t, s, "m=audio 5004 RTP/AVP 0 8")
+	assert.Contains(t, s, "m=video 5006 RTP/AVP 96 97")
+	assert.Contains(t, s, "a=rtpmap:96 H264/90000")
+	assert.Contains(t, s, "a=rtpmap:97 VP8/90000")
+}
+
+func TestBuildOfferVideo_H264Fmtp(t *testing.T) {
+	s := BuildOfferVideo("10.0.0.1", 5004, []int{0}, 5006, []int{96}, "sendrecv")
+	assert.Contains(t, s, "a=fmtp:96 profile-level-id=42e01f;packetization-mode=1")
+}
+
+func TestBuildOfferVideo_RtcpFb(t *testing.T) {
+	s := BuildOfferVideo("10.0.0.1", 5004, []int{0}, 5006, []int{96}, "sendrecv")
+	assert.Contains(t, s, "a=rtcp-fb:96 nack\r\n")
+	assert.Contains(t, s, "a=rtcp-fb:96 nack pli\r\n")
+	assert.Contains(t, s, "a=rtcp-fb:96 ccm fir\r\n")
+}
+
+func TestBuildOfferVideo_VP8RtcpFb(t *testing.T) {
+	s := BuildOfferVideo("10.0.0.1", 5004, []int{0}, 5006, []int{97}, "sendrecv")
+	assert.Contains(t, s, "a=rtcp-fb:97 nack\r\n")
+	assert.Contains(t, s, "a=rtcp-fb:97 nack pli\r\n")
+	assert.Contains(t, s, "a=rtcp-fb:97 ccm fir\r\n")
+}
+
+func TestBuildOfferVideo_SRTP(t *testing.T) {
+	s := BuildOfferVideoSRTP("10.0.0.1", 5004, []int{0}, 5006, []int{96}, "sendrecv", "base64key==")
+	assert.Contains(t, s, "m=audio 5004 RTP/SAVP 0")
+	assert.Contains(t, s, "m=video 5006 RTP/SAVP 96")
+	// Both media sections should have crypto.
+	// Count occurrences of a=crypto:
+	assert.Equal(t, 2, strings.Count(s, "a=crypto:1 AES_CM_128_HMAC_SHA1_80"))
+}
+
+func TestBuildOfferVideo_ICE(t *testing.T) {
+	ice := &ICEParams{Ufrag: "uf", Pwd: "pw", Lite: true}
+	s := BuildOfferVideoICE("10.0.0.1", 5004, []int{0}, 5006, []int{96}, "sendrecv", ice)
+	assert.Contains(t, s, "a=ice-lite")
+	assert.Contains(t, s, "m=audio 5004 RTP/AVP 0")
+	assert.Contains(t, s, "m=video 5006 RTP/AVP 96")
+	// Both media sections should have ICE attributes.
+	assert.Equal(t, 2, strings.Count(s, "a=ice-ufrag:uf"))
+}
+
+func TestParseVideo_TwoMediaLines(t *testing.T) {
+	raw := BuildOfferVideo("10.0.0.1", 5004, []int{0, 8}, 5006, []int{96, 97}, "sendrecv")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	require.Len(t, s.Media, 2)
+
+	assert.Equal(t, MediaAudio, s.Media[0].Type)
+	assert.Equal(t, 5004, s.Media[0].Port)
+	assert.Equal(t, []int{0, 8}, s.Media[0].Codecs)
+
+	assert.Equal(t, MediaVideo, s.Media[1].Type)
+	assert.Equal(t, 5006, s.Media[1].Port)
+	assert.Equal(t, []int{96, 97}, s.Media[1].Codecs)
+}
+
+func TestParseVideo_AudioMediaHelper(t *testing.T) {
+	raw := BuildOfferVideo("10.0.0.1", 5004, []int{0}, 5006, []int{96}, "sendrecv")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	audio := s.AudioMedia()
+	require.NotNil(t, audio)
+	assert.Equal(t, 5004, audio.Port)
+	assert.Equal(t, []int{0}, audio.Codecs)
+}
+
+func TestParseVideo_VideoMediaHelper(t *testing.T) {
+	raw := BuildOfferVideo("10.0.0.1", 5004, []int{0}, 5006, []int{96, 97}, "sendrecv")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	video := s.VideoMedia()
+	require.NotNil(t, video)
+	assert.Equal(t, 5006, video.Port)
+	assert.Equal(t, []int{96, 97}, video.Codecs)
+}
+
+func TestParseVideo_AudioOnly_NoVideoMedia(t *testing.T) {
+	raw := BuildOffer("10.0.0.1", 5004, []int{0}, "sendrecv")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	assert.NotNil(t, s.AudioMedia())
+	assert.Nil(t, s.VideoMedia())
+}
+
+func TestParseVideo_Fmtp(t *testing.T) {
+	raw := BuildOfferVideo("10.0.0.1", 5004, []int{0}, 5006, []int{96}, "sendrecv")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	video := s.VideoMedia()
+	require.NotNil(t, video)
+	assert.Equal(t, "profile-level-id=42e01f;packetization-mode=1", video.Fmtp[96])
+}
+
+func TestParseVideo_RtcpFb(t *testing.T) {
+	raw := BuildOfferVideo("10.0.0.1", 5004, []int{0}, 5006, []int{96}, "sendrecv")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	video := s.VideoMedia()
+	require.NotNil(t, video)
+	require.Len(t, video.RtcpFb[96], 3)
+	assert.Equal(t, "nack", video.RtcpFb[96][0])
+	assert.Equal(t, "nack pli", video.RtcpFb[96][1])
+	assert.Equal(t, "ccm fir", video.RtcpFb[96][2])
+}
+
+func TestParseVideo_Direction(t *testing.T) {
+	raw := BuildOfferVideo("10.0.0.1", 5004, []int{0}, 5006, []int{96}, "sendonly")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	assert.Equal(t, "sendonly", s.AudioMedia().Direction)
+	assert.Equal(t, "sendonly", s.VideoMedia().Direction)
+}
+
+func TestNegotiateCodec_Video(t *testing.T) {
+	assert.Equal(t, 96, NegotiateCodec([]int{96, 97}, []int{97, 96}))
+	assert.Equal(t, 97, NegotiateCodec([]int{97, 96}, []int{96, 97}))
+	assert.Equal(t, -1, NegotiateCodec([]int{96}, []int{97}))
+}
+
+func TestParseVideo_MediaType(t *testing.T) {
+	// Existing audio-only SDP should parse Type=audio.
+	raw := BuildOffer("10.0.0.1", 5004, []int{0}, "sendrecv")
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	require.NotEmpty(t, s.Media)
+	assert.Equal(t, MediaAudio, s.Media[0].Type)
+}
+
+func TestParseVideo_ExternalSDP(t *testing.T) {
+	// Simulate an external SDP with audio + video from a different UA.
+	raw := "v=0\r\n" +
+		"o=other 123 456 IN IP4 203.0.113.1\r\n" +
+		"s=-\r\n" +
+		"c=IN IP4 203.0.113.1\r\n" +
+		"t=0 0\r\n" +
+		"m=audio 10000 RTP/AVP 0 8\r\n" +
+		"a=rtpmap:0 PCMU/8000\r\n" +
+		"a=rtpmap:8 PCMA/8000\r\n" +
+		"a=sendrecv\r\n" +
+		"m=video 10002 RTP/AVP 96 97\r\n" +
+		"a=rtpmap:96 H264/90000\r\n" +
+		"a=fmtp:96 profile-level-id=42e01f;packetization-mode=1\r\n" +
+		"a=rtcp-fb:96 nack\r\n" +
+		"a=rtcp-fb:96 nack pli\r\n" +
+		"a=rtpmap:97 VP8/90000\r\n" +
+		"a=rtcp-fb:97 nack\r\n" +
+		"a=sendrecv\r\n"
+
+	s, err := Parse(raw)
+	require.NoError(t, err)
+	require.Len(t, s.Media, 2)
+
+	audio := s.AudioMedia()
+	require.NotNil(t, audio)
+	assert.Equal(t, 10000, audio.Port)
+	assert.Equal(t, []int{0, 8}, audio.Codecs)
+
+	video := s.VideoMedia()
+	require.NotNil(t, video)
+	assert.Equal(t, 10002, video.Port)
+	assert.Equal(t, []int{96, 97}, video.Codecs)
+	assert.Equal(t, "profile-level-id=42e01f;packetization-mode=1", video.Fmtp[96])
+	assert.Equal(t, []string{"nack", "nack pli"}, video.RtcpFb[96])
+	assert.Equal(t, []string{"nack"}, video.RtcpFb[97])
+}
+
+func TestBuildOfferVideo_BackwardsCompat(t *testing.T) {
+	// Audio-only BuildOffer should still work exactly as before.
+	s := BuildOffer("10.0.0.1", 5004, []int{0, 8}, "sendrecv")
+	parsed, err := Parse(s)
+	require.NoError(t, err)
+	require.Len(t, parsed.Media, 1)
+	assert.Equal(t, MediaAudio, parsed.Media[0].Type)
+	assert.Nil(t, parsed.VideoMedia())
 }

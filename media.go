@@ -680,11 +680,17 @@ func (c *call) startVideoMedia() {
 	s.outTimestamp = 0
 	s.rtpWriterUsed = false
 	s.inboundCount = 0
+	videoFn := c.onVideoFn
 	c.videoWg.Add(1) // must be under lock so stopVideoPipeline.Wait() can't race
 	c.mu.Unlock()
 
 	c.logger.Debug("video pipeline started", "id", c.id)
 	go s.runVideo()
+
+	// Fire OnVideo callback for all paths (initial video call, mid-call upgrade).
+	if videoFn != nil {
+		c.dispatch(videoFn)
+	}
 }
 
 // startVideoRTPReader launches a goroutine that reads RTP packets from the

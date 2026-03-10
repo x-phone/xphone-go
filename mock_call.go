@@ -51,21 +51,33 @@ type MockCall struct {
 	rtpWriter    chan *rtp.Packet
 	pcmReader    chan []int16
 	pcmWriter    chan []int16
+
+	hasVideo       bool
+	videoCodecType VideoCodec
+	videoReader    chan VideoFrame
+	videoWriter    chan VideoFrame
+	videoRTPReader chan *rtp.Packet
+	videoRTPWriter chan *rtp.Packet
+	videoMuted     bool
 }
 
 // NewMockCall creates a new MockCall with default state (Ringing, Inbound).
 func NewMockCall() *MockCall {
 	return &MockCall{
-		id:           newCallID(),
-		callID:       newCallID(),
-		state:        StateRinging,
-		direction:    DirectionInbound,
-		headers:      make(map[string][]string),
-		rtpRawReader: make(chan *rtp.Packet, 256),
-		rtpReader:    make(chan *rtp.Packet, 256),
-		rtpWriter:    make(chan *rtp.Packet, 256),
-		pcmReader:    make(chan []int16, 256),
-		pcmWriter:    make(chan []int16, 256),
+		id:             newCallID(),
+		callID:         newCallID(),
+		state:          StateRinging,
+		direction:      DirectionInbound,
+		headers:        make(map[string][]string),
+		rtpRawReader:   make(chan *rtp.Packet, 256),
+		rtpReader:      make(chan *rtp.Packet, 256),
+		rtpWriter:      make(chan *rtp.Packet, 256),
+		pcmReader:      make(chan []int16, 256),
+		pcmWriter:      make(chan []int16, 256),
+		videoReader:    make(chan VideoFrame, 256),
+		videoWriter:    make(chan VideoFrame, 256),
+		videoRTPReader: make(chan *rtp.Packet, 256),
+		videoRTPWriter: make(chan *rtp.Packet, 256),
 	}
 }
 
@@ -558,6 +570,118 @@ func (c *MockCall) SimulateDTMF(digit string) {
 // InjectRTP pushes an RTP packet onto the RTPReader channel.
 func (c *MockCall) InjectRTP(pkt *rtp.Packet) {
 	c.rtpReader <- pkt
+}
+
+func (c *MockCall) HasVideo() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hasVideo
+}
+
+func (c *MockCall) VideoCodec() VideoCodec {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.videoCodecType
+}
+
+func (c *MockCall) VideoReader() <-chan VideoFrame {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.hasVideo {
+		return nil
+	}
+	return c.videoReader
+}
+
+func (c *MockCall) VideoWriter() chan<- VideoFrame {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.hasVideo {
+		return nil
+	}
+	return c.videoWriter
+}
+
+func (c *MockCall) VideoRTPReader() <-chan *rtp.Packet {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.hasVideo {
+		return nil
+	}
+	return c.videoRTPReader
+}
+
+func (c *MockCall) VideoRTPWriter() chan<- *rtp.Packet {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.hasVideo {
+		return nil
+	}
+	return c.videoRTPWriter
+}
+
+func (c *MockCall) MuteVideo() error {
+	c.mu.Lock()
+	if c.state != StateActive {
+		c.mu.Unlock()
+		return ErrInvalidState
+	}
+	if !c.hasVideo {
+		c.mu.Unlock()
+		return ErrNoVideo
+	}
+	if c.videoMuted {
+		c.mu.Unlock()
+		return ErrAlreadyMuted
+	}
+	c.videoMuted = true
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *MockCall) UnmuteVideo() error {
+	c.mu.Lock()
+	if c.state != StateActive {
+		c.mu.Unlock()
+		return ErrInvalidState
+	}
+	if !c.hasVideo {
+		c.mu.Unlock()
+		return ErrNoVideo
+	}
+	if !c.videoMuted {
+		c.mu.Unlock()
+		return ErrNotMuted
+	}
+	c.videoMuted = false
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *MockCall) RequestKeyframe() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state != StateActive {
+		return ErrInvalidState
+	}
+	if !c.hasVideo {
+		return ErrNoVideo
+	}
+	return nil
+}
+
+// SetHasVideo enables or disables video on the mock call.
+func (c *MockCall) SetHasVideo(v bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.hasVideo = v
+}
+
+// SetVideoCodec sets the negotiated video codec.
+func (c *MockCall) SetVideoCodec(vc VideoCodec) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.videoCodecType = vc
 }
 
 // Ensure MockCall satisfies Call at compile time.

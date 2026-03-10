@@ -84,6 +84,16 @@ type NotifyEvent struct {
 	Reason            string   // reason parameter (e.g. "deactivated", "rejected")
 }
 
+// VideoFrame represents a single assembled video frame from the RTP pipeline.
+// The library does NOT encode/decode video — consumers use platform APIs
+// (VideoToolbox, VA-API, etc.) and feed raw encoded frames in/out.
+type VideoFrame struct {
+	Codec      VideoCodec
+	Timestamp  uint32
+	IsKeyframe bool
+	Data       []byte // H.264: Annex-B NAL units; VP8: raw frame
+}
+
 // VoicemailStatus represents the state of a voicemail mailbox (RFC 3842 MWI).
 type VoicemailStatus struct {
 	// MessagesWaiting indicates whether new messages are waiting.

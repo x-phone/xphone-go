@@ -28,6 +28,8 @@ var (
 	ErrAlreadyMuted = errors.New("xphone: already muted")
 	// ErrNotMuted is returned when Unmute is called on a call that is not muted.
 	ErrNotMuted = errors.New("xphone: not muted")
+	// ErrNoVideo is returned when a video operation is called on an audio-only call.
+	ErrNoVideo = errors.New("xphone: no video stream")
 	// ErrAlreadyConnected is returned when Connect is called on a phone that is already connected.
 	ErrAlreadyConnected = errors.New("xphone: already connected")
 	// ErrNotConnected is returned when Disconnect is called on a phone that is not connected.

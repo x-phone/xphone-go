@@ -12,6 +12,7 @@ import (
 
 	"github.com/pion/rtp"
 	"github.com/x-phone/xphone-go/ice"
+	"github.com/x-phone/xphone-go/internal/rtcp"
 	"github.com/x-phone/xphone-go/internal/sdp"
 	"github.com/x-phone/xphone-go/internal/srtp"
 )
@@ -126,6 +127,15 @@ type Call interface {
 	OnResume(func())
 	OnMute(func())
 	OnUnmute(func())
+	HasVideo() bool
+	VideoCodec() VideoCodec
+	VideoReader() <-chan VideoFrame
+	VideoWriter() chan<- VideoFrame
+	VideoRTPReader() <-chan *rtp.Packet
+	VideoRTPWriter() chan<- *rtp.Packet
+	MuteVideo() error
+	UnmuteVideo() error
+	RequestKeyframe() error
 	OnMedia(func())
 	OnState(func(state CallState))
 	OnEnded(func(reason EndReason))
@@ -156,8 +166,11 @@ type call struct {
 	onMuteFn       func()
 	onUnmuteFn     func()
 
-	audioStream *mediaStream
-	dtmfMode    DtmfMode
+	audioStream    *mediaStream
+	videoStream    *mediaStream
+	dtmfMode       DtmfMode
+	hasVideo       bool
+	videoCodecType VideoCodec
 
 	codecPrefs  []int          // codec preference order (payload types)
 	jitterDepth time.Duration  // jitter buffer depth (0 = default)
@@ -177,8 +190,10 @@ type call struct {
 	remoteSDP string
 
 	srtpLocalKey string        // base64 inline key for outbound encryption (non-empty = SRTP active)
-	srtpIn       *srtp.Context // inbound SRTP decryption context
-	srtpOut      *srtp.Context // outbound SRTP encryption context
+	srtpIn       *srtp.Context // inbound SRTP decryption context (audio)
+	srtpOut      *srtp.Context // outbound SRTP encryption context (audio)
+	videoSrtpIn  *srtp.Context // inbound SRTP decryption context (video — separate to avoid concurrent state corruption)
+	videoSrtpOut *srtp.Context // outbound SRTP encryption context (video)
 
 	iceEnabled bool       // ICE-Lite enabled for this call
 	iceAgent   *ice.Agent // ICE-Lite agent (nil if ICE disabled)
@@ -199,7 +214,22 @@ type call struct {
 	mediaTimerReset chan time.Duration // signals the media goroutine to reset the timeout
 	callbackCh      chan func()        // single dispatch goroutine for all callbacks
 	callbackOnce    sync.Once          // ensures callbackCh is closed exactly once
-	closeChOnce     sync.Once          // ensures output channels are closed exactly once
+	closeChOnce     sync.Once          // ensures audio output channels are closed exactly once
+
+	// Video pipeline state.
+	videoRTPInbound   chan *rtp.Packet
+	videoRTPReader    chan *rtp.Packet
+	videoRTPRawReader chan *rtp.Packet
+	videoRTPWriter    chan *rtp.Packet
+	videoReader       chan VideoFrame
+	videoWriter       chan VideoFrame
+	videoSentRTP      chan *rtp.Packet // test hook: outbound video packets
+	videoRTPConn      net.PacketConn   // video RTP socket
+	videoRTCPConn     net.PacketConn   // video RTCP socket
+	videoRTPPort      int              // allocated video RTP port
+	videoRemoteAddr   net.Addr         // remote video RTP endpoint
+	videoDone         chan struct{}    // signals video goroutine to stop
+	closeVideoChOnce  sync.Once        // ensures video output channels are closed exactly once
 }
 
 func newInboundCall(d dialog) *call {
@@ -563,8 +593,23 @@ func (c *call) buildLocalSDP(direction string) string {
 	c.ensureRTPPort()
 	iceParams := c.buildICEParams()
 	codecs := c.resolveCodecPrefs()
+
+	// Determine video codecs and port for the offer.
+	videoCodecs := videoCodecPrefsToInts(c.opts.VideoCodecs)
+	videoPort := c.videoRTPPort
+
 	var offer string
-	if c.srtpLocalKey != "" && iceParams != nil {
+	if len(videoCodecs) > 0 && videoPort > 0 {
+		if c.srtpLocalKey != "" && iceParams != nil {
+			offer = sdp.BuildOfferVideoSRTPICE(c.localIP, c.rtpPort, codecs, videoPort, videoCodecs, direction, c.srtpLocalKey, iceParams)
+		} else if c.srtpLocalKey != "" {
+			offer = sdp.BuildOfferVideoSRTP(c.localIP, c.rtpPort, codecs, videoPort, videoCodecs, direction, c.srtpLocalKey)
+		} else if iceParams != nil {
+			offer = sdp.BuildOfferVideoICE(c.localIP, c.rtpPort, codecs, videoPort, videoCodecs, direction, iceParams)
+		} else {
+			offer = sdp.BuildOfferVideo(c.localIP, c.rtpPort, codecs, videoPort, videoCodecs, direction)
+		}
+	} else if c.srtpLocalKey != "" && iceParams != nil {
 		offer = sdp.BuildOfferSRTPICE(c.localIP, c.rtpPort, codecs, direction, c.srtpLocalKey, iceParams)
 	} else if c.srtpLocalKey != "" {
 		offer = sdp.BuildOfferSRTP(c.localIP, c.rtpPort, codecs, direction, c.srtpLocalKey)
@@ -586,36 +631,60 @@ func (c *call) buildAnswerSDP(remote *sdp.Session, direction string) string {
 	if c.iceAgent != nil && remote.IceUfrag != "" && remote.IcePwd != "" {
 		c.iceAgent.SetRemoteCredentials(ice.Credentials{Ufrag: remote.IceUfrag, Pwd: remote.IcePwd})
 	}
-	var remoteCodecs []int
-	if len(remote.Media) > 0 {
-		remoteCodecs = remote.Media[0].Codecs
+	var remoteAudioCodecs []int
+	if am := remote.AudioMedia(); am != nil {
+		remoteAudioCodecs = am.Codecs
 	}
 	codecs := c.resolveCodecPrefs()
+
+	// Check for video m= line in the remote offer.
+	videoCodecs := videoCodecPrefsToInts(c.opts.VideoCodecs)
+	videoPort := c.videoRTPPort
+	var remoteVideoCodecs []int
+	if vm := remote.VideoMedia(); vm != nil {
+		remoteVideoCodecs = vm.Codecs
+	}
+
 	var answer string
-	if c.srtpLocalKey != "" && iceParams != nil {
-		answer = sdp.BuildAnswerSRTPICE(c.localIP, c.rtpPort, codecs, remoteCodecs, direction, c.srtpLocalKey, iceParams)
+	if len(videoCodecs) > 0 && videoPort > 0 && len(remoteVideoCodecs) > 0 {
+		if c.srtpLocalKey != "" && iceParams != nil {
+			answer = sdp.BuildAnswerVideoSRTPICE(c.localIP, c.rtpPort, codecs, remoteAudioCodecs, videoPort, videoCodecs, remoteVideoCodecs, direction, c.srtpLocalKey, iceParams)
+		} else if c.srtpLocalKey != "" {
+			answer = sdp.BuildAnswerVideoSRTP(c.localIP, c.rtpPort, codecs, remoteAudioCodecs, videoPort, videoCodecs, remoteVideoCodecs, direction, c.srtpLocalKey)
+		} else if iceParams != nil {
+			answer = sdp.BuildAnswerVideoICE(c.localIP, c.rtpPort, codecs, remoteAudioCodecs, videoPort, videoCodecs, remoteVideoCodecs, direction, iceParams)
+		} else {
+			answer = sdp.BuildAnswerVideo(c.localIP, c.rtpPort, codecs, remoteAudioCodecs, videoPort, videoCodecs, remoteVideoCodecs, direction)
+		}
+	} else if c.srtpLocalKey != "" && iceParams != nil {
+		answer = sdp.BuildAnswerSRTPICE(c.localIP, c.rtpPort, codecs, remoteAudioCodecs, direction, c.srtpLocalKey, iceParams)
 	} else if c.srtpLocalKey != "" {
-		answer = sdp.BuildAnswerSRTP(c.localIP, c.rtpPort, codecs, remoteCodecs, direction, c.srtpLocalKey)
+		answer = sdp.BuildAnswerSRTP(c.localIP, c.rtpPort, codecs, remoteAudioCodecs, direction, c.srtpLocalKey)
 	} else if iceParams != nil {
-		answer = sdp.BuildAnswerICE(c.localIP, c.rtpPort, codecs, remoteCodecs, direction, iceParams)
+		answer = sdp.BuildAnswerICE(c.localIP, c.rtpPort, codecs, remoteAudioCodecs, direction, iceParams)
 	} else {
-		answer = sdp.BuildAnswer(c.localIP, c.rtpPort, codecs, remoteCodecs, direction)
+		answer = sdp.BuildAnswer(c.localIP, c.rtpPort, codecs, remoteAudioCodecs, direction)
 	}
 	c.logger.Debug("SDP answer built", "id", c.id, "local_ip", c.localIP, "rtp_port", c.rtpPort, "direction", direction, "srtp", c.srtpLocalKey != "", "ice", iceParams != nil, "sdp", answer)
 	return answer
 }
 
 // negotiateCodec updates c.codec from a parsed remote SDP session.
+// Also negotiates video if a video m= line is present.
 // Must be called with c.mu held.
 func (c *call) negotiateCodec(sess *sdp.Session) {
+	// Negotiate audio from the first audio m= line.
 	var remoteCodecs []int
-	if len(sess.Media) > 0 {
-		remoteCodecs = sess.Media[0].Codecs
+	if am := sess.AudioMedia(); am != nil {
+		remoteCodecs = am.Codecs
 	}
 	if pt := sdp.NegotiateCodec(c.resolveCodecPrefs(), remoteCodecs); pt >= 0 {
 		c.codec = Codec(pt)
 	}
 	c.logger.Debug("codec negotiated", "id", c.id, "codec", int(c.codec), "local_prefs", c.resolveCodecPrefs(), "remote_codecs", remoteCodecs)
+
+	// Negotiate video.
+	c.negotiateVideoCodec(sess)
 }
 
 // buildICEParams creates ICE SDP parameters and initializes the ICE agent.
@@ -667,6 +736,85 @@ func candidateStrings(cands []ice.Candidate) []string {
 		s[i] = c.SDPValue()
 	}
 	return s
+}
+
+// initVideoChannels allocates all video pipeline channels and the video mediaStream.
+// Must be called with c.mu held.
+func (c *call) initVideoChannels() {
+	c.videoRTPInbound = make(chan *rtp.Packet, 256)
+	c.videoRTPReader = make(chan *rtp.Packet, 256)
+	c.videoRTPRawReader = make(chan *rtp.Packet, 256)
+	c.videoRTPWriter = make(chan *rtp.Packet, 256)
+	c.videoReader = make(chan VideoFrame, 256)
+	c.videoWriter = make(chan VideoFrame, 256)
+	c.videoStream = &mediaStream{call: c, outSSRC: randUint32()}
+}
+
+// ensureVideoRTPPort lazily allocates a UDP socket for video RTP.
+// Must be called with c.mu held.
+func (c *call) ensureVideoRTPPort() {
+	if c.localIP == "" {
+		c.localIP = localIPFor(c.sipHost)
+	}
+	if c.videoRTPPort == 0 {
+		conn, err := listenRTPPort(c.rtpPortMin, c.rtpPortMax)
+		if err == nil {
+			c.videoRTPPort = conn.LocalAddr().(*net.UDPAddr).Port
+			c.videoRTPConn = conn
+		}
+	}
+}
+
+// videoCodecPrefsToInts converts []VideoCodec to []int.
+func videoCodecPrefsToInts(codecs []VideoCodec) []int {
+	pts := make([]int, len(codecs))
+	for i, c := range codecs {
+		pts[i] = int(c)
+	}
+	return pts
+}
+
+// negotiateVideoCodec updates hasVideo and videoCodecType from a parsed SDP.
+// Must be called with c.mu held.
+func (c *call) negotiateVideoCodec(sess *sdp.Session) {
+	vm := sess.VideoMedia()
+	if vm == nil || len(vm.Codecs) == 0 {
+		return
+	}
+	// Accept the first video codec that we support.
+	for _, pt := range vm.Codecs {
+		switch VideoCodec(pt) {
+		case VideoCodecH264, VideoCodecVP8:
+			c.hasVideo = true
+			c.videoCodecType = VideoCodec(pt)
+			c.logger.Debug("video codec negotiated", "id", c.id, "codec", pt)
+			return
+		}
+	}
+}
+
+// setVideoRemoteEndpoint extracts the video remote address from a parsed SDP.
+// Must be called with c.mu held.
+func (c *call) setVideoRemoteEndpoint(sess *sdp.Session) {
+	vm := sess.VideoMedia()
+	if vm == nil {
+		return
+	}
+	ip := sess.Connection
+	if ip == "" || vm.Port <= 0 {
+		return
+	}
+	addr, _ := net.ResolveUDPAddr("udp", net.JoinHostPort(ip, strconv.Itoa(vm.Port)))
+	c.videoRemoteAddr = addr
+}
+
+// closeVideoOutputChannels closes the consumer-facing video channels exactly once.
+func (c *call) closeVideoOutputChannels() {
+	c.closeVideoChOnce.Do(func() {
+		close(c.videoRTPReader)
+		close(c.videoRTPRawReader)
+		close(c.videoReader)
+	})
 }
 
 func (c *call) startSessionTimer() {
@@ -767,6 +915,23 @@ func (c *call) fireOnEnded(reason EndReason) {
 		}
 		c.mediaActive = false
 	}
+	// Stop video pipeline goroutine.
+	if c.videoDone != nil {
+		select {
+		case <-c.videoDone:
+		default:
+			close(c.videoDone)
+		}
+	}
+	// Close video RTCP and RTP sockets.
+	if c.videoRTCPConn != nil {
+		c.videoRTCPConn.Close()
+		c.videoRTCPConn = nil
+	}
+	if c.videoRTPConn != nil {
+		c.videoRTPConn.Close()
+		c.videoRTPConn = nil
+	}
 	// Close RTP and RTCP sockets (also stops the RTP reader goroutine).
 	if c.rtcpConn != nil {
 		c.rtcpConn.Close()
@@ -783,10 +948,19 @@ func (c *call) fireOnEnded(reason EndReason) {
 	if c.srtpOut != nil {
 		c.srtpOut.Zeroize()
 	}
+	if c.videoSrtpIn != nil {
+		c.videoSrtpIn.Zeroize()
+	}
+	if c.videoSrtpOut != nil {
+		c.videoSrtpOut.Zeroize()
+	}
 	// Close output channels only if the media goroutine was never started
 	// (otherwise the goroutine's defer handles it to avoid send-on-closed panic).
 	if c.mediaDone == nil {
 		c.closeOutputChannels()
+	}
+	if c.videoDone == nil && c.videoRTPReader != nil {
+		c.closeVideoOutputChannels()
 	}
 	// Clear OnNotify to break closure reference cycles.
 	c.dlg.OnNotify(nil)
@@ -825,8 +999,11 @@ func (c *call) Accept(opts ...AcceptOption) error {
 	}
 	// Build SDP answer: if we have the remote offer, restrict to offered codecs.
 	c.logger.Debug("accepting call", "id", c.id, "remote_sdp", c.remoteSDP)
+	var sess *sdp.Session
 	if c.remoteSDP != "" {
-		if sess, err := sdp.Parse(c.remoteSDP); err == nil {
+		var err error
+		sess, err = sdp.Parse(c.remoteSDP)
+		if err == nil {
 			c.negotiateCodec(sess)
 			c.localSDP = c.buildAnswerSDP(sess, sdp.DirSendRecv)
 			c.setRemoteEndpoint(sess)
@@ -839,12 +1016,24 @@ func (c *call) Accept(opts ...AcceptOption) error {
 	if err := c.dlg.Respond(200, "OK", []byte(c.localSDP)); err != nil {
 		c.logger.Error("failed to send 200 OK", "err", err)
 	}
+
+	// Set up video if negotiated.
+	if c.hasVideo && c.videoRTPConn != nil {
+		if sess != nil {
+			c.setVideoRemoteEndpoint(sess)
+		}
+		if c.videoRTPReader == nil {
+			c.initVideoChannels()
+		}
+	}
+
 	c.state = StateActive
 	c.startTime = time.Now()
 	c.startSessionTimer()
 	c.fireOnState(StateActive)
 	c.logger.Info("call accepted", "id", c.id)
 	hasRTP := c.rtpConn != nil
+	hasVideoRTP := c.hasVideo && c.videoRTPConn != nil
 	onMediaFn := c.onMediaFn
 	c.mu.Unlock()
 
@@ -852,6 +1041,10 @@ func (c *call) Accept(opts ...AcceptOption) error {
 	if hasRTP {
 		c.startMedia()
 		c.startRTPReader()
+	}
+	if hasVideoRTP {
+		c.startVideoMedia()
+		c.startVideoRTPReader()
 	}
 	if onMediaFn != nil {
 		c.dispatch(onMediaFn)
@@ -957,6 +1150,9 @@ func (c *call) Mute() error {
 		return ErrAlreadyMuted
 	}
 	c.audioStream.muted = true
+	if c.videoStream != nil {
+		c.videoStream.muted = true
+	}
 	fn := c.onMuteFn
 	c.mu.Unlock()
 	if fn != nil {
@@ -976,6 +1172,9 @@ func (c *call) Unmute() error {
 		return ErrNotMuted
 	}
 	c.audioStream.muted = false
+	if c.videoStream != nil {
+		c.videoStream.muted = false
+	}
 	fn := c.onUnmuteFn
 	c.mu.Unlock()
 	if fn != nil {
@@ -1094,6 +1293,113 @@ func (c *call) RTPReader() <-chan *rtp.Packet    { return c.rtpReader }
 func (c *call) RTPWriter() chan<- *rtp.Packet    { return c.rtpWriter }
 func (c *call) PCMReader() <-chan []int16        { return c.pcmReader }
 func (c *call) PCMWriter() chan<- []int16        { return c.pcmWriter }
+
+func (c *call) HasVideo() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hasVideo
+}
+
+func (c *call) VideoCodec() VideoCodec {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.videoCodecType
+}
+
+func (c *call) VideoReader() <-chan VideoFrame {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.videoReader
+}
+
+func (c *call) VideoWriter() chan<- VideoFrame {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.videoWriter
+}
+
+func (c *call) VideoRTPReader() <-chan *rtp.Packet {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.videoRTPReader
+}
+
+func (c *call) VideoRTPWriter() chan<- *rtp.Packet {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.videoRTPWriter
+}
+
+func (c *call) MuteVideo() error {
+	c.mu.Lock()
+	if c.state != StateActive {
+		c.mu.Unlock()
+		return ErrInvalidState
+	}
+	if !c.hasVideo || c.videoStream == nil {
+		c.mu.Unlock()
+		return ErrNoVideo
+	}
+	if c.videoStream.muted {
+		c.mu.Unlock()
+		return ErrAlreadyMuted
+	}
+	c.videoStream.muted = true
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *call) UnmuteVideo() error {
+	c.mu.Lock()
+	if c.state != StateActive {
+		c.mu.Unlock()
+		return ErrInvalidState
+	}
+	if !c.hasVideo || c.videoStream == nil {
+		c.mu.Unlock()
+		return ErrNoVideo
+	}
+	if !c.videoStream.muted {
+		c.mu.Unlock()
+		return ErrNotMuted
+	}
+	c.videoStream.muted = false
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *call) RequestKeyframe() error {
+	c.mu.Lock()
+	if c.state != StateActive {
+		c.mu.Unlock()
+		return ErrInvalidState
+	}
+	if !c.hasVideo || c.videoStream == nil {
+		c.mu.Unlock()
+		return ErrNoVideo
+	}
+	rtcpConn := c.videoRTCPConn
+	remoteAddr := c.videoRemoteAddr
+	srtpOut := c.videoSrtpOut
+	ssrc := c.videoStream.outSSRC
+	c.mu.Unlock()
+
+	if rtcpConn == nil || remoteAddr == nil {
+		return nil
+	}
+
+	// Build PLI with media SSRC = 0 (we don't know remote video SSRC yet).
+	pli := rtcp.BuildPLI(ssrc, 0)
+	if srtpOut != nil {
+		var err error
+		pli, err = srtpOut.ProtectRTCP(pli)
+		if err != nil {
+			return err
+		}
+	}
+	_, err := rtcpConn.WriteTo(pli, remoteAddr)
+	return err
+}
 
 func (c *call) OnDTMF(fn func(string)) {
 	c.mu.Lock()

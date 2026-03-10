@@ -226,6 +226,42 @@ func TestParseSRWithReportBlock(t *testing.T) {
 	assert.Equal(t, uint32(0), parsed.Reports[0].CumLost)
 }
 
+func TestBuildPLI(t *testing.T) {
+	pli := BuildPLI(0x11111111, 0x22222222)
+	require.Len(t, pli, 12)
+
+	// V=2, FMT=1, PT=206.
+	assert.Equal(t, byte(2), (pli[0]>>6)&0x03)
+	assert.Equal(t, byte(1), pli[0]&0x1F)
+	assert.Equal(t, byte(206), pli[1])
+	// Length = 2.
+	assert.Equal(t, uint16(2), uint16(pli[2])<<8|uint16(pli[3]))
+	// Sender SSRC.
+	assert.Equal(t, uint32(0x11111111), be32(pli[4:8]))
+	// Media SSRC.
+	assert.Equal(t, uint32(0x22222222), be32(pli[8:12]))
+}
+
+func TestBuildFIR(t *testing.T) {
+	fir := BuildFIR(0xAAAAAAAA, 0xBBBBBBBB, 7)
+	require.Len(t, fir, 20)
+
+	// V=2, FMT=4, PT=206.
+	assert.Equal(t, byte(2), (fir[0]>>6)&0x03)
+	assert.Equal(t, byte(4), fir[0]&0x1F)
+	assert.Equal(t, byte(206), fir[1])
+	// Length = 4.
+	assert.Equal(t, uint16(4), uint16(fir[2])<<8|uint16(fir[3]))
+	// Sender SSRC.
+	assert.Equal(t, uint32(0xAAAAAAAA), be32(fir[4:8]))
+	// Media SSRC in header = 0 for FIR.
+	assert.Equal(t, uint32(0), be32(fir[8:12]))
+	// FCI: target SSRC.
+	assert.Equal(t, uint32(0xBBBBBBBB), be32(fir[12:16]))
+	// Sequence number.
+	assert.Equal(t, byte(7), fir[16])
+}
+
 // be32 is a test helper to read a big-endian uint32.
 func be32(b []byte) uint32 {
 	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])

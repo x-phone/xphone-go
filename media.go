@@ -443,6 +443,220 @@ func (c *call) startMedia() {
 	go s.run(jb, cp, rtpClockRate)
 }
 
+// runVideo is the video media pipeline goroutine. Unlike audio, video uses
+// RTP passthrough only (no jitter buffer, no PCM, no DTMF).
+func (s *mediaStream) runVideo() {
+	c := s.call
+	conn := s.conn
+	rtcpConn := s.rtcpConn
+	rtcpRemoteAddr := s.rtcpRemoteAddr
+	done := s.done
+
+	defer c.closeVideoOutputChannels()
+
+	// RTCP state for video (90kHz clock).
+	rtcpStats := rtcp.NewStats()
+	var rtcpTick <-chan time.Time
+	var rtcpTicker *time.Ticker
+	if rtcpConn != nil {
+		rtcpTicker = time.NewTicker(time.Duration(rtcp.IntervalSecs) * time.Second)
+		rtcpTick = rtcpTicker.C
+		defer rtcpTicker.Stop()
+	}
+
+	// RTCP reader goroutine.
+	rtcpInbound := make(chan []byte, 16)
+	if rtcpConn != nil {
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				n, _, err := rtcpConn.ReadFrom(buf)
+				if err != nil {
+					return
+				}
+				if n < 8 {
+					continue
+				}
+				cp := make([]byte, n)
+				copy(cp, buf[:n])
+				select {
+				case rtcpInbound <- cp:
+				default:
+				}
+			}
+		}()
+	}
+
+	for {
+		select {
+		case <-done:
+			return
+
+		case pkt := <-c.videoRTPInbound:
+			s.inboundCount++
+			sendDropOldest(c.videoRTPRawReader, clonePacket(pkt))
+			sendDropOldest(c.videoRTPReader, clonePacket(pkt))
+			rtcpStats.RecordRTPReceived(pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC, 90000)
+
+		case <-c.videoWriter:
+			// VideoFrame write path — packetizer not yet implemented (PR 4).
+			// Drain to prevent writers from blocking.
+
+		case pkt := <-c.videoRTPWriter:
+			c.mu.Lock()
+			muted := s.muted
+			dst := c.videoRemoteAddr
+			srtpOut := c.videoSrtpOut
+			c.mu.Unlock()
+			if muted {
+				continue
+			}
+			rtcpStats.RecordRTPSent(len(pkt.Payload), pkt.Timestamp)
+			if c.videoSentRTP != nil {
+				sendDropOldest(c.videoSentRTP, pkt)
+			}
+			if conn != nil && dst != nil {
+				if data, err := pkt.Marshal(); err == nil {
+					if srtpOut != nil {
+						data, err = srtpOut.Protect(data)
+						if err != nil {
+							continue
+						}
+					}
+					conn.WriteTo(data, dst)
+				}
+			}
+
+		case <-rtcpTick:
+			if rtcpConn != nil && rtcpRemoteAddr != nil {
+				c.mu.Lock()
+				srtcpOut := c.videoSrtpOut
+				c.mu.Unlock()
+				sr := rtcp.BuildSR(s.outSSRC, rtcpStats)
+				if srtcpOut != nil {
+					var err error
+					sr, err = srtcpOut.ProtectRTCP(sr)
+					if err != nil {
+						continue
+					}
+				}
+				rtcpConn.WriteTo(sr, rtcpRemoteAddr)
+			}
+
+		case data := <-rtcpInbound:
+			c.mu.Lock()
+			srtcpIn := c.videoSrtpIn
+			c.mu.Unlock()
+			if srtcpIn != nil {
+				var err error
+				data, err = srtcpIn.UnprotectRTCP(data)
+				if err != nil {
+					continue
+				}
+			}
+			if pkt := rtcp.Parse(data); pkt != nil && pkt.IsSenderReport() {
+				rtcpStats.ProcessIncomingSR(pkt.NTPSec, pkt.NTPFrac)
+			}
+		}
+	}
+}
+
+// startVideoMedia initializes the video pipeline (RTCP socket, launches runVideo goroutine).
+func (c *call) startVideoMedia() {
+	c.mu.Lock()
+	if c.videoDone != nil {
+		c.mu.Unlock()
+		return // already running
+	}
+	conn := c.videoRTPConn
+	c.videoDone = make(chan struct{})
+	done := c.videoDone
+
+	// Bind video RTCP socket (video RTP port + 1). Non-fatal if it fails.
+	if conn != nil && c.videoRTCPConn == nil {
+		rtpLocal := conn.LocalAddr().(*net.UDPAddr)
+		rtcpAddr := net.JoinHostPort(rtpLocal.IP.String(), strconv.Itoa(rtpLocal.Port+1))
+		if rc, err := net.ListenPacket("udp", rtcpAddr); err == nil {
+			c.videoRTCPConn = rc
+		} else {
+			c.logger.Warn("video RTCP port bind failed", "rtcp_addr", rtcpAddr, "error", err)
+		}
+	}
+
+	// Compute remote video RTCP address.
+	var rtcpRemoteAddr net.Addr
+	if c.videoRemoteAddr != nil {
+		if udpAddr, ok := c.videoRemoteAddr.(*net.UDPAddr); ok {
+			rtcpRemoteAddr, _ = net.ResolveUDPAddr("udp", net.JoinHostPort(udpAddr.IP.String(), strconv.Itoa(udpAddr.Port+1)))
+		}
+	}
+
+	s := c.videoStream
+	s.conn = conn
+	s.rtcpConn = c.videoRTCPConn
+	s.rtcpRemoteAddr = rtcpRemoteAddr
+	s.done = done
+	s.outSeq = 0
+	s.outTimestamp = 0
+	s.rtpWriterUsed = false
+	s.inboundCount = 0
+	c.mu.Unlock()
+
+	c.logger.Debug("video pipeline started", "id", c.id)
+	go s.runVideo()
+}
+
+// startVideoRTPReader launches a goroutine that reads RTP packets from the
+// video network socket and feeds them into the video pipeline's videoRTPInbound channel.
+func (c *call) startVideoRTPReader() {
+	c.mu.Lock()
+	conn := c.videoRTPConn
+	iceAgent := c.iceAgent // immutable after call setup
+	c.mu.Unlock()
+	if conn == nil {
+		return
+	}
+
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, from, err := conn.ReadFrom(buf)
+			if err != nil {
+				return // socket closed
+			}
+			cp := make([]byte, n)
+			copy(cp, buf[:n])
+
+			// ICE STUN demux: intercept Binding Requests before RTP processing.
+			if iceAgent != nil && stun.IsMessage(cp) {
+				fromUDP, ok := from.(*net.UDPAddr)
+				if ok {
+					if resp := iceAgent.HandleBindingRequest(cp, fromUDP); resp != nil {
+						conn.WriteTo(resp, from)
+					}
+				}
+				continue
+			}
+
+			c.mu.Lock()
+			srtpIn := c.videoSrtpIn
+			c.mu.Unlock()
+			if srtpIn != nil {
+				cp, err = srtpIn.Unprotect(cp)
+				if err != nil {
+					continue
+				}
+			}
+
+			pkt := &rtp.Packet{}
+			if err := pkt.Unmarshal(cp); err != nil {
+				continue
+			}
+			sendDropOldest(c.videoRTPInbound, pkt)
+		}
+	}()
+}
+
 // stopMedia tears down the media pipeline and releases RTP ports.
 func (c *call) stopMedia() {
 	c.mu.Lock()

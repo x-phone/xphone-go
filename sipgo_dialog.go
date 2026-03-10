@@ -147,6 +147,7 @@ type sipgoDialogUAC struct {
 	dialogBase
 	cancelFn     context.CancelFunc // cancels the WaitAnswer context
 	rtpConn      net.PacketConn     // bound RTP socket from dial; ownership transferred to call
+	videoRtpConn net.PacketConn     // bound video RTP socket from dial; ownership transferred to call
 	srtpLocalKey string             // base64 SRTP inline key generated for this dialog
 }
 

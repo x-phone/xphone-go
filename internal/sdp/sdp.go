@@ -386,6 +386,46 @@ func buildSDPMulti(ip string, audioPort int, audioCodecs []int, direction, profi
 	return b.String()
 }
 
+// BuildAnswerVideo creates an SDP answer with audio and video media lines.
+func BuildAnswerVideo(ip string, audioPort int, localPrefs, remoteAudioOffer []int, videoPort int, localVideoPrefs, remoteVideoOffer []int, direction string) string {
+	audioCodecs := intersectCodecs(localPrefs, remoteAudioOffer)
+	if len(audioCodecs) == 0 {
+		audioCodecs = localPrefs
+	}
+	videoCodecs := intersectCodecs(localVideoPrefs, remoteVideoOffer)
+	return buildSDPMulti(ip, audioPort, audioCodecs, direction, ProfileRTP, "", nil, videoPort, videoCodecs)
+}
+
+// BuildAnswerVideoSRTP creates an SDP answer with audio, video, and SRTP.
+func BuildAnswerVideoSRTP(ip string, audioPort int, localPrefs, remoteAudioOffer []int, videoPort int, localVideoPrefs, remoteVideoOffer []int, direction, cryptoInlineKey string) string {
+	audioCodecs := intersectCodecs(localPrefs, remoteAudioOffer)
+	if len(audioCodecs) == 0 {
+		audioCodecs = localPrefs
+	}
+	videoCodecs := intersectCodecs(localVideoPrefs, remoteVideoOffer)
+	return buildSDPMulti(ip, audioPort, audioCodecs, direction, ProfileSRTP, cryptoInlineKey, nil, videoPort, videoCodecs)
+}
+
+// BuildAnswerVideoICE creates an SDP answer with audio, video, and ICE.
+func BuildAnswerVideoICE(ip string, audioPort int, localPrefs, remoteAudioOffer []int, videoPort int, localVideoPrefs, remoteVideoOffer []int, direction string, ice *ICEParams) string {
+	audioCodecs := intersectCodecs(localPrefs, remoteAudioOffer)
+	if len(audioCodecs) == 0 {
+		audioCodecs = localPrefs
+	}
+	videoCodecs := intersectCodecs(localVideoPrefs, remoteVideoOffer)
+	return buildSDPMulti(ip, audioPort, audioCodecs, direction, ProfileRTP, "", ice, videoPort, videoCodecs)
+}
+
+// BuildAnswerVideoSRTPICE creates an SDP answer with audio, video, SRTP, and ICE.
+func BuildAnswerVideoSRTPICE(ip string, audioPort int, localPrefs, remoteAudioOffer []int, videoPort int, localVideoPrefs, remoteVideoOffer []int, direction, cryptoInlineKey string, ice *ICEParams) string {
+	audioCodecs := intersectCodecs(localPrefs, remoteAudioOffer)
+	if len(audioCodecs) == 0 {
+		audioCodecs = localPrefs
+	}
+	videoCodecs := intersectCodecs(localVideoPrefs, remoteVideoOffer)
+	return buildSDPMulti(ip, audioPort, audioCodecs, direction, ProfileSRTP, cryptoInlineKey, ice, videoPort, videoCodecs)
+}
+
 // BuildOfferVideo creates an SDP offer with audio and video media lines.
 func BuildOfferVideo(ip string, audioPort int, audioCodecs []int, videoPort int, videoCodecs []int, direction string) string {
 	return buildSDPMulti(ip, audioPort, audioCodecs, direction, ProfileRTP, "", nil, videoPort, videoCodecs)

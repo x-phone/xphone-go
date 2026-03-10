@@ -63,7 +63,7 @@ type phone struct {
 	// Production: set by Connect() to use sipgo's dialog API.
 	// Tests: set by connectWithTransport() to use the mock transport.
 	// The onResponse callback is invoked for each provisional/final SIP response.
-	dialFn func(ctx context.Context, target string, onResponse func(code int, reason string)) (dialog, error)
+	dialFn func(ctx context.Context, target string, opts DialOptions, onResponse func(code int, reason string)) (dialog, error)
 
 	// Buffered callbacks set before Connect.
 	onRegisteredFn   func()
@@ -132,6 +132,8 @@ func (p *phone) wireCallCallbacks(c *call) {
 // setupSRTP initializes SRTP contexts on a call.
 // localKey is the base64 inline key for outbound encryption.
 // remoteKey is the base64 inline key from the remote SDP for inbound decryption.
+// Audio and video get separate contexts because srtp.Context has mutable state
+// (ROC, sequence tracking, HMAC) that would corrupt under concurrent access.
 func (p *phone) setupSRTP(c *call, localKey, remoteKey string) {
 	outCtx, err := srtp.FromSDESInline(localKey)
 	if err != nil {
@@ -147,7 +149,26 @@ func (p *phone) setupSRTP(c *call, localKey, remoteKey string) {
 	c.srtpLocalKey = localKey
 	c.srtpOut = outCtx
 	c.srtpIn = inCtx
+	hasVideo := c.hasVideo
 	c.mu.Unlock()
+
+	// Video needs its own contexts — independent ROC/seq/HMAC state.
+	if hasVideo {
+		videoOutCtx, err := srtp.FromSDESInline(localKey)
+		if err != nil {
+			p.logger.Error("SRTP video outbound context setup failed", "err", err)
+			return
+		}
+		videoInCtx, err := srtp.FromSDESInline(remoteKey)
+		if err != nil {
+			p.logger.Error("SRTP video inbound context setup failed", "err", err)
+			return
+		}
+		c.mu.Lock()
+		c.videoSrtpOut = videoOutCtx
+		c.videoSrtpIn = videoInCtx
+		c.mu.Unlock()
+	}
 	p.logger.Info("SRTP enabled for call", "id", c.id)
 }
 
@@ -164,7 +185,7 @@ func (p *phone) applyCallConfig(c *call) {
 
 // transportDial implements dialFn using the sipTransport interface.
 // Used by connectWithTransport() for test mocks.
-func (p *phone) transportDial(ctx context.Context, target string, onResponse func(code int, reason string)) (dialog, error) {
+func (p *phone) transportDial(ctx context.Context, target string, _ DialOptions, onResponse func(code int, reason string)) (dialog, error) {
 	p.mu.Lock()
 	tr := p.tr
 	p.mu.Unlock()
@@ -287,7 +308,7 @@ func (p *phone) Connect(ctx context.Context) error {
 
 	// Set dialFn to use sipgo's dialog API before connecting.
 	p.mu.Lock()
-	p.dialFn = tr.dial
+	p.dialFn = tr.dialWithOpts
 	p.mu.Unlock()
 
 	// Wire inbound INVITE, BYE, and NOTIFY handlers for sipgo path.
@@ -401,7 +422,7 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 	var responses []sipResponse
 
 	// Establish the SIP dialog via dialFn.
-	dlg, err := dialFn(dialCtx, target, func(code int, reason string) {
+	dlg, err := dialFn(dialCtx, target, dialOpts, func(code int, reason string) {
 		responses = append(responses, sipResponse{code, reason})
 	})
 	if err != nil {
@@ -421,6 +442,11 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 			c.rtpPort = uac.rtpConn.LocalAddr().(*net.UDPAddr).Port
 			c.localIP = p.localIP
 			uac.rtpConn = nil // transfer ownership
+		}
+		if uac.videoRtpConn != nil {
+			c.videoRTPConn = uac.videoRtpConn
+			c.videoRTPPort = uac.videoRtpConn.LocalAddr().(*net.UDPAddr).Port
+			uac.videoRtpConn = nil // transfer ownership
 		}
 		if uac.invite != nil {
 			c.localSDP = string(uac.invite.Body())
@@ -445,6 +471,12 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 							p.setupSRTP(c, uac.srtpLocalKey, crypto.InlineKey())
 						}
 					}
+
+					// Set up video if negotiated.
+					if c.hasVideo && c.videoRTPConn != nil {
+						c.setVideoRemoteEndpoint(sess)
+						c.initVideoChannels()
+					}
 				}
 			}
 		}
@@ -458,6 +490,10 @@ func (p *phone) Dial(ctx context.Context, target string, opts ...DialOption) (Ca
 	if c.rtpConn != nil {
 		c.startMedia()
 		c.startRTPReader()
+	}
+	if c.hasVideo && c.videoRTPConn != nil {
+		c.startVideoMedia()
+		c.startVideoRTPReader()
 	}
 
 	return c, nil
@@ -607,14 +643,23 @@ func (p *phone) handleDialogInvite(dlg dialog, from, to, sdpBody string) {
 		p.logger.Debug("incoming remote SDP", "sdp", sdpBody)
 	}
 
-	// Set up SRTP if remote offers it and we have SRTP enabled.
-	if p.cfg.SRTP && sdpBody != "" {
-		if sess, err := sdp.Parse(sdpBody); err == nil && sess.IsSRTP() {
-			if crypto := sess.FirstCrypto(); crypto != nil {
-				localKey, err := srtp.GenerateKeyingMaterial()
-				if err == nil {
-					p.setupSRTP(c, localKey, crypto.InlineKey())
+	// Parse remote SDP once for SRTP and video setup.
+	if sdpBody != "" {
+		if sess, err := sdp.Parse(sdpBody); err == nil {
+			// Set up SRTP if remote offers it and we have SRTP enabled.
+			if p.cfg.SRTP && sess.IsSRTP() {
+				if crypto := sess.FirstCrypto(); crypto != nil {
+					localKey, err := srtp.GenerateKeyingMaterial()
+					if err == nil {
+						p.setupSRTP(c, localKey, crypto.InlineKey())
+					}
 				}
+			}
+			// Set up video if remote offers it.
+			if vm := sess.VideoMedia(); vm != nil && len(vm.Codecs) > 0 {
+				c.mu.Lock()
+				c.ensureVideoRTPPort()
+				c.mu.Unlock()
 			}
 		}
 	}

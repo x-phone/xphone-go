@@ -157,16 +157,12 @@ func newSipUA(cfg Config, contactIP string) (*sipUA, error) {
 // maxRedirects is the maximum number of 3xx redirect hops before giving up.
 const maxRedirects = 3
 
-// dial establishes an outbound SIP dialog using sipgo's dialog API.
-// It sends INVITE with SDP, waits for the answer (handling provisionals via
-// onResponse and 3xx redirects), sends ACK, and returns a sipgoDialogUAC.
-//
-// target may be a full SIP URI ("sip:1002@pbx.example.com") or just the
-// user part ("1002"), in which case the configured Host and Port are used.
-func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code int, reason string)) (dialog, error) {
+// dialWithOpts establishes an outbound SIP dialog with DialOptions.
+// It delegates to dial, passing through video options for SDP construction.
+func (s *sipUA) dialWithOpts(ctx context.Context, target string, opts DialOptions, onResponse func(code int, reason string)) (dialog, error) {
 	currentTarget := target
 	for redirects := 0; ; redirects++ {
-		dlg, redirectURI, err := s.dialOnce(ctx, currentTarget, onResponse)
+		dlg, redirectURI, err := s.dialOnce(ctx, currentTarget, opts, onResponse)
 		if err != nil {
 			return nil, err
 		}
@@ -183,7 +179,7 @@ func (s *sipUA) dial(ctx context.Context, target string, onResponse func(code in
 
 // dialOnce sends a single INVITE attempt. Returns (dialog, "", nil) on success,
 // or (nil, redirectURI, nil) on 3xx redirect.
-func (s *sipUA) dialOnce(ctx context.Context, target string, onResponse func(code int, reason string)) (dialog, string, error) {
+func (s *sipUA) dialOnce(ctx context.Context, target string, opts DialOptions, onResponse func(code int, reason string)) (dialog, string, error) {
 	recipient := parseSIPTarget(target, s.cfg.Host, s.cfg.Port)
 
 	// Build SDP offer with cached local IP and an allocated RTP port.
@@ -197,18 +193,43 @@ func (s *sipUA) dialOnce(ctx context.Context, target string, onResponse func(cod
 	if len(codecPT) == 0 {
 		codecPT = defaultCodecPrefs
 	}
+
+	// Allocate video RTP port if video is requested.
+	var videoRtpConn net.PacketConn
+	var videoRtpPort int
+	if opts.Video && len(opts.VideoCodecs) > 0 {
+		videoRtpConn, err = listenRTPPort(s.cfg.RTPPortMin, s.cfg.RTPPortMax)
+		if err != nil {
+			rtpConn.Close()
+			return nil, "", fmt.Errorf("xphone: allocate video RTP port: %w", err)
+		}
+		videoRtpPort = videoRtpConn.LocalAddr().(*net.UDPAddr).Port
+	}
+	videoCodecs := videoCodecPrefsToInts(opts.VideoCodecs)
+
 	var sdpOffer string
 	var srtpLocalKey string
 	if s.cfg.SRTP {
 		key, err := srtp.GenerateKeyingMaterial()
 		if err != nil {
 			rtpConn.Close()
+			if videoRtpConn != nil {
+				videoRtpConn.Close()
+			}
 			return nil, "", fmt.Errorf("xphone: generate SRTP key: %w", err)
 		}
 		srtpLocalKey = key
-		sdpOffer = sdp.BuildOfferSRTP(ip, rtpPort, codecPT, sdp.DirSendRecv, key)
+		if len(videoCodecs) > 0 && videoRtpPort > 0 {
+			sdpOffer = sdp.BuildOfferVideoSRTP(ip, rtpPort, codecPT, videoRtpPort, videoCodecs, sdp.DirSendRecv, key)
+		} else {
+			sdpOffer = sdp.BuildOfferSRTP(ip, rtpPort, codecPT, sdp.DirSendRecv, key)
+		}
 	} else {
-		sdpOffer = sdp.BuildOffer(ip, rtpPort, codecPT, sdp.DirSendRecv)
+		if len(videoCodecs) > 0 && videoRtpPort > 0 {
+			sdpOffer = sdp.BuildOfferVideo(ip, rtpPort, codecPT, videoRtpPort, videoCodecs, sdp.DirSendRecv)
+		} else {
+			sdpOffer = sdp.BuildOffer(ip, rtpPort, codecPT, sdp.DirSendRecv)
+		}
 	}
 
 	// Create the dialog session and send INVITE.
@@ -218,6 +239,9 @@ func (s *sipUA) dialOnce(ctx context.Context, target string, onResponse func(cod
 	sess, err := s.dc.Invite(ctx, recipient, []byte(sdpOffer), contentType)
 	if err != nil {
 		rtpConn.Close()
+		if videoRtpConn != nil {
+			videoRtpConn.Close()
+		}
 		return nil, "", fmt.Errorf("xphone: invite: %w", err)
 	}
 
@@ -227,6 +251,9 @@ func (s *sipUA) dialOnce(ctx context.Context, target string, onResponse func(cod
 	defer func() {
 		if !ok {
 			rtpConn.Close()
+			if videoRtpConn != nil {
+				videoRtpConn.Close()
+			}
 			waitCancel()
 			sess.Close()
 		}
@@ -275,6 +302,7 @@ func (s *sipUA) dialOnce(ctx context.Context, target string, onResponse func(cod
 		},
 		cancelFn:     waitCancel,
 		rtpConn:      rtpConn,
+		videoRtpConn: videoRtpConn,
 		srtpLocalKey: srtpLocalKey,
 	}, "", nil
 }

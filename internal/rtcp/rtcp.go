@@ -11,6 +11,7 @@ import (
 const (
 	ptSR      = 200 // Sender Report (RFC 3550 §6.4.1)
 	ptRR      = 201 // Receiver Report (RFC 3550 §6.4.2)
+	ptPSFB    = 206 // Payload-specific feedback (RFC 4585)
 	rtcpVer   = 2   // RTCP version (matches RTP)
 	reportLen = 24  // bytes per report block
 
@@ -19,6 +20,11 @@ const (
 
 	// IntervalSecs is the minimum RTCP send interval (RFC 3550 §6.2).
 	IntervalSecs = 5
+
+	// PLI FMT (RFC 4585 §6.3.1).
+	fmtPLI = 1
+	// FIR FMT (RFC 5104 §4.3.1.1).
+	fmtFIR = 4
 )
 
 // Stats tracks RTP statistics for RTCP report generation.
@@ -338,6 +344,36 @@ func Parse(data []byte) *Packet {
 	default:
 		return nil
 	}
+}
+
+// BuildPLI builds an RTCP Picture Loss Indication (RFC 4585 §6.3.1).
+// senderSSRC is our SSRC; mediaSSRC is the remote video SSRC.
+func BuildPLI(senderSSRC, mediaSSRC uint32) []byte {
+	// PLI: V=2, P=0, FMT=1, PT=206 (PSFB), length=2 (12 bytes total).
+	buf := make([]byte, 12)
+	buf[0] = (rtcpVer << 6) | fmtPLI
+	buf[1] = ptPSFB
+	binary.BigEndian.PutUint16(buf[2:4], 2) // length in 32-bit words minus one
+	binary.BigEndian.PutUint32(buf[4:8], senderSSRC)
+	binary.BigEndian.PutUint32(buf[8:12], mediaSSRC)
+	return buf
+}
+
+// BuildFIR builds an RTCP Full Intra Request (RFC 5104 §4.3.1.1).
+// senderSSRC is our SSRC; mediaSSRC is the remote video SSRC; seqNr is the FIR sequence number.
+func BuildFIR(senderSSRC, mediaSSRC uint32, seqNr uint8) []byte {
+	// FIR: V=2, P=0, FMT=4, PT=206 (PSFB), length=4 (20 bytes total).
+	buf := make([]byte, 20)
+	buf[0] = (rtcpVer << 6) | fmtFIR
+	buf[1] = ptPSFB
+	binary.BigEndian.PutUint16(buf[2:4], 4) // length
+	binary.BigEndian.PutUint32(buf[4:8], senderSSRC)
+	binary.BigEndian.PutUint32(buf[8:12], 0) // media SSRC field is 0 for FIR
+	// FCI: SSRC + seq + reserved
+	binary.BigEndian.PutUint32(buf[12:16], mediaSSRC)
+	buf[16] = seqNr
+	// buf[17:20] reserved (zero)
+	return buf
 }
 
 func parseReportBlocks(data []byte, count uint8) []ReportBlock {

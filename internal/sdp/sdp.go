@@ -107,6 +107,50 @@ var codecRtcpFb = map[int][]string{
 	97: {"nack", "nack pli", "ccm fir"},
 }
 
+// parseAttribute handles a single SDP a= line, updating the session and
+// current media descriptor accordingly.
+func parseAttribute(s *Session, curMedia *MediaDesc, val string) {
+	switch {
+	case val == DirSendRecv || val == DirSendOnly || val == DirRecvOnly || val == DirInactive:
+		if curMedia != nil {
+			curMedia.Direction = val
+		}
+	case strings.HasPrefix(val, "crypto:") && curMedia != nil:
+		if ca, err := parseCryptoVal(val[7:]); err == nil {
+			curMedia.Crypto = append(curMedia.Crypto, ca)
+		}
+	case val == "ice-lite":
+		s.IceLite = true
+	case strings.HasPrefix(val, "ice-ufrag:"):
+		s.IceUfrag = val[10:]
+	case strings.HasPrefix(val, "ice-pwd:"):
+		s.IcePwd = val[8:]
+	case strings.HasPrefix(val, "candidate:") && curMedia != nil:
+		curMedia.Candidates = append(curMedia.Candidates, val[10:])
+	case strings.HasPrefix(val, "fmtp:") && curMedia != nil:
+		parseFmtp(val[5:], curMedia)
+	case strings.HasPrefix(val, "rtcp-fb:") && curMedia != nil:
+		parseRtcpFb(val[8:], curMedia)
+	}
+}
+
+// parseMediaLine parses an m= line into a MediaDesc.
+func parseMediaLine(val string) *MediaDesc {
+	parts := strings.Fields(val)
+	if len(parts) < 3 {
+		return nil
+	}
+	md := MediaDesc{Type: parts[0]}
+	md.Port, _ = strconv.Atoi(parts[1])
+	md.Profile = parts[2]
+	for _, ptStr := range parts[3:] {
+		if pt, err := strconv.Atoi(ptStr); err == nil {
+			md.Codecs = append(md.Codecs, pt)
+		}
+	}
+	return &md
+}
+
 // Parse parses a raw SDP string into a Session.
 func Parse(raw string) (*Session, error) {
 	s := &Session{Raw: raw}
@@ -128,51 +172,17 @@ func Parse(raw string) (*Session, error) {
 		case 'o':
 			s.Origin = val
 		case 'c':
-			// c=IN IP4 <ip>
 			parts := strings.Fields(val)
 			if len(parts) >= 3 {
 				s.Connection = parts[2]
 			}
 		case 'm':
-			// m=<type> <port> <profile> <pt...>
-			parts := strings.Fields(val)
-			if len(parts) >= 3 {
-				md := MediaDesc{
-					Type: parts[0],
-				}
-				md.Port, _ = strconv.Atoi(parts[1])
-				md.Profile = parts[2]
-				for _, ptStr := range parts[3:] {
-					if pt, err := strconv.Atoi(ptStr); err == nil {
-						md.Codecs = append(md.Codecs, pt)
-					}
-				}
-				s.Media = append(s.Media, md)
+			if md := parseMediaLine(val); md != nil {
+				s.Media = append(s.Media, *md)
 				curMedia = &s.Media[len(s.Media)-1]
 			}
 		case 'a':
-			switch {
-			case val == DirSendRecv || val == DirSendOnly || val == DirRecvOnly || val == DirInactive:
-				if curMedia != nil {
-					curMedia.Direction = val
-				}
-			case strings.HasPrefix(val, "crypto:") && curMedia != nil:
-				if ca, err := parseCryptoVal(val[7:]); err == nil {
-					curMedia.Crypto = append(curMedia.Crypto, ca)
-				}
-			case val == "ice-lite":
-				s.IceLite = true
-			case strings.HasPrefix(val, "ice-ufrag:"):
-				s.IceUfrag = val[10:]
-			case strings.HasPrefix(val, "ice-pwd:"):
-				s.IcePwd = val[8:]
-			case strings.HasPrefix(val, "candidate:") && curMedia != nil:
-				curMedia.Candidates = append(curMedia.Candidates, val[10:])
-			case strings.HasPrefix(val, "fmtp:") && curMedia != nil:
-				parseFmtp(val[5:], curMedia)
-			case strings.HasPrefix(val, "rtcp-fb:") && curMedia != nil:
-				parseRtcpFb(val[8:], curMedia)
-			}
+			parseAttribute(s, curMedia, val)
 		}
 	}
 

@@ -173,13 +173,64 @@ func (m *Message) Bytes() []byte {
 	return buf.Bytes()
 }
 
+// parseStartLine parses the first line of a SIP message, populating the
+// Message's request or response fields.
+func parseStartLine(msg *Message, line string) error {
+	if strings.HasPrefix(line, "SIP/2.0 ") {
+		rest := line[8:]
+		spaceIdx := strings.IndexByte(rest, ' ')
+		if spaceIdx < 0 {
+			return errors.New("sip: malformed status line")
+		}
+		code, err := strconv.Atoi(rest[:spaceIdx])
+		if err != nil {
+			return errors.New("sip: invalid status code")
+		}
+		msg.StatusCode = code
+		msg.Reason = rest[spaceIdx+1:]
+		return nil
+	}
+	parts := strings.SplitN(line, " ", 3)
+	if len(parts) < 3 || parts[2] != "SIP/2.0" {
+		return errors.New("sip: malformed request line")
+	}
+	msg.Method = parts[0]
+	msg.RequestURI = parts[1]
+	return nil
+}
+
+// extractBody determines the message body from raw data after the header
+// section, respecting Content-Length when present.
+func extractBody(msg *Message, body []byte) {
+	if len(body) == 0 {
+		return
+	}
+	clStr := msg.Header("Content-Length")
+	if clStr == "" {
+		msg.Body = body
+		return
+	}
+	cl, err := strconv.Atoi(clStr)
+	if err != nil || cl < 0 {
+		msg.Body = body
+		return
+	}
+	if cl == 0 {
+		return
+	}
+	if cl <= len(body) {
+		msg.Body = body[:cl]
+	} else {
+		msg.Body = body
+	}
+}
+
 // Parse parses a raw SIP message (request or response).
 func Parse(data []byte) (*Message, error) {
 	if len(data) == 0 {
 		return nil, errors.New("sip: empty message")
 	}
 
-	// Split into head and body at the blank line.
 	headEnd := bytes.Index(data, []byte("\r\n\r\n"))
 	var head, body []byte
 	if headEnd < 0 {
@@ -189,7 +240,6 @@ func Parse(data []byte) (*Message, error) {
 		body = data[headEnd+4:]
 	}
 
-	// Split head into lines.
 	lines := bytes.Split(head, []byte("\r\n"))
 	if len(lines) == 0 {
 		return nil, errors.New("sip: no start line")
@@ -201,35 +251,10 @@ func Parse(data []byte) (*Message, error) {
 	}
 
 	msg := &Message{}
-
-	// Determine if response or request.
-	if strings.HasPrefix(startLine, "SIP/2.0 ") {
-		// Response: "SIP/2.0 200 OK"
-		rest := startLine[8:] // after "SIP/2.0 "
-		spaceIdx := strings.IndexByte(rest, ' ')
-		if spaceIdx < 0 {
-			return nil, errors.New("sip: malformed status line")
-		}
-		code, err := strconv.Atoi(rest[:spaceIdx])
-		if err != nil {
-			return nil, errors.New("sip: invalid status code")
-		}
-		msg.StatusCode = code
-		msg.Reason = rest[spaceIdx+1:]
-	} else {
-		// Request: "INVITE sip:1002@pbx.local SIP/2.0"
-		parts := strings.SplitN(startLine, " ", 3)
-		if len(parts) < 3 {
-			return nil, errors.New("sip: malformed request line")
-		}
-		if parts[2] != "SIP/2.0" {
-			return nil, errors.New("sip: malformed request line")
-		}
-		msg.Method = parts[0]
-		msg.RequestURI = parts[1]
+	if err := parseStartLine(msg, startLine); err != nil {
+		return nil, err
 	}
 
-	// Parse headers.
 	for _, line := range lines[1:] {
 		s := string(line)
 		if s == "" {
@@ -239,26 +264,14 @@ func Parse(data []byte) (*Message, error) {
 		if colonIdx < 0 {
 			continue
 		}
-		name := s[:colonIdx]
-		value := strings.TrimSpace(s[colonIdx+1:])
-		msg.headers = append(msg.headers, header{Name: name, Value: value})
+		msg.headers = append(msg.headers, header{
+			Name:  s[:colonIdx],
+			Value: strings.TrimSpace(s[colonIdx+1:]),
+		})
 	}
 
-	// Body: use Content-Length if present, otherwise use remaining data.
-	if headEnd >= 0 && len(body) > 0 {
-		clStr := msg.Header("Content-Length")
-		if clStr != "" {
-			cl, err := strconv.Atoi(clStr)
-			if err == nil && cl > 0 && cl <= len(body) {
-				msg.Body = body[:cl]
-			} else if cl == 0 {
-				// Explicit zero-length body.
-			} else {
-				msg.Body = body
-			}
-		} else {
-			msg.Body = body
-		}
+	if headEnd >= 0 {
+		extractBody(msg, body)
 	}
 
 	return msg, nil

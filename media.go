@@ -10,6 +10,7 @@ import (
 	"github.com/pion/rtp"
 	"github.com/x-phone/xphone-go/internal/media"
 	"github.com/x-phone/xphone-go/internal/rtcp"
+	"github.com/x-phone/xphone-go/internal/srtp"
 	"github.com/x-phone/xphone-go/internal/stun"
 )
 
@@ -90,6 +91,80 @@ func randUint32() uint32 {
 	return binary.BigEndian.Uint32(b[:])
 }
 
+// sendRTP marshals an RTP packet, optionally SRTP-protects it, and writes it
+// to the network. Also records the packet for RTCP stats and test hooks.
+func (s *mediaStream) sendRTP(pkt *rtp.Packet, stats *rtcp.Stats, sentCh chan *rtp.Packet, conn net.PacketConn, dst net.Addr, srtpOut *srtp.Context) {
+	stats.RecordRTPSent(len(pkt.Payload), pkt.Timestamp)
+	if sentCh != nil {
+		sendDropOldest(sentCh, pkt)
+	}
+	if conn == nil || dst == nil {
+		return
+	}
+	data, err := pkt.Marshal()
+	if err != nil {
+		return
+	}
+	if srtpOut != nil {
+		data, err = srtpOut.Protect(data)
+		if err != nil {
+			return
+		}
+	}
+	conn.WriteTo(data, dst)
+}
+
+// handleRTCPSend builds and sends an RTCP Sender Report, optionally SRTCP-protected.
+func handleRTCPSend(ssrc uint32, stats *rtcp.Stats, conn net.PacketConn, dst net.Addr, srtcpOut *srtp.Context) {
+	if conn == nil || dst == nil {
+		return
+	}
+	sr := rtcp.BuildSR(ssrc, stats)
+	if srtcpOut != nil {
+		var err error
+		sr, err = srtcpOut.ProtectRTCP(sr)
+		if err != nil {
+			return
+		}
+	}
+	conn.WriteTo(sr, dst)
+}
+
+// handleRTCPReceive decrypts (if SRTCP) and processes an inbound RTCP packet.
+func handleRTCPReceive(data []byte, stats *rtcp.Stats, srtcpIn *srtp.Context) {
+	if srtcpIn != nil {
+		var err error
+		data, err = srtcpIn.UnprotectRTCP(data)
+		if err != nil {
+			return
+		}
+	}
+	if pkt := rtcp.Parse(data); pkt != nil && pkt.IsSenderReport() {
+		stats.ProcessIncomingSR(pkt.NTPSec, pkt.NTPFrac)
+	}
+}
+
+// handleDTMF processes an inbound DTMF RTP packet (PT=101), deduplicating
+// end events by timestamp and dispatching to the onDTMF callback.
+func (s *mediaStream) handleDTMF(pkt *rtp.Packet) {
+	c := s.call
+	ev := DecodeDTMF(pkt.Payload)
+	if ev == nil || !ev.End {
+		return
+	}
+	if s.lastDTMFSeen && pkt.Timestamp == s.lastDTMFTimestamp {
+		return
+	}
+	s.lastDTMFTimestamp = pkt.Timestamp
+	s.lastDTMFSeen = true
+	c.mu.Lock()
+	mode := c.dtmfMode
+	c.mu.Unlock()
+	if mode != DtmfSipInfo {
+		c.fireOnDTMF(ev.Digit)
+	}
+}
+
 // run is the media pipeline goroutine for a single stream.
 // It handles: inbound RTP demux, jitter buffer, DTMF interception, codec encode/decode,
 // outbound RTP forwarding, RTCP, and media timeout.
@@ -165,18 +240,8 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 			}
 			sendDropOldest(c.rtpRawReader, clonePacket(pkt))
 
-			// DTMF dispatch: intercept PT=101 before jitter buffer.
 			if pkt.PayloadType == DTMFPayloadType {
-				if ev := DecodeDTMF(pkt.Payload); ev != nil && ev.End && !(s.lastDTMFSeen && pkt.Timestamp == s.lastDTMFTimestamp) {
-					s.lastDTMFTimestamp = pkt.Timestamp
-					s.lastDTMFSeen = true
-					c.mu.Lock()
-					mode := c.dtmfMode
-					c.mu.Unlock()
-					if mode != DtmfSipInfo {
-						c.fireOnDTMF(ev.Digit)
-					}
-				}
+				s.handleDTMF(pkt)
 				resetTimer(timeout)
 				continue
 			}
@@ -202,21 +267,7 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 			if muted {
 				continue
 			}
-			rtcpStats.RecordRTPSent(len(pkt.Payload), pkt.Timestamp)
-			if c.sentRTP != nil {
-				sendDropOldest(c.sentRTP, pkt)
-			}
-			if conn != nil && dst != nil {
-				if data, err := pkt.Marshal(); err == nil {
-					if srtpOut != nil {
-						data, err = srtpOut.Protect(data)
-						if err != nil {
-							continue
-						}
-					}
-					conn.WriteTo(data, dst)
-				}
-			}
+			s.sendRTP(pkt, rtcpStats, c.sentRTP, conn, dst, srtpOut)
 
 		case pcmFrame := <-c.pcmWriter:
 			if s.rtpWriterUsed || cp == nil {
@@ -243,52 +294,19 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 			}
 			s.outSeq++
 			s.outTimestamp += cp.SamplesPerFrame()
-			rtcpStats.RecordRTPSent(len(outPkt.Payload), outPkt.Timestamp)
-			if c.sentRTP != nil {
-				sendDropOldest(c.sentRTP, outPkt)
-			}
-			if conn != nil && dst != nil {
-				if data, err := outPkt.Marshal(); err == nil {
-					if srtpOut != nil {
-						data, err = srtpOut.Protect(data)
-						if err != nil {
-							continue
-						}
-					}
-					conn.WriteTo(data, dst)
-				}
-			}
+			s.sendRTP(outPkt, rtcpStats, c.sentRTP, conn, dst, srtpOut)
 
 		case <-rtcpTick:
-			if rtcpConn != nil && rtcpRemoteAddr != nil {
-				c.mu.Lock()
-				srtcpOut := c.srtpOut
-				c.mu.Unlock()
-				sr := rtcp.BuildSR(s.outSSRC, rtcpStats)
-				if srtcpOut != nil {
-					var err error
-					sr, err = srtcpOut.ProtectRTCP(sr)
-					if err != nil {
-						continue
-					}
-				}
-				rtcpConn.WriteTo(sr, rtcpRemoteAddr)
-			}
+			c.mu.Lock()
+			srtcpOut := c.srtpOut
+			c.mu.Unlock()
+			handleRTCPSend(s.outSSRC, rtcpStats, rtcpConn, rtcpRemoteAddr, srtcpOut)
 
 		case data := <-rtcpInbound:
 			c.mu.Lock()
 			srtcpIn := c.srtpIn
 			c.mu.Unlock()
-			if srtcpIn != nil {
-				var err error
-				data, err = srtcpIn.UnprotectRTCP(data)
-				if err != nil {
-					continue
-				}
-			}
-			if pkt := rtcp.Parse(data); pkt != nil && pkt.IsSenderReport() {
-				rtcpStats.ProcessIncomingSR(pkt.NTPSec, pkt.NTPFrac)
-			}
+			handleRTCPReceive(data, rtcpStats, srtcpIn)
 
 		case d := <-c.mediaTimerReset:
 			resetTimer(d)
@@ -564,21 +582,7 @@ func (s *mediaStream) runVideo() {
 				outPkt.Header.Marker = i == len(payloads)-1
 				outPkt.Payload = payload
 				s.outSeq++
-				rtcpStats.RecordRTPSent(len(payload), outPkt.Timestamp)
-				if c.videoSentRTP != nil {
-					sendDropOldest(c.videoSentRTP, clonePacket(&outPkt))
-				}
-				if conn != nil && dst != nil {
-					if data, err := outPkt.Marshal(); err == nil {
-						if srtpOut != nil {
-							data, err = srtpOut.Protect(data)
-							if err != nil {
-								continue
-							}
-						}
-						conn.WriteTo(data, dst)
-					}
-				}
+				s.sendRTP(clonePacket(&outPkt), rtcpStats, c.videoSentRTP, conn, dst, srtpOut)
 			}
 
 		case pkt := <-c.videoRTPWriter:
@@ -591,52 +595,19 @@ func (s *mediaStream) runVideo() {
 			if muted {
 				continue
 			}
-			rtcpStats.RecordRTPSent(len(pkt.Payload), pkt.Timestamp)
-			if c.videoSentRTP != nil {
-				sendDropOldest(c.videoSentRTP, pkt)
-			}
-			if conn != nil && dst != nil {
-				if data, err := pkt.Marshal(); err == nil {
-					if srtpOut != nil {
-						data, err = srtpOut.Protect(data)
-						if err != nil {
-							continue
-						}
-					}
-					conn.WriteTo(data, dst)
-				}
-			}
+			s.sendRTP(pkt, rtcpStats, c.videoSentRTP, conn, dst, srtpOut)
 
 		case <-rtcpTick:
-			if rtcpConn != nil && rtcpRemoteAddr != nil {
-				c.mu.Lock()
-				srtcpOut := c.videoSrtpOut
-				c.mu.Unlock()
-				sr := rtcp.BuildSR(s.outSSRC, rtcpStats)
-				if srtcpOut != nil {
-					var err error
-					sr, err = srtcpOut.ProtectRTCP(sr)
-					if err != nil {
-						continue
-					}
-				}
-				rtcpConn.WriteTo(sr, rtcpRemoteAddr)
-			}
+			c.mu.Lock()
+			srtcpOut := c.videoSrtpOut
+			c.mu.Unlock()
+			handleRTCPSend(s.outSSRC, rtcpStats, rtcpConn, rtcpRemoteAddr, srtcpOut)
 
 		case data := <-rtcpInbound:
 			c.mu.Lock()
 			srtcpIn := c.videoSrtpIn
 			c.mu.Unlock()
-			if srtcpIn != nil {
-				var err error
-				data, err = srtcpIn.UnprotectRTCP(data)
-				if err != nil {
-					continue
-				}
-			}
-			if pkt := rtcp.Parse(data); pkt != nil && pkt.IsSenderReport() {
-				rtcpStats.ProcessIncomingSR(pkt.NTPSec, pkt.NTPFrac)
-			}
+			handleRTCPReceive(data, rtcpStats, srtcpIn)
 		}
 	}
 }

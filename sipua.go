@@ -311,84 +311,140 @@ func (s *sipUA) dialOnce(ctx context.Context, target string, opts DialOptions, o
 	}, "", nil
 }
 
-// startServer registers sipgo server handlers for inbound SIP requests.
-// Must be called after onDialogInvite is set.
-func (s *sipUA) startServer() {
-	s.server.OnInvite(func(req *sip.Request, tx sip.ServerTransaction) {
-		sess, err := s.ds.ReadInvite(req, tx)
-		if err != nil {
+// waitDialogConfirmed waits until a sipgo dialog reaches Confirmed state,
+// then terminates the transaction to avoid sipgo's 32-second timer_l delay.
+func waitDialogConfirmed(sess *sipgo.DialogServerSession, tx sip.ServerTransaction) {
+	stateCh := sess.StateRead()
+	for state := range stateCh {
+		if state >= sip.DialogStateConfirmed {
+			break
+		}
+	}
+	tx.Terminate()
+}
+
+// handleInvite processes an inbound INVITE, dispatching re-INVITEs to existing
+// calls or creating new inbound call dialogs.
+func (s *sipUA) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
+	sess, err := s.ds.ReadInvite(req, tx)
+	if err != nil {
+		return
+	}
+
+	callID := ""
+	if h := req.CallID(); h != nil {
+		callID = h.Value()
+	}
+	sdpBody := string(req.Body())
+
+	// Check if this is a re-INVITE for an existing call.
+	s.mu.Lock()
+	reInvFn := s.onDialogReInvite
+	s.mu.Unlock()
+	if reInvFn != nil && callID != "" {
+		responder := &sipgoDialogUAS{
+			dialogBase: dialogBase{sess: sess, invite: req},
+		}
+		if reInvFn(callID, responder, sdpBody) {
+			waitDialogConfirmed(sess, tx)
 			return
 		}
+	}
 
-		// Extract Call-ID and SDP body.
+	// Not a re-INVITE — handle as new INVITE.
+	sess.Respond(100, "Trying", nil)
+
+	from := ""
+	if f := req.From(); f != nil {
+		from = f.Address.String()
+	}
+	to := ""
+	if t := req.To(); t != nil {
+		to = t.Address.String()
+	}
+
+	dlg := &sipgoDialogUAS{
+		dialogBase: dialogBase{sess: sess, invite: req},
+	}
+
+	s.mu.Lock()
+	fn := s.onDialogInvite
+	s.mu.Unlock()
+	if fn != nil {
+		go fn(dlg, from, to, sdpBody)
+		waitDialogConfirmed(sess, tx)
+	}
+}
+
+// handleNotify processes an inbound NOTIFY, dispatching to MWI, REFER, or
+// general SUBSCRIBE/NOTIFY handlers.
+func (s *sipUA) handleNotify(req *sip.Request, tx sip.ServerTransaction) {
+	res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+	tx.Respond(res)
+
+	ct := ""
+	if h := req.ContentType(); h != nil {
+		ct = h.Value()
+	}
+	mediaType := ct
+	if semi := strings.IndexByte(ct, ';'); semi >= 0 {
+		mediaType = ct[:semi]
+	}
+	mediaType = strings.TrimSpace(mediaType)
+
+	// MWI dispatch.
+	if strings.EqualFold(mediaType, contentTypeMWI) {
+		s.mu.Lock()
+		fn := s.onMWINotify
+		s.mu.Unlock()
+		if fn != nil {
+			go fn(string(req.Body()))
+		}
+		return
+	}
+
+	// REFER progress (message/sipfrag).
+	code := parseSipfragStatus(string(req.Body()))
+	if code > 0 {
 		callID := ""
 		if h := req.CallID(); h != nil {
 			callID = h.Value()
 		}
-		sdpBody := string(req.Body())
-
-		// Check if this is a re-INVITE for an existing call.
 		s.mu.Lock()
-		reInvFn := s.onDialogReInvite
+		fn := s.onDialogNotify
 		s.mu.Unlock()
-		if reInvFn != nil && callID != "" {
-			responder := &sipgoDialogUAS{
-				dialogBase: dialogBase{sess: sess, invite: req},
-			}
-			if reInvFn(callID, responder, sdpBody) {
-				// Re-INVITE handled — wait for confirmed state.
-				stateCh := sess.StateRead()
-				for state := range stateCh {
-					if state >= sip.DialogStateConfirmed {
-						break
-					}
-				}
-				tx.Terminate()
-				return
-			}
+		if fn != nil && callID != "" {
+			go fn(callID, code)
 		}
+		return
+	}
 
-		// Not a re-INVITE — handle as new INVITE.
-		// Send 100 Trying immediately to stop INVITE retransmissions.
-		sess.Respond(100, "Trying", nil)
-
-		// Extract From/To.
+	// General NOTIFY dispatch (for SubscriptionManager).
+	s.mu.Lock()
+	generalFn := s.onNotify
+	s.mu.Unlock()
+	if generalFn != nil {
 		from := ""
 		if f := req.From(); f != nil {
 			from = f.Address.String()
 		}
-		to := ""
-		if t := req.To(); t != nil {
-			to = t.Address.String()
+		event := ""
+		if h := req.GetHeader("Event"); h != nil {
+			event = h.Value()
 		}
-
-		dlg := &sipgoDialogUAS{
-			dialogBase: dialogBase{
-				sess:   sess,
-				invite: req,
-			},
+		subState := ""
+		if h := req.GetHeader("Subscription-State"); h != nil {
+			subState = h.Value()
 		}
+		go generalFn(event, from, ct, string(req.Body()), subState)
+	}
+}
 
-		s.mu.Lock()
-		fn := s.onDialogInvite
-		s.mu.Unlock()
-		if fn != nil {
-			// Dispatch call handling in a goroutine so the user's OnIncoming
-			// callback isn't blocked by the SIP server handler.
-			go fn(dlg, from, to, sdpBody)
-
-			// Wait until the dialog reaches Confirmed (ACK received after 200 OK)
-			// or Ended. sipgo's Server calls tx.TerminateGracefully() after this
-			// handler returns. For UDP, that blocks for timer_l (32s). By waiting
-			// for Confirmed and then calling tx.Terminate(), we avoid the delay.
-			stateCh := sess.StateRead()
-			for state := range stateCh {
-				if state >= sip.DialogStateConfirmed {
-					break
-				}
-			}
-			tx.Terminate()
-		}
+// startServer registers sipgo server handlers for inbound SIP requests.
+// Must be called after onDialogInvite is set.
+func (s *sipUA) startServer() {
+	s.server.OnInvite(func(req *sip.Request, tx sip.ServerTransaction) {
+		s.handleInvite(req, tx)
 	})
 
 	s.server.OnAck(func(req *sip.Request, tx sip.ServerTransaction) {
@@ -475,69 +531,7 @@ func (s *sipUA) startServer() {
 	})
 
 	s.server.OnNotify(func(req *sip.Request, tx sip.ServerTransaction) {
-		// Always respond 200 OK to NOTIFY.
-		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
-		tx.Respond(res)
-
-		// Extract common headers for dispatch.
-		ct := ""
-		if h := req.ContentType(); h != nil {
-			ct = h.Value()
-		}
-		mediaType := ct
-		if semi := strings.IndexByte(ct, ';'); semi >= 0 {
-			mediaType = ct[:semi]
-		}
-		mediaType = strings.TrimSpace(mediaType)
-
-		event := ""
-		if h := req.GetHeader("Event"); h != nil {
-			event = h.Value()
-		}
-
-		// MWI dispatch (legacy dedicated handler).
-		if strings.EqualFold(mediaType, contentTypeMWI) {
-			s.mu.Lock()
-			fn := s.onMWINotify
-			s.mu.Unlock()
-			if fn != nil {
-				go fn(string(req.Body()))
-			}
-			return
-		}
-
-		// REFER progress (message/sipfrag) — parse status code and dispatch.
-		code := parseSipfragStatus(string(req.Body()))
-		if code > 0 {
-			callID := ""
-			if h := req.CallID(); h != nil {
-				callID = h.Value()
-			}
-			s.mu.Lock()
-			fn := s.onDialogNotify
-			s.mu.Unlock()
-			if fn != nil && callID != "" {
-				go fn(callID, code)
-			}
-			return
-		}
-
-		// General NOTIFY dispatch (for SubscriptionManager).
-		// Only reached for non-MWI, non-REFER NOTIFYs.
-		s.mu.Lock()
-		generalFn := s.onNotify
-		s.mu.Unlock()
-		if generalFn != nil {
-			from := ""
-			if f := req.From(); f != nil {
-				from = f.Address.String()
-			}
-			subState := ""
-			if h := req.GetHeader("Subscription-State"); h != nil {
-				subState = h.Value()
-			}
-			go generalFn(event, from, ct, string(req.Body()), subState)
-		}
+		s.handleNotify(req, tx)
 	})
 
 	s.server.OnMessage(func(req *sip.Request, tx sip.ServerTransaction) {

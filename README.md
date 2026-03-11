@@ -253,6 +253,31 @@ See the [Go documentation](https://pkg.go.dev/github.com/x-phone/xphone-go) for 
 
 ---
 
+## RTP Port Range
+
+Each active call requires an even-numbered UDP port for RTP audio (and a second one if video is negotiated). By default, xphone lets the OS assign ports automatically. For production deployments — especially behind firewalls where you need predictable port ranges — configure an explicit range:
+
+```go
+phone := xphone.New(
+    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
+    xphone.WithRTPPorts(10000, 20000), // 5000 even ports = 5000 concurrent calls
+)
+```
+
+**Sizing the range:** only even ports are used (per RTP spec), so the maximum number of concurrent audio-only calls is `(max - min) / 2`. A range of `10000-10100` supports only ~50 calls. For production, `10000-20000` is a safe default.
+
+**What happens when ports run out:** inbound calls receive a `500 Internal Server Error` and outbound dials fail with an error. The symptom is not obvious — widen the range before investigating SIP server configuration.
+
+| Range | Even ports | Max concurrent calls |
+|---|---|---|
+| 10000–10100 | 50 | ~50 |
+| 10000–12000 | 1000 | ~1000 |
+| 10000–20000 | 5000 | ~5000 |
+
+> If no range is configured (`WithRTPPorts` not called), the OS assigns ephemeral ports. This works for development but is impractical in production where firewall rules need a known range.
+
+---
+
 ## NAT Traversal
 
 xphone supports three levels of NAT traversal, depending on your network environment:

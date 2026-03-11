@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### CI
+- Add changelog check: PRs now require a CHANGELOG.md entry
+
 ## v0.3.0
 
 ### Video

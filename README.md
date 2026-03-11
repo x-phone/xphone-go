@@ -37,7 +37,7 @@ DID (phone number)
     +-- SIP Trunk (Telnyx, Twilio SIP, Vonage...)
             +-- xphone
                     |-- PCMReader -> Whisper / Deepgram (speech-to-text)
-                    +-- PCMWriter <- ElevenLabs / TTS (text-to-speech)
+                    +-- PacedPCMWriter <- ElevenLabs / TTS (text-to-speech)
 ```
 
 Your bot gets a real phone number, registers directly with a SIP trunk provider, and handles calls end-to-end — no Asterisk, no middleman, no per-minute platform fees.
@@ -406,7 +406,17 @@ go func() {
 }()
 ```
 
-> **Important:** Send frames at the natural 20ms pace. If you send faster than real-time, the outbound buffer fills and frames are dropped.
+> **Important:** `PCMWriter()` sends each buffer as an RTP packet immediately — the caller must provide frames at real-time rate (one 160-sample frame every 20ms). For live microphone input this is natural; for TTS or file playback, use `PacedPCMWriter()` instead.
+
+### Paced writer (for TTS / pre-generated audio)
+
+`call.PacedPCMWriter()` accepts arbitrary-length PCM buffers and handles framing + pacing internally. Send entire TTS utterances at once — xphone splits them into 20ms frames and sends RTP at real-time pace:
+
+```go
+// Send an entire TTS utterance — any length, xphone handles pacing
+ttsAudio := elevenLabs.Synthesize("Hello, how can I help you?")
+call.PacedPCMWriter() <- ttsAudio
+```
 
 ### Silence frame
 
@@ -461,8 +471,9 @@ Inbound:
                                           -> Codec Decode -> PCMReader ([]int16)
 
 Outbound (mutually exclusive):
-  PCMWriter -> Codec Encode -> RTP/UDP -> SIP Trunk
-  RTPWriter -> RTP/UDP -> SIP Trunk   (raw mode — PCMWriter ignored)
+  PCMWriter      -> Codec Encode -> RTP/UDP -> SIP Trunk   (caller paces at 20ms)
+  PacedPCMWriter -> Auto-frame + 20ms ticker -> Codec Encode -> RTP/UDP -> SIP Trunk
+  RTPWriter      -> RTP/UDP -> SIP Trunk   (raw mode — PCMWriter ignored)
 ```
 
 ### Video

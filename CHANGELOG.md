@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Docs
+- Add PacedPCMWriter documentation to README
+
 ## v0.3.2
 
 ### Media

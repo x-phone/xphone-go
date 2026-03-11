@@ -644,3 +644,65 @@ func TestFakePBX_MultipleCalls(t *testing.T) {
 		c.End()
 	}
 }
+
+// F17: PacedPCMWriter — burst audio is paced out as evenly-spaced RTP packets.
+func TestFakePBX_PacedPCMWriter(t *testing.T) {
+	pbx := fakepbx.NewFakePBX(t, fakepbx.WithAuth("1001", "test"))
+	rtpConn, rtpPort := bindRTP(t)
+
+	pbx.OnInvite(func(inv *fakepbx.Invite) {
+		inv.Trying()
+		inv.Ringing()
+		inv.Answer(fakepbx.SDP("127.0.0.1", rtpPort, fakepbx.PCMA))
+	})
+
+	p := connectPBX(t, pbx)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, err := p.Dial(ctx, "9999")
+	require.NoError(t, err)
+	require.Equal(t, StateActive, c.State())
+
+	// Brief pause for media pipeline to start.
+	time.Sleep(100 * time.Millisecond)
+
+	// Send a burst of 5 frames (800 samples = 5 × 160) via PacedPCMWriter.
+	const numFrames = 5
+	burst := make([]int16, 160*numFrames)
+	for i := range burst {
+		burst[i] = 1000 // non-zero so codec produces real output
+	}
+	select {
+	case c.PacedPCMWriter() <- burst:
+	case <-time.After(time.Second):
+		t.Fatal("PacedPCMWriter blocked")
+	}
+
+	// Receive all 5 RTP packets from the test socket and record arrival times.
+	timestamps := make([]time.Time, 0, numFrames)
+	buf := make([]byte, 1500)
+	for i := 0; i < numFrames; i++ {
+		rtpConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		n, _, err := rtpConn.ReadFrom(buf)
+		require.NoError(t, err, "packet %d: read failed", i)
+		timestamps = append(timestamps, time.Now())
+
+		rxPkt := &rtp.Packet{}
+		err = rxPkt.Unmarshal(buf[:n])
+		require.NoError(t, err, "packet %d: unmarshal failed", i)
+		assert.Equal(t, uint8(8), rxPkt.PayloadType, "packet %d: wrong PT", i)
+	}
+
+	assert.Equal(t, numFrames, len(timestamps), "expected %d packets", numFrames)
+
+	// Verify pacing: gaps between consecutive packets should be ~20ms (±12ms).
+	for i := 1; i < len(timestamps); i++ {
+		gap := timestamps[i].Sub(timestamps[i-1])
+		assert.InDelta(t, 20*time.Millisecond, gap, float64(12*time.Millisecond),
+			"gap %d→%d: %v (expected ~20ms)", i-1, i, gap)
+	}
+
+	c.End()
+}

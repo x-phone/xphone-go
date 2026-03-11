@@ -144,6 +144,34 @@ func handleRTCPReceive(data []byte, stats *rtcp.Stats, srtcpIn *srtp.Context) {
 	}
 }
 
+// encodePCMAndSend encodes a PCM frame into an RTP packet and transmits it.
+// Shared by the immediate and paced PCM write paths.
+func (s *mediaStream) encodePCMAndSend(pcmFrame []int16, cp media.CodecProcessor, rtcpStats *rtcp.Stats, conn net.PacketConn) {
+	c := s.call
+	c.mu.Lock()
+	muted := s.muted
+	dst := c.remoteAddr
+	srtpOut := c.srtpOut
+	c.mu.Unlock()
+	if muted {
+		return
+	}
+	encoded := cp.Encode(pcmFrame)
+	outPkt := &rtp.Packet{
+		Header: rtp.Header{
+			Version:        2,
+			PayloadType:    cp.PayloadType(),
+			SequenceNumber: s.outSeq,
+			Timestamp:      s.outTimestamp,
+			SSRC:           s.outSSRC,
+		},
+		Payload: encoded,
+	}
+	s.outSeq++
+	s.outTimestamp += cp.SamplesPerFrame()
+	s.sendRTP(outPkt, rtcpStats, c.sentRTP, conn, dst, srtpOut)
+}
+
 // handleDTMF processes an inbound DTMF RTP packet (PT=101), deduplicating
 // end events by timestamp and dispatching to the onDTMF callback.
 func (s *mediaStream) handleDTMF(pkt *rtp.Packet) {
@@ -226,6 +254,18 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 		mediaTimer.Reset(d)
 	}
 
+	// Paced PCM writer state: accumulates arbitrary-length PCM buffers,
+	// splits into frame-size chunks, and drains one frame per 20ms tick.
+	var pacerResidual []int16  // leftover samples from partial frames
+	var pacerQueue [][]int16   // ready-to-send frame-size chunks
+	const maxPacerQueue = 1500 // ~30 seconds at 20ms/frame
+	var pacerTick <-chan time.Time
+	var pacerTicker *time.Ticker
+	frameSize := 160 // default frame size (20ms at 8kHz)
+	if cp != nil {
+		frameSize = int(cp.SamplesPerFrame())
+	}
+
 	for {
 		select {
 		case <-done:
@@ -273,28 +313,44 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 			if s.rtpWriterUsed || cp == nil {
 				continue
 			}
-			c.mu.Lock()
-			muted := s.muted
-			dst := c.remoteAddr
-			srtpOut := c.srtpOut
-			c.mu.Unlock()
-			if muted {
+			s.encodePCMAndSend(pcmFrame, cp, rtcpStats, conn)
+
+		case buf := <-c.pacedPCMWriter:
+			if s.rtpWriterUsed || cp == nil {
 				continue
 			}
-			encoded := cp.Encode(pcmFrame)
-			outPkt := &rtp.Packet{
-				Header: rtp.Header{
-					Version:        2,
-					PayloadType:    cp.PayloadType(),
-					SequenceNumber: s.outSeq,
-					Timestamp:      s.outTimestamp,
-					SSRC:           s.outSSRC,
-				},
-				Payload: encoded,
+			// Accumulate samples and split into frame-size chunks.
+			samples := buf
+			if len(pacerResidual) > 0 {
+				samples = append(pacerResidual, samples...)
+				pacerResidual = nil
 			}
-			s.outSeq++
-			s.outTimestamp += cp.SamplesPerFrame()
-			s.sendRTP(outPkt, rtcpStats, c.sentRTP, conn, dst, srtpOut)
+			for len(samples) >= frameSize {
+				frame := make([]int16, frameSize)
+				copy(frame, samples[:frameSize])
+				samples = samples[frameSize:]
+				if len(pacerQueue) < maxPacerQueue {
+					pacerQueue = append(pacerQueue, frame)
+				}
+			}
+			if len(samples) > 0 {
+				pacerResidual = make([]int16, len(samples))
+				copy(pacerResidual, samples)
+			}
+			// Start the pacer ticker on first write (lazy init).
+			if pacerTicker == nil && len(pacerQueue) > 0 {
+				pacerTicker = time.NewTicker(20 * time.Millisecond)
+				pacerTick = pacerTicker.C
+				defer pacerTicker.Stop()
+			}
+
+		case <-pacerTick:
+			if len(pacerQueue) == 0 || s.rtpWriterUsed || cp == nil {
+				continue
+			}
+			frame := pacerQueue[0]
+			pacerQueue = pacerQueue[1:]
+			s.encodePCMAndSend(frame, cp, rtcpStats, conn)
 
 		case <-rtcpTick:
 			c.mu.Lock()

@@ -562,3 +562,170 @@ func TestCall_UnmuteAudio_WhenNotMutedReturnsError(t *testing.T) {
 
 	assert.Equal(t, ErrNotMuted, c.UnmuteAudio())
 }
+
+// --- PacedPCMWriter tests ---
+
+func TestPacedPCMWriter_SingleFrame(t *testing.T) {
+	c := activeCall(t)
+	defer c.stopMedia()
+
+	// Send exactly one frame (160 samples) via PacedPCMWriter.
+	frame := make([]int16, 160)
+	select {
+	case c.PacedPCMWriter() <- frame:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("PacedPCMWriter blocked")
+	}
+
+	p := readPacket(t, c.sentRTP, 500*time.Millisecond)
+	assert.Equal(t, uint8(0), p.PayloadType, "should be PCMU PT=0")
+	assert.Len(t, p.Payload, 160)
+}
+
+func TestPacedPCMWriter_BurstSplitting(t *testing.T) {
+	c := activeCall(t)
+	defer c.stopMedia()
+
+	// Send 800 samples (5 frames × 160) in a single burst.
+	buf := make([]int16, 800)
+	select {
+	case c.PacedPCMWriter() <- buf:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("PacedPCMWriter blocked")
+	}
+
+	// Should produce 5 paced packets.
+	var arrivals []time.Time
+	for i := 0; i < 5; i++ {
+		select {
+		case <-c.sentRTP:
+			arrivals = append(arrivals, time.Now())
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("timed out waiting for paced packet %d (got %d)", i, len(arrivals))
+		}
+	}
+
+	// Verify pacing: 5 packets should span at least 50ms (4 gaps × ~20ms).
+	totalElapsed := arrivals[len(arrivals)-1].Sub(arrivals[0])
+	assert.GreaterOrEqual(t, totalElapsed.Milliseconds(), int64(50),
+		"5 paced packets should take at least 50ms total, got %v", totalElapsed)
+}
+
+func TestPacedPCMWriter_PartialFrame(t *testing.T) {
+	c := activeCall(t)
+	defer c.stopMedia()
+
+	// Send 100 samples (less than one frame). No packet yet.
+	buf1 := make([]int16, 100)
+	select {
+	case c.PacedPCMWriter() <- buf1:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("PacedPCMWriter blocked")
+	}
+
+	// Brief pause — should NOT have produced a packet.
+	time.Sleep(50 * time.Millisecond)
+	pkts := drainPackets(c.sentRTP)
+	assert.Empty(t, pkts, "partial frame should not produce a packet yet")
+
+	// Send 60 more samples (total 160 = one frame).
+	buf2 := make([]int16, 60)
+	select {
+	case c.PacedPCMWriter() <- buf2:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("PacedPCMWriter blocked on second write")
+	}
+
+	// Now one packet should arrive.
+	p := readPacket(t, c.sentRTP, 500*time.Millisecond)
+	assert.NotNil(t, p)
+	assert.Len(t, p.Payload, 160)
+}
+
+func TestPacedPCMWriter_SequenceAndTimestamp(t *testing.T) {
+	c := activeCall(t)
+	defer c.stopMedia()
+
+	// Send 480 samples (3 frames) in one burst.
+	buf := make([]int16, 480)
+	select {
+	case c.PacedPCMWriter() <- buf:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("PacedPCMWriter blocked")
+	}
+
+	p0 := readPacket(t, c.sentRTP, 500*time.Millisecond)
+	p1 := readPacket(t, c.sentRTP, 500*time.Millisecond)
+	p2 := readPacket(t, c.sentRTP, 500*time.Millisecond)
+
+	// Sequence numbers must be consecutive.
+	assert.Equal(t, p0.SequenceNumber+1, p1.SequenceNumber)
+	assert.Equal(t, p1.SequenceNumber+1, p2.SequenceNumber)
+
+	// Timestamps must increment by 160 (PCMU samples per frame).
+	assert.Equal(t, p0.Timestamp+160, p1.Timestamp)
+	assert.Equal(t, p1.Timestamp+160, p2.Timestamp)
+}
+
+func TestPacedPCMWriter_MuteSuppresses(t *testing.T) {
+	c := activeCall(t)
+	defer c.stopMedia()
+
+	require.NoError(t, c.Mute())
+
+	buf := make([]int16, 320) // 2 frames
+	select {
+	case c.PacedPCMWriter() <- buf:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("PacedPCMWriter blocked")
+	}
+
+	// Wait for pacer ticks.
+	time.Sleep(80 * time.Millisecond)
+	pkts := drainPackets(c.sentRTP)
+	assert.Empty(t, pkts, "paced packets must be suppressed while muted")
+}
+
+func TestPacedPCMWriter_QueueOverflow(t *testing.T) {
+	c := activeCall(t)
+	defer c.stopMedia()
+
+	// Send a massive buffer that exceeds maxPacerQueue (1500 frames × 160 = 240000 samples).
+	// Add extra to trigger overflow: 1600 frames = 256000 samples.
+	buf := make([]int16, 256000)
+	select {
+	case c.PacedPCMWriter() <- buf:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("PacedPCMWriter blocked")
+	}
+
+	// Pipeline should still work — read a few paced packets.
+	p := readPacket(t, c.sentRTP, 500*time.Millisecond)
+	assert.NotNil(t, p, "should still receive paced packets after overflow")
+}
+
+func TestPacedPCMWriter_RTPWriterSuppresses(t *testing.T) {
+	c := activeCall(t)
+	defer c.stopMedia()
+
+	// Set rtpWriterUsed by writing an RTP packet first.
+	rtpPkt := &rtp.Packet{Header: rtp.Header{SequenceNumber: 1, PayloadType: 0}}
+	select {
+	case c.RTPWriter() <- rtpPkt:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("RTPWriter blocked")
+	}
+	sent := readPacket(t, c.sentRTP, 200*time.Millisecond)
+	assert.Equal(t, uint16(1), sent.SequenceNumber)
+
+	// Now write via paced channel — should be silently ignored.
+	buf := make([]int16, 320)
+	select {
+	case c.PacedPCMWriter() <- buf:
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	time.Sleep(80 * time.Millisecond)
+	pkts := drainPackets(c.sentRTP)
+	assert.Empty(t, pkts, "paced PCM must be suppressed when RTPWriter is active")
+}

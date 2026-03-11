@@ -122,6 +122,7 @@ type Call interface {
 	RTPWriter() chan<- *rtp.Packet
 	PCMReader() <-chan []int16
 	PCMWriter() chan<- []int16
+	PacedPCMWriter() chan<- []int16
 	OnDTMF(func(digit string))
 	OnHold(func())
 	OnResume(func())
@@ -216,6 +217,7 @@ type call struct {
 	rtpWriter       chan *rtp.Packet
 	pcmReader       chan []int16
 	pcmWriter       chan []int16
+	pacedPCMWriter  chan []int16       // paced PCM: accepts arbitrary-length buffers, auto-framed at 20ms
 	sentRTP         chan *rtp.Packet   // test hook: outbound packets copied here
 	mediaTimerReset chan time.Duration // signals the media goroutine to reset the timeout
 	callbackCh      chan func()        // single dispatch goroutine for all callbacks
@@ -241,18 +243,19 @@ type call struct {
 
 func newInboundCall(d dialog) *call {
 	c := &call{
-		id:           newCallID(),
-		dlg:          d,
-		state:        StateRinging,
-		direction:    DirectionInbound,
-		logger:       resolveLogger(nil),
-		rtpInbound:   make(chan *rtp.Packet, 256),
-		rtpReader:    make(chan *rtp.Packet, 256),
-		rtpRawReader: make(chan *rtp.Packet, 256),
-		rtpWriter:    make(chan *rtp.Packet, 256),
-		pcmReader:    make(chan []int16, 256),
-		pcmWriter:    make(chan []int16, 256),
-		callbackCh:   make(chan func(), 16),
+		id:             newCallID(),
+		dlg:            d,
+		state:          StateRinging,
+		direction:      DirectionInbound,
+		logger:         resolveLogger(nil),
+		rtpInbound:     make(chan *rtp.Packet, 256),
+		rtpReader:      make(chan *rtp.Packet, 256),
+		rtpRawReader:   make(chan *rtp.Packet, 256),
+		rtpWriter:      make(chan *rtp.Packet, 256),
+		pcmReader:      make(chan []int16, 256),
+		pcmWriter:      make(chan []int16, 256),
+		pacedPCMWriter: make(chan []int16, 256),
+		callbackCh:     make(chan func(), 16),
 	}
 	c.audioStream = &mediaStream{call: c, outSSRC: randUint32()}
 	go c.runCallbackDispatcher()
@@ -262,19 +265,20 @@ func newInboundCall(d dialog) *call {
 func newOutboundCall(d dialog, dialOpts ...DialOption) *call {
 	opts := applyDialOptions(dialOpts)
 	c := &call{
-		id:           newCallID(),
-		dlg:          d,
-		state:        StateDialing,
-		direction:    DirectionOutbound,
-		opts:         opts,
-		logger:       resolveLogger(nil),
-		rtpInbound:   make(chan *rtp.Packet, 256),
-		rtpReader:    make(chan *rtp.Packet, 256),
-		rtpRawReader: make(chan *rtp.Packet, 256),
-		rtpWriter:    make(chan *rtp.Packet, 256),
-		pcmReader:    make(chan []int16, 256),
-		pcmWriter:    make(chan []int16, 256),
-		callbackCh:   make(chan func(), 16),
+		id:             newCallID(),
+		dlg:            d,
+		state:          StateDialing,
+		direction:      DirectionOutbound,
+		opts:           opts,
+		logger:         resolveLogger(nil),
+		rtpInbound:     make(chan *rtp.Packet, 256),
+		rtpReader:      make(chan *rtp.Packet, 256),
+		rtpRawReader:   make(chan *rtp.Packet, 256),
+		rtpWriter:      make(chan *rtp.Packet, 256),
+		pcmReader:      make(chan []int16, 256),
+		pcmWriter:      make(chan []int16, 256),
+		pacedPCMWriter: make(chan []int16, 256),
+		callbackCh:     make(chan func(), 16),
 	}
 	c.audioStream = &mediaStream{call: c, outSSRC: randUint32()}
 	go c.runCallbackDispatcher()
@@ -1325,6 +1329,7 @@ func (c *call) RTPReader() <-chan *rtp.Packet    { return c.rtpReader }
 func (c *call) RTPWriter() chan<- *rtp.Packet    { return c.rtpWriter }
 func (c *call) PCMReader() <-chan []int16        { return c.pcmReader }
 func (c *call) PCMWriter() chan<- []int16        { return c.pcmWriter }
+func (c *call) PacedPCMWriter() chan<- []int16   { return c.pacedPCMWriter }
 
 func (c *call) HasVideo() bool {
 	c.mu.Lock()

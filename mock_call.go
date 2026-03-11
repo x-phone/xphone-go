@@ -46,11 +46,12 @@ type MockCall struct {
 	onEndedPhone   func(EndReason) // internal: phone-level OnCallEnded
 	onDTMFPhone    func(string)    // internal: phone-level OnCallDTMF
 
-	rtpRawReader chan *rtp.Packet
-	rtpReader    chan *rtp.Packet
-	rtpWriter    chan *rtp.Packet
-	pcmReader    chan []int16
-	pcmWriter    chan []int16
+	rtpRawReader   chan *rtp.Packet
+	rtpReader      chan *rtp.Packet
+	rtpWriter      chan *rtp.Packet
+	pcmReader      chan []int16
+	pcmWriter      chan []int16
+	pacedPCMWriter chan []int16
 
 	hasVideo       bool
 	videoCodecType VideoCodec
@@ -74,6 +75,7 @@ func NewMockCall() *MockCall {
 		rtpWriter:      make(chan *rtp.Packet, 256),
 		pcmReader:      make(chan []int16, 256),
 		pcmWriter:      make(chan []int16, 256),
+		pacedPCMWriter: make(chan []int16, 256),
 		videoReader:    make(chan VideoFrame, 256),
 		videoWriter:    make(chan VideoFrame, 256),
 		videoRTPReader: make(chan *rtp.Packet, 256),
@@ -416,6 +418,7 @@ func (c *MockCall) RTPReader() <-chan *rtp.Packet    { return c.rtpReader }
 func (c *MockCall) RTPWriter() chan<- *rtp.Packet    { return c.rtpWriter }
 func (c *MockCall) PCMReader() <-chan []int16        { return c.pcmReader }
 func (c *MockCall) PCMWriter() chan<- []int16        { return c.pcmWriter }
+func (c *MockCall) PacedPCMWriter() chan<- []int16   { return c.pacedPCMWriter }
 
 func (c *MockCall) OnDTMF(fn func(string)) {
 	c.mu.Lock()

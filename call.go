@@ -581,23 +581,27 @@ func listenRTPPort(min, max int) (net.PacketConn, error) {
 
 // ensureRTPPort lazily allocates a UDP socket and caches the local IP and
 // RTP port. Must be called with c.mu held.
-func (c *call) ensureRTPPort() {
+func (c *call) ensureRTPPort() error {
 	if c.localIP == "" {
 		c.localIP = localIPFor(c.sipHost)
 	}
 	if c.rtpPort == 0 {
 		conn, err := listenRTPPort(c.rtpPortMin, c.rtpPortMax)
-		if err == nil {
-			c.rtpPort = conn.LocalAddr().(*net.UDPAddr).Port
-			c.rtpConn = conn
+		if err != nil {
+			return fmt.Errorf("allocate RTP port: %w", err)
 		}
+		c.rtpPort = conn.LocalAddr().(*net.UDPAddr).Port
+		c.rtpConn = conn
 	}
+	return nil
 }
 
 // buildLocalSDP creates an SDP offer with the call's allocated RTP address/port.
 // Must be called with c.mu held.
 func (c *call) buildLocalSDP(direction string) string {
-	c.ensureRTPPort()
+	if err := c.ensureRTPPort(); err != nil {
+		c.logger.Error("RTP port allocation failed for SDP offer", "id", c.id, "error", err)
+	}
 	iceParams := c.buildICEParams()
 	codecs := c.resolveCodecPrefs()
 
@@ -632,7 +636,9 @@ func (c *call) buildLocalSDP(direction string) string {
 // buildAnswerSDP creates an SDP answer that only includes codecs from the
 // remote offer (RFC 3264 compliance). Must be called with c.mu held.
 func (c *call) buildAnswerSDP(remote *sdp.Session, direction string) string {
-	c.ensureRTPPort()
+	if err := c.ensureRTPPort(); err != nil {
+		c.logger.Error("RTP port allocation failed for SDP answer", "id", c.id, "error", err)
+	}
 	iceParams := c.buildICEParams()
 	// Set remote ICE credentials on agent if available.
 	if c.iceAgent != nil && remote.IceUfrag != "" && remote.IcePwd != "" {
@@ -763,17 +769,19 @@ func (c *call) initVideoChannels() {
 
 // ensureVideoRTPPort lazily allocates a UDP socket for video RTP.
 // Must be called with c.mu held.
-func (c *call) ensureVideoRTPPort() {
+func (c *call) ensureVideoRTPPort() error {
 	if c.localIP == "" {
 		c.localIP = localIPFor(c.sipHost)
 	}
 	if c.videoRTPPort == 0 {
 		conn, err := listenRTPPort(c.rtpPortMin, c.rtpPortMax)
-		if err == nil {
-			c.videoRTPPort = conn.LocalAddr().(*net.UDPAddr).Port
-			c.videoRTPConn = conn
+		if err != nil {
+			return fmt.Errorf("allocate video RTP port: %w", err)
 		}
+		c.videoRTPPort = conn.LocalAddr().(*net.UDPAddr).Port
+		c.videoRTPConn = conn
 	}
+	return nil
 }
 
 // videoCodecPrefsToInts converts []VideoCodec to []int.

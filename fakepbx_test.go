@@ -547,3 +547,100 @@ func TestFakePBX_Dial302AfterProvisional(t *testing.T) {
 
 	c.End()
 }
+
+// F16: Multiple simultaneous calls — verify each gets a unique, non-zero RTP port.
+func TestFakePBX_MultipleCalls(t *testing.T) {
+	const numCalls = 5
+
+	pbx := fakepbx.NewFakePBX(t, fakepbx.WithAuth("1001", "test"))
+
+	// Each call gets its own RTP endpoint.
+	rtpPorts := make([]int, numCalls)
+	rtpConns := make([]net.PacketConn, numCalls)
+	for i := 0; i < numCalls; i++ {
+		rtpConns[i], rtpPorts[i] = bindRTP(t)
+	}
+
+	var inviteIdx atomic.Int32
+	pbx.OnInvite(func(inv *fakepbx.Invite) {
+		idx := int(inviteIdx.Add(1)) - 1
+		if idx >= numCalls {
+			inv.Reject(486, "Busy Here")
+			return
+		}
+		inv.Trying()
+		inv.Ringing()
+		inv.Answer(fakepbx.SDP("127.0.0.1", rtpPorts[idx], fakepbx.PCMA))
+	})
+
+	p := connectPBX(t, pbx)
+
+	// Dial calls sequentially (sipgo's DialogClientSession has an internal
+	// race when Invite is called concurrently on the same client), but keep
+	// all calls active simultaneously to verify unique port allocation.
+	calls := make([]Call, 0, numCalls)
+	for i := 0; i < numCalls; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		c, err := p.Dial(ctx, fmt.Sprintf("%04d", i))
+		cancel()
+		require.NoError(t, err, "dial %d failed", i)
+		require.Equal(t, StateActive, c.State())
+		calls = append(calls, c)
+	}
+
+	// Verify each call has a unique, non-zero local RTP port.
+	portSet := make(map[int]bool)
+	for i, c := range calls {
+		addr := parseRemoteAddr(c.LocalSDP())
+		require.NotNil(t, addr, "call %d: could not parse local SDP", i)
+		port := addr.(*net.UDPAddr).Port
+		assert.NotZero(t, port, "call %d: got port 0 in local SDP", i)
+		assert.False(t, portSet[port], "call %d: duplicate port %d", i, port)
+		portSet[port] = true
+	}
+
+	// Also verify no call has m=audio 0 in its local SDP.
+	for i, c := range calls {
+		assert.NotContains(t, c.LocalSDP(), "m=audio 0", "call %d: SDP has m=audio 0", i)
+	}
+
+	// Verify RTP connectivity on each call — send a packet from each PBX
+	// endpoint and confirm xphone receives it.
+	for i, c := range calls {
+		xphoneAddr := parseRemoteAddr(c.LocalSDP())
+		xphonePort := xphoneAddr.(*net.UDPAddr).Port
+		dst, err := net.ResolveUDPAddr("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(xphonePort)))
+		require.NoError(t, err)
+
+		silence := make([]byte, 160)
+		for j := range silence {
+			silence[j] = 0xD5
+		}
+		pkt := &rtp.Packet{
+			Header: rtp.Header{
+				Version:        2,
+				PayloadType:    8,
+				SequenceNumber: 1,
+				Timestamp:      160,
+				SSRC:           uint32(0xDEAD0000 + i),
+			},
+			Payload: silence,
+		}
+		data, err := pkt.Marshal()
+		require.NoError(t, err)
+		_, err = rtpConns[i].WriteTo(data, dst)
+		require.NoError(t, err)
+
+		select {
+		case rxPkt := <-c.RTPRawReader():
+			assert.Equal(t, uint8(8), rxPkt.PayloadType, "call %d: wrong payload type", i)
+		case <-time.After(3 * time.Second):
+			t.Fatalf("call %d: no inbound RTP received", i)
+		}
+	}
+
+	// Clean up all calls.
+	for _, c := range calls {
+		c.End()
+	}
+}

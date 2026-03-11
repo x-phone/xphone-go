@@ -637,6 +637,20 @@ func (p *phone) handleDialogInvite(dlg dialog, from, to, sdpBody string) {
 	c.rtpPortMax = p.cfg.RTPPortMax
 	p.applyCallConfig(c)
 	c.remoteSDP = sdpBody
+
+	// Eagerly allocate RTP port before presenting the call.
+	// If allocation fails, reject with 500 instead of sending port 0 SDP.
+	c.mu.Lock()
+	if err := c.ensureRTPPort(); err != nil {
+		c.mu.Unlock()
+		p.logger.Error("RTP port allocation failed, rejecting INVITE", "from", from, "error", err)
+		if err := dlg.Respond(500, "Internal Server Error", nil); err != nil {
+			p.logger.Error("failed to send 500", "err", err)
+		}
+		return
+	}
+	c.mu.Unlock()
+
 	p.registerCall(c)
 
 	p.logger.Info("incoming call", "from", from, "to", to)
@@ -659,7 +673,9 @@ func (p *phone) handleDialogInvite(dlg dialog, from, to, sdpBody string) {
 			// Set up video if remote offers it.
 			if vm := sess.VideoMedia(); vm != nil && len(vm.Codecs) > 0 {
 				c.mu.Lock()
-				c.ensureVideoRTPPort()
+				if err := c.ensureVideoRTPPort(); err != nil {
+					p.logger.Warn("video RTP port allocation failed, video disabled", "error", err)
+				}
 				c.mu.Unlock()
 			}
 		}
@@ -745,6 +761,10 @@ func (p *phone) handleIncoming(from, to string) {
 	dlg := newPhoneDialog()
 	c := newInboundCall(dlg)
 	c.logger = p.logger
+	c.sipHost = p.cfg.Host
+	c.localIP = p.localIP
+	c.rtpPortMin = p.cfg.RTPPortMin
+	c.rtpPortMax = p.cfg.RTPPortMax
 	p.applyCallConfig(c)
 	p.registerCall(c)
 

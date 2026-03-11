@@ -1,6 +1,7 @@
 package xphone
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -387,7 +388,10 @@ func (c *call) AddVideo(codecs ...VideoCodec) error {
 	// Store video codec preferences and allocate video port.
 	c.opts.VideoCodecs = codecs
 	c.opts.Video = true
-	c.ensureVideoRTPPort()
+	if err := c.ensureVideoRTPPort(); err != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("xphone: %w", err)
+	}
 
 	// Build SDP offer with audio + video.
 	sdpOffer := c.buildLocalSDP(sdp.DirSendRecv)

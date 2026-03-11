@@ -1,9 +1,23 @@
 # Changelog
 
-## Unreleased
+## v0.3.2
+
+### Media
+- `PacedPCMWriter()` channel for TTS burst audio — auto-frames and paces arbitrary-length PCM at 20ms intervals
+
+### Bug fixes
+- Fix concurrent inbound calls getting `m=audio 0` in SDP by eagerly allocating RTP port
 
 ### CI
 - Add changelog check: PRs now require a CHANGELOG.md entry
+
+### Tests
+- FakePBX integration tests for multiple simultaneous calls and PacedPCMWriter
+
+## v0.3.1
+
+### Internal
+- Reduce cyclomatic complexity in hotspot functions
 
 ## v0.3.0
 

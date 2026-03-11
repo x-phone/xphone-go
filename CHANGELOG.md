@@ -4,6 +4,7 @@
 
 ### Docs
 - Add PacedPCMWriter documentation to README
+- Add RTP port range documentation to README
 
 ## v0.3.2
 

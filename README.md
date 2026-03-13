@@ -35,12 +35,12 @@ Connect a real phone number directly to your LLM pipeline. No cloud telephony pl
 ```
 DID (phone number)
     +-- SIP Trunk (Telnyx, Twilio SIP, Vonage...)
-            +-- xphone
+            +-- xphone (Phone mode or Server mode)
                     |-- PCMReader -> Whisper / Deepgram (speech-to-text)
                     +-- PacedPCMWriter <- ElevenLabs / TTS (text-to-speech)
 ```
 
-Your bot gets a real phone number, registers directly with a SIP trunk provider, and handles calls end-to-end — no Asterisk, no middleman, no per-minute platform fees.
+Your bot gets a real phone number and handles calls end-to-end — no Asterisk, no middleman, no per-minute platform fees. Use Phone mode to register with the trunk, or Server mode to receive INVITEs directly on a public IP.
 
 ### Softphones & Click-to-Call
 Embed a SIP phone into any Go application. Accept calls, dial out, hold, transfer — all from code. Works against any SIP PBX (Asterisk, FreeSWITCH, 3CX, Cisco) or directly to a SIP trunk.
@@ -52,13 +52,52 @@ Tap into the PCM audio stream on any call and write it to disk, stream it to S3,
 Programmatically dial numbers, play audio, detect DTMF responses — classic IVR automation without the IVR infrastructure.
 
 ### Unit-testable Call Flows
-`MockPhone` and `MockCall` implement the full `Phone` and `Call` interfaces. Test every branch of your call logic — accept, reject, hold, transfer, DTMF, hangup — without a real SIP server or network. This is a first-class design goal, not an afterthought.
+`MockPhone` and `MockCall` implement the full `Phone` and `Call` interfaces. Test every branch of your call logic — accept, reject, hold, transfer, DTMF, hangup — without a real SIP server or network. Server mode calls use the same `Call` interface, so mock tests cover both modes. This is a first-class design goal, not an afterthought.
 
 ---
 
+## Connection Modes
+
+xphone supports two ways to connect to the SIP world. Both produce the same `Call` interface — the downstream API (Accept, End, SendDTMF, PCMReader/Writer) is identical.
+
+### Phone mode (SIP client)
+
+Registers with a SIP server like a normal endpoint. Use this with SIP trunks (Telnyx, Vonage), PBXes (Asterisk, FreeSWITCH), or any SIP registrar:
+
+```go
+phone := xphone.New(
+    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
+)
+phone.OnIncoming(func(call xphone.Call) { call.Accept() })
+phone.Connect(ctx)
+```
+
+### Server mode (SIP trunk)
+
+Accepts and places calls directly with trusted SIP peers — no registration required. Use this when trunk providers (Twilio SIP Trunk, Telnyx) send INVITEs to your public IP, or when a PBX routes calls to your application:
+
+```go
+server := xphone.NewServer(xphone.ServerConfig{
+    Listen:     "0.0.0.0:5080",
+    RTPPortMin: 10000,
+    RTPPortMax: 20000,
+    RTPAddress: "203.0.113.1",  // your public IP
+    Peers: []xphone.PeerConfig{
+        {Name: "twilio", Hosts: []string{"54.172.60.0/30", "54.244.51.0/30"}},
+        {Name: "office-pbx", Host: "192.168.1.10"},
+    },
+})
+server.OnIncoming(func(call xphone.Call) { call.Accept() })
+server.Listen(ctx)
+```
+
+Peers are authenticated by IP/CIDR or SIP digest auth. Per-peer codec and RTP address overrides are supported.
+
+> **Which mode?** Use **Phone** when you register to a SIP server (most setups). Use **Server** when SIP peers send INVITEs directly to your application (Twilio SIP Trunk, direct PBX routing, peer-to-peer).
+
 ## No PBX required
 
-A common misconception: you don't need Asterisk or FreeSWITCH to use xphone. A SIP trunk is just a SIP server — xphone registers with it directly, exactly like a desk phone would.
+A common misconception: you don't need Asterisk or FreeSWITCH to use xphone. A SIP trunk is just a SIP server — xphone registers with it directly (Phone mode), or sends INVITEs straight to your app (Server mode).
 
 ```go
 phone := xphone.New(
@@ -178,6 +217,11 @@ go func() {
 
 | Feature | Status |
 |---|---|
+| **Connection modes** | |
+| Phone mode (SIP client with REGISTER) | Done |
+| Server mode (SIP trunk, no registration) | Done |
+| Peer authentication (IP/CIDR + digest auth) | Done |
+| Per-peer RTP address and codec overrides | Done |
 | **Calling** | |
 | SIP Registration (auth, keepalive, auto-reconnect) | Done |
 | Inbound & outbound calls | Done |
@@ -590,10 +634,11 @@ call.InjectRTP(pkt)
 
 ## Integration Tests
 
-**[FakePBX](https://github.com/x-phone/fakepbx) (no Docker required)** — fast, in-process SIP tests that cover registration, dial, BYE, hold, DTMF, RTP, busy, and provisionals. These run with the standard test suite:
+**[FakePBX](https://github.com/x-phone/fakepbx) (no Docker required)** — fast, in-process SIP tests that cover registration, dial, BYE, hold, DTMF, RTP, busy, provisionals, and server mode (inbound/outbound, peer auth, concurrent calls). These run with the standard test suite:
 
 ```bash
-go test -v -run TestFakePBX ./...
+go test -v -run TestFakePBX ./...          # Phone mode tests
+go test -v -run TestServerFakePBX ./...    # Server mode tests
 ```
 
 **Asterisk via Docker** — full end-to-end tests against a real PBX:

@@ -412,13 +412,27 @@ func (s *server) registerHandlers() {
 	})
 
 	s.srv.OnAck(func(req *sip.Request, tx sip.ServerTransaction) {
-		s.ds.ReadAck(req, tx)
+		s.mu.Lock()
+		ds := s.ds
+		s.mu.Unlock()
+		if ds == nil {
+			return
+		}
+		ds.ReadAck(req, tx)
 	})
 
 	s.srv.OnBye(func(req *sip.Request, tx sip.ServerTransaction) {
-		err := s.ds.ReadBye(req, tx)
-		if err != nil {
-			err = s.dc.ReadBye(req, tx)
+		s.mu.Lock()
+		ds, dc := s.ds, s.dc
+		s.mu.Unlock()
+		if ds == nil {
+			res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+			tx.Respond(res)
+			return
+		}
+		err := ds.ReadBye(req, tx)
+		if err != nil && dc != nil {
+			err = dc.ReadBye(req, tx)
 		}
 		if err != nil {
 			res := sip.NewResponseFromRequest(req, 200, "OK", nil)
@@ -532,7 +546,14 @@ func (s *server) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
-	sess, err := s.ds.ReadInvite(req, tx)
+	s.mu.Lock()
+	ds := s.ds
+	s.mu.Unlock()
+	if ds == nil {
+		return
+	}
+
+	sess, err := ds.ReadInvite(req, tx)
 	if err != nil {
 		return
 	}

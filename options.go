@@ -323,3 +323,80 @@ func WithLogger(l *slog.Logger) PhoneOption {
 		c.Logger = l
 	}
 }
+
+// ServerConfig holds all configuration for a Server instance.
+type ServerConfig struct {
+	// Listen is the address to bind the SIP listener on (e.g. "0.0.0.0:5080").
+	Listen string
+	// RTPPortMin is the minimum RTP port to allocate. 0 means OS-assigned.
+	RTPPortMin int
+	// RTPPortMax is the maximum RTP port to allocate. 0 means OS-assigned.
+	RTPPortMax int
+	// RTPAddress is the public IP to advertise in SDP when listening on 0.0.0.0.
+	// If empty, the listen address or auto-detected local IP is used.
+	RTPAddress string
+	// SRTP enables SRTP media encryption (RTP/SAVP with AES_CM_128_HMAC_SHA1_80).
+	SRTP bool
+	// CodecPrefs sets the codec preference order. Default: [PCMU].
+	CodecPrefs []Codec
+	// JitterBuffer sets the jitter buffer depth. Default: 50ms.
+	JitterBuffer time.Duration
+	// MediaTimeout sets the RTP inactivity timeout. Default: 30s.
+	MediaTimeout time.Duration
+	// PCMRate sets the output sample rate for PCMReader. Default: 8000.
+	PCMRate int
+	// DtmfMode controls DTMF signaling mode. Default: DtmfRfc4733.
+	DtmfMode DtmfMode
+	// Peers is the list of trusted SIP peers that can send/receive calls.
+	Peers []PeerConfig
+	// Logger sets the structured logger. Default: slog.Default().
+	Logger *slog.Logger
+}
+
+// PeerConfig defines a trusted SIP peer for Server mode.
+type PeerConfig struct {
+	// Name is a human-readable identifier for this peer (e.g. "office-pbx", "twilio").
+	Name string
+	// Host is a single IP address for this peer. Checked during IP-based auth.
+	Host string
+	// Hosts is a list of IP addresses and/or CIDR ranges (e.g. "54.172.60.0/30").
+	Hosts []string
+	// Port is the SIP port for this peer. Default: 5060.
+	Port int
+	// Auth enables SIP digest authentication for this peer.
+	Auth *PeerAuthConfig
+	// RTPAddress overrides the server-level RTPAddress for this peer.
+	// Use when this peer needs to see a different IP in SDP (e.g. different
+	// network interface). Empty means use the server-level setting.
+	RTPAddress string
+	// Codecs restricts the codecs offered/accepted for this peer.
+	// Empty means accept any codec from the server-level CodecPrefs.
+	Codecs []Codec
+}
+
+// PeerAuthConfig holds SIP digest authentication credentials for a peer.
+type PeerAuthConfig struct {
+	Username string
+	Password string
+}
+
+// applyServerDefaults fills zero-value ServerConfig fields with sensible defaults.
+func applyServerDefaults(cfg *ServerConfig) {
+	if cfg.Listen == "" {
+		cfg.Listen = "0.0.0.0:5060"
+	}
+	if cfg.MediaTimeout == 0 {
+		cfg.MediaTimeout = 30 * time.Second
+	}
+	if cfg.JitterBuffer == 0 {
+		cfg.JitterBuffer = 50 * time.Millisecond
+	}
+	if cfg.PCMRate == 0 {
+		cfg.PCMRate = 8000
+	}
+	for i := range cfg.Peers {
+		if cfg.Peers[i].Port == 0 {
+			cfg.Peers[i].Port = 5060
+		}
+	}
+}

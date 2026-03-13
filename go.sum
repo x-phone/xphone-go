@@ -33,6 +33,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/x-phone/fakepbx v0.1.0 h1:9u6Wc8AALzDbePahQU+2weYTkbdiVkiBq0iDsNCenEk=
 github.com/x-phone/fakepbx v0.1.0/go.mod h1:1fuiina3JLHNWtjFpjYSHDQRrCLEdcqzOB1SCW/UACY=
+github.com/x-phone/fakepbx v0.2.0 h1:lZyHqZc32KqcLsnqZu3wW//IM8alVVPoTwvszyTcwVs=
+github.com/x-phone/fakepbx v0.2.0/go.mod h1:1fuiina3JLHNWtjFpjYSHDQRrCLEdcqzOB1SCW/UACY=
 golang.org/x/sync v0.16.0 h1:ycBJEhp9p4vXvUZNszeOq0kGTPghopOL8q0fq3vstxw=
 golang.org/x/sync v0.16.0/go.mod h1:1dzgHSNfp02xaA81J2MS99Qcpr2w7fw1gpm99rleRqA=
 golang.org/x/sys v0.6.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=

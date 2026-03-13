@@ -42,4 +42,12 @@ var (
 	ErrSubscriptionNotFound = errors.New("xphone: subscription not found")
 	// ErrVideoAlreadyActive is returned when AddVideo is called on a call that already has video.
 	ErrVideoAlreadyActive = errors.New("xphone: video already active")
+	// ErrAlreadyListening is returned when Listen is called on a server that is already listening.
+	ErrAlreadyListening = errors.New("xphone: server already listening")
+	// ErrNotListening is returned when an operation requires the server to be listening.
+	ErrNotListening = errors.New("xphone: server not listening")
+	// ErrPeerNotFound is returned when a dial target references an unknown peer name.
+	ErrPeerNotFound = errors.New("xphone: peer not found")
+	// ErrPeerRejected is returned when an incoming request fails peer authentication.
+	ErrPeerRejected = errors.New("xphone: peer authentication failed")
 )

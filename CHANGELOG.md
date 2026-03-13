@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Server mode
+- `Server` connection mode: accept and place calls directly with trusted SIP peers without registration
+- Peer authentication: IP/CIDR matching + SIP digest auth (RFC 2617)
+- Per-peer RTP address and codec overrides
+- Stale call reaper (30s setup TTL, 4h active TTL)
+- FakePBX integration tests for inbound/outbound calls, RTP, DTMF, peer rejection
+
 ### Docs
 - Add PacedPCMWriter documentation to README
 - Add RTP port range documentation to README

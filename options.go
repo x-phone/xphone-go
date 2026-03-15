@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -20,6 +21,17 @@ type Config struct {
 	RegisterExpiry   time.Duration
 	RegisterRetry    time.Duration
 	RegisterMaxRetry int
+
+	// OutboundProxy is the SIP URI to route outbound INVITEs through (e.g. "sip:proxy.example.com:5060").
+	// When set, the initial INVITE is sent to this address instead of Host.
+	// Registration still goes to Host. In-dialog requests use the route set from Record-Route.
+	OutboundProxy string
+	// OutboundUsername is the SIP digest username for outbound INVITE auth (401/407).
+	// Falls back to Username if empty.
+	OutboundUsername string
+	// OutboundPassword is the SIP digest password for outbound INVITE auth (401/407).
+	// Falls back to Password if empty.
+	OutboundPassword string
 
 	NATKeepaliveInterval time.Duration
 
@@ -169,6 +181,22 @@ func New(opts ...PhoneOption) Phone {
 	return newPhone(cfg)
 }
 
+// hasURIParam checks if a SIP URI contains a specific parameter.
+// Matches ";param" at end of string or followed by ";", ">", or "?".
+func hasURIParam(uri, param string) bool {
+	target := ";" + param
+	idx := strings.Index(uri, target)
+	if idx < 0 {
+		return false
+	}
+	end := idx + len(target)
+	if end == len(uri) {
+		return true // ";param" at end of string
+	}
+	next := uri[end]
+	return next == ';' || next == '>' || next == '?'
+}
+
 // normalizeHost splits an embedded port from cfg.Host (e.g. "10.0.0.7:5060")
 // into the separate Host and Port fields. Only applies when Port is still at
 // the zero value — an explicit Port setting takes precedence.
@@ -304,6 +332,32 @@ func WithTurnCredentials(username, password string) PhoneOption {
 func WithICE(enabled bool) PhoneOption {
 	return func(c *Config) {
 		c.ICE = enabled
+	}
+}
+
+// WithOutboundProxy sets the SIP URI to route outbound INVITEs through.
+// Registration still goes to the configured Host. In-dialog requests
+// (re-INVITE, BYE) use the route set established via Record-Route.
+// Example: "sip:proxy.example.com:5060"
+func WithOutboundProxy(uri string) PhoneOption {
+	return func(c *Config) {
+		// Ensure loose-routing parameter is present (RFC 3261 §16.6).
+		// Check for ";lr" at end of string or followed by ";" / ">" / "?"
+		// to avoid false-matching parameters like ";lrfoo".
+		if uri != "" && !hasURIParam(uri, "lr") {
+			uri += ";lr"
+		}
+		c.OutboundProxy = uri
+	}
+}
+
+// WithOutboundCredentials sets separate SIP digest credentials for outbound
+// INVITE authentication (401/407 challenges). When unset, the registration
+// credentials (Username/Password) are used for all requests.
+func WithOutboundCredentials(username, password string) PhoneOption {
+	return func(c *Config) {
+		c.OutboundUsername = username
+		c.OutboundPassword = password
 	}
 }
 

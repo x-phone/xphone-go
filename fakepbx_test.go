@@ -706,3 +706,73 @@ func TestFakePBX_PacedPCMWriter(t *testing.T) {
 
 	c.End()
 }
+
+// F18: CustomHeaders are applied to outbound INVITE.
+func TestFakePBX_DialWithCustomHeaders(t *testing.T) {
+	pbx := fakepbx.NewFakePBX(t, fakepbx.WithAuth("1001", "test"))
+	_, rtpPort := bindRTP(t)
+
+	paiCh := make(chan string, 1)
+	pbx.OnInvite(func(inv *fakepbx.Invite) {
+		val := ""
+		if h := inv.Request().GetHeader("P-Asserted-Identity"); h != nil {
+			val = h.Value()
+		}
+		paiCh <- val
+		inv.Trying()
+		inv.Ringing()
+		inv.Answer(fakepbx.SDP("127.0.0.1", rtpPort, fakepbx.PCMA))
+	})
+
+	p := connectPBX(t, pbx)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, err := p.Dial(ctx, "9999",
+		WithHeader("P-Asserted-Identity", "sip:+15559876543@trunk.example.com"),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, StateActive, c.State())
+
+	select {
+	case pai := <-paiCh:
+		assert.Equal(t, "sip:+15559876543@trunk.example.com", pai)
+	case <-time.After(2 * time.Second):
+		t.Fatal("never received INVITE")
+	}
+
+	c.End()
+}
+
+// F19: OutboundProxy routes INVITE to proxy instead of registrar.
+func TestFakePBX_OutboundProxy(t *testing.T) {
+	// Create two FakePBX instances: one as registrar, one as outbound proxy.
+	registrar := fakepbx.NewFakePBX(t, fakepbx.WithAuth("1001", "test"))
+	proxy := fakepbx.NewFakePBX(t)
+	_, rtpPort := bindRTP(t)
+
+	// The proxy handles the INVITE, not the registrar.
+	proxy.OnInvite(func(inv *fakepbx.Invite) {
+		inv.Trying()
+		inv.Ringing()
+		inv.Answer(fakepbx.SDP("127.0.0.1", rtpPort, fakepbx.PCMA))
+	})
+
+	// Connect using the registrar, but with proxy as outbound proxy.
+	cfg := pbxConfig(t, registrar)
+	cfg.OutboundProxy = "sip:" + proxy.Addr()
+	p := connectWithConfig(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, err := p.Dial(ctx, "9999")
+	require.NoError(t, err)
+	assert.Equal(t, StateActive, c.State())
+
+	// Proxy should have received the INVITE, not the registrar.
+	assert.GreaterOrEqual(t, proxy.InviteCount(), 1, "proxy should receive INVITE")
+
+	c.End()
+}

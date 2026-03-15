@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Features
+- Outbound proxy support: `WithOutboundProxy("sip:proxy.example.com:5060")` routes INVITEs through a proxy
+- Separate outbound credentials: `WithOutboundCredentials("trunk-user", "trunk-pass")` for INVITE auth
+- `WithHeader()` / `DialOptions.CustomHeaders` now applied to outbound INVITEs (previously ignored)
+
 ### Bug fixes
 - `Connect()` now returns an error when SIP registration fails (previously always returned nil)
 - "phone connected" log no longer emits on registration failure

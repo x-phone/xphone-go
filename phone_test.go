@@ -867,6 +867,30 @@ func TestPhone_AttendedTransferRejectsInactiveCallB(t *testing.T) {
 	assert.ErrorIs(t, p.AttendedTransfer(callA, callB), ErrInvalidState)
 }
 
+func TestPhone_ConnectReturnsErrorOnRegistrationFailure(t *testing.T) {
+	cfg := testConfig()
+	cfg.RegisterMaxRetry = 1
+	cfg.RegisterRetry = 10 * time.Millisecond
+
+	tr := testutil.NewMockTransport()
+	tr.FailNext(2) // fail both initial REGISTER and the retry
+
+	p := newPhone(cfg)
+	err := p.connectWithTransport(tr)
+	require.Error(t, err, "connectWithTransport should return error on registration failure")
+	assert.Equal(t, PhoneStateRegistrationFailed, p.State())
+}
+
+func TestPhone_ConnectReturnsNilOnSuccess(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+
+	p := newPhone(testConfig())
+	err := p.connectWithTransport(tr)
+	require.NoError(t, err)
+	assert.Equal(t, PhoneStateRegistered, p.State())
+}
+
 func TestPhone_AttendedTransferNotifyNon200KeepsCallsAlive(t *testing.T) {
 	tr := testutil.NewMockTransport()
 	tr.RespondWith(200, "OK")

@@ -5,6 +5,7 @@
 ### Bug fixes
 - `Connect()` now returns an error when SIP registration fails (previously always returned nil)
 - "phone connected" log no longer emits on registration failure
+- `WithCredentials` now accepts `host:port` format (e.g. `"10.0.0.7:5060"`) — previously caused malformed SIP URIs
 
 ## v0.4.0
 

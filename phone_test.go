@@ -147,6 +147,71 @@ func TestNew_DefaultState(t *testing.T) {
 	assert.Equal(t, PhoneStateDisconnected, p.State())
 }
 
+// --- Host:Port parsing ---
+
+func TestNormalizeHost_SplitsHostPort(t *testing.T) {
+	cfg := Config{Host: "10.0.0.7:5061"}
+	normalizeHost(&cfg)
+	assert.Equal(t, "10.0.0.7", cfg.Host)
+	assert.Equal(t, 5061, cfg.Port)
+}
+
+func TestNormalizeHost_HostOnly(t *testing.T) {
+	cfg := Config{Host: "10.0.0.7"}
+	normalizeHost(&cfg)
+	assert.Equal(t, "10.0.0.7", cfg.Host)
+	assert.Equal(t, 0, cfg.Port) // unchanged
+}
+
+func TestNormalizeHost_HostnameWithPort(t *testing.T) {
+	cfg := Config{Host: "sip.example.com:5080"}
+	normalizeHost(&cfg)
+	assert.Equal(t, "sip.example.com", cfg.Host)
+	assert.Equal(t, 5080, cfg.Port)
+}
+
+func TestNormalizeHost_IPv6BracketWithPort(t *testing.T) {
+	cfg := Config{Host: "[::1]:5060"}
+	normalizeHost(&cfg)
+	assert.Equal(t, "::1", cfg.Host)
+	assert.Equal(t, 5060, cfg.Port)
+}
+
+func TestNormalizeHost_BareIPv6NoSplit(t *testing.T) {
+	cfg := Config{Host: "::1"}
+	normalizeHost(&cfg)
+	assert.Equal(t, "::1", cfg.Host)
+	assert.Equal(t, 0, cfg.Port)
+}
+
+func TestNormalizeHost_ExplicitPortWins(t *testing.T) {
+	cfg := Config{Host: "10.0.0.7:5080", Port: 9999}
+	normalizeHost(&cfg)
+	assert.Equal(t, "10.0.0.7", cfg.Host) // host still stripped
+	assert.Equal(t, 9999, cfg.Port)       // explicit port preserved
+}
+
+func TestNormalizeHost_InvalidPortIgnored(t *testing.T) {
+	cfg := Config{Host: "10.0.0.7:notaport"}
+	normalizeHost(&cfg)
+	assert.Equal(t, "10.0.0.7:notaport", cfg.Host) // unchanged
+	assert.Equal(t, 0, cfg.Port)
+}
+
+func TestNormalizeHost_EmptyHost(t *testing.T) {
+	cfg := Config{}
+	normalizeHost(&cfg)
+	assert.Equal(t, "", cfg.Host)
+}
+
+func TestWithCredentials_HostPortSplit(t *testing.T) {
+	p := New(
+		WithCredentials("1002", "password123", "10.0.0.7:5060"),
+	).(*phone)
+	assert.Equal(t, "10.0.0.7", p.cfg.Host)
+	assert.Equal(t, 5060, p.cfg.Port)
+}
+
 // --- Connect ---
 
 func TestPhone_ConnectAlreadyConnectedReturnsError(t *testing.T) {

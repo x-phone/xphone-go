@@ -33,6 +33,28 @@ func TestNewServer_PeerDefaults(t *testing.T) {
 	}
 }
 
+func TestNewServer_PeerHostPortSplit(t *testing.T) {
+	srv := NewServer(ServerConfig{
+		Peers: []PeerConfig{
+			{Name: "with-port", Host: "10.0.0.1:5080"},
+			{Name: "without-port", Host: "10.0.0.2"},
+		},
+	})
+	s := srv.(*server)
+	if s.cfg.Peers[0].Host != "10.0.0.1" {
+		t.Errorf("peer host = %q, want 10.0.0.1", s.cfg.Peers[0].Host)
+	}
+	if s.cfg.Peers[0].Port != 5080 {
+		t.Errorf("peer port = %d, want 5080", s.cfg.Peers[0].Port)
+	}
+	if s.cfg.Peers[1].Host != "10.0.0.2" {
+		t.Errorf("peer host = %q, want 10.0.0.2", s.cfg.Peers[1].Host)
+	}
+	if s.cfg.Peers[1].Port != 5060 {
+		t.Errorf("peer port = %d, want 5060 (default)", s.cfg.Peers[1].Port)
+	}
+}
+
 func TestNewServer_WithConfig(t *testing.T) {
 	srv := NewServer(ServerConfig{
 		Listen:     "0.0.0.0:5080",

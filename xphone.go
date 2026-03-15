@@ -273,7 +273,6 @@ func (p *phone) connectWithTransport(tr sipTransport) error {
 	}
 
 	if err != nil {
-		p.logger.Error("phone connected but registration failed", "err", err)
 		return err
 	}
 	p.logger.Info("phone connected")

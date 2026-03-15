@@ -154,7 +154,17 @@ func TestWithOutboundProxy(t *testing.T) {
 		WithCredentials("1001", "secret", "pbx.example.com"),
 		WithOutboundProxy("sip:proxy.example.com:5060"),
 	).(*phone)
-	assert.Equal(t, "sip:proxy.example.com:5060", p.cfg.OutboundProxy)
+	// WithOutboundProxy normalises the URI by appending ";lr" for loose routing.
+	assert.Equal(t, "sip:proxy.example.com:5060;lr", p.cfg.OutboundProxy)
+}
+
+func TestWithOutboundProxy_AlreadyHasLR(t *testing.T) {
+	p := New(
+		WithCredentials("1001", "secret", "pbx.example.com"),
+		WithOutboundProxy("sip:proxy.example.com:5060;lr"),
+	).(*phone)
+	// Should not double-append ";lr".
+	assert.Equal(t, "sip:proxy.example.com:5060;lr", p.cfg.OutboundProxy)
 }
 
 func TestWithOutboundCredentials(t *testing.T) {

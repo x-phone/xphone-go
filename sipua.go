@@ -243,20 +243,20 @@ func (s *sipUA) dialOnce(ctx context.Context, target string, opts DialOptions, o
 	extraHeaders = append(extraHeaders, sip.NewHeader("Content-Type", contentTypeSDP))
 
 	// Apply custom headers from DialOptions (e.g. P-Asserted-Identity).
+	// Skip Content-Type to avoid duplicating the one already set above.
 	for name, value := range opts.CustomHeaders {
+		if strings.EqualFold(name, "Content-Type") {
+			continue
+		}
 		extraHeaders = append(extraHeaders, sip.NewHeader(name, value))
 	}
 
 	// Route the INVITE through the outbound proxy when configured.
 	// Per RFC 3261 §8.1.2, the Route header forces the request through
 	// the proxy while keeping the Request-URI pointing to the target.
-	// The "lr" parameter indicates loose routing.
+	// The ";lr" parameter is normalised at config time by WithOutboundProxy.
 	if s.cfg.OutboundProxy != "" {
-		routeURI := s.cfg.OutboundProxy
-		if !strings.Contains(routeURI, ";lr") {
-			routeURI += ";lr"
-		}
-		extraHeaders = append(extraHeaders, sip.NewHeader("Route", "<"+routeURI+">"))
+		extraHeaders = append(extraHeaders, sip.NewHeader("Route", "<"+s.cfg.OutboundProxy+">"))
 	}
 
 	sess, err := s.dc.Invite(ctx, recipient, []byte(sdpOffer), extraHeaders...)

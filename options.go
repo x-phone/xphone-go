@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -324,6 +325,10 @@ func WithICE(enabled bool) PhoneOption {
 // Example: "sip:proxy.example.com:5060"
 func WithOutboundProxy(uri string) PhoneOption {
 	return func(c *Config) {
+		// Ensure loose-routing parameter is present (RFC 3261 §16.6).
+		if uri != "" && !strings.Contains(uri, ";lr") {
+			uri += ";lr"
+		}
 		c.OutboundProxy = uri
 	}
 }

@@ -327,7 +327,15 @@ func (p *phone) Connect(ctx context.Context) error {
 	tr.mu.Unlock()
 	tr.startServer()
 
-	return p.connectWithTransport(tr)
+	if err := p.connectWithTransport(tr); err != nil {
+		tr.Close()
+		p.mu.Lock()
+		p.tr = nil
+		p.state = PhoneStateDisconnected
+		p.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (p *phone) Disconnect() error {

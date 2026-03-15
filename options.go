@@ -404,6 +404,26 @@ type PeerAuthConfig struct {
 	Password string
 }
 
+// normalizePeerHost splits an embedded port from PeerConfig.Host (e.g. "10.0.0.1:5080")
+// into the separate Host and Port fields. Same logic as normalizeHost for Config.
+func normalizePeerHost(p *PeerConfig) {
+	if p.Host == "" {
+		return
+	}
+	host, portStr, err := net.SplitHostPort(p.Host)
+	if err != nil {
+		return
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return
+	}
+	p.Host = host
+	if p.Port == 0 {
+		p.Port = port
+	}
+}
+
 // applyServerDefaults fills zero-value ServerConfig fields with sensible defaults.
 func applyServerDefaults(cfg *ServerConfig) {
 	if cfg.Listen == "" {
@@ -419,6 +439,7 @@ func applyServerDefaults(cfg *ServerConfig) {
 		cfg.PCMRate = 8000
 	}
 	for i := range cfg.Peers {
+		normalizePeerHost(&cfg.Peers[i])
 		if cfg.Peers[i].Port == 0 {
 			cfg.Peers[i].Port = 5060
 		}

@@ -213,8 +213,9 @@ func (p *phone) transportDial(ctx context.Context, target string, _ DialOptions,
 
 // connectWithTransport is a test hook that connects with a mock transport.
 // It performs registration (consuming the queued 200 OK) and wires up the
-// incoming INVITE handler on the transport.
-func (p *phone) connectWithTransport(tr sipTransport) {
+// incoming INVITE handler on the transport. Returns the registration error
+// (if any) so Connect() can propagate it to the caller.
+func (p *phone) connectWithTransport(tr sipTransport) error {
 	p.mu.Lock()
 	p.tr = tr
 	if p.dialFn == nil {
@@ -271,7 +272,11 @@ func (p *phone) connectWithTransport(tr sipTransport) {
 		p.mu.Unlock()
 	}
 
+	if err != nil {
+		return err
+	}
 	p.logger.Info("phone connected")
+	return nil
 }
 
 func (p *phone) Connect(ctx context.Context) error {
@@ -322,7 +327,14 @@ func (p *phone) Connect(ctx context.Context) error {
 	tr.mu.Unlock()
 	tr.startServer()
 
-	p.connectWithTransport(tr)
+	if err := p.connectWithTransport(tr); err != nil {
+		tr.Close()
+		p.mu.Lock()
+		p.tr = nil
+		p.state = PhoneStateDisconnected
+		p.mu.Unlock()
+		return err
+	}
 	return nil
 }
 

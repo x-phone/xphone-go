@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Bug fixes
+- `Connect()` now returns an error when SIP registration fails (previously always returned nil)
+- "phone connected" log no longer emits on registration failure
+
 ## v0.4.0
 
 ### Server mode

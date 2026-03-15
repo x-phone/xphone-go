@@ -3,6 +3,8 @@ package xphone
 import (
 	"crypto/tls"
 	"log/slog"
+	"net"
+	"strconv"
 	"time"
 )
 
@@ -167,8 +169,30 @@ func New(opts ...PhoneOption) Phone {
 	return newPhone(cfg)
 }
 
+// normalizeHost splits an embedded port from cfg.Host (e.g. "10.0.0.7:5060")
+// into the separate Host and Port fields. Only applies when Port is still at
+// the zero value — an explicit Port setting takes precedence.
+func normalizeHost(cfg *Config) {
+	if cfg.Host == "" {
+		return
+	}
+	host, portStr, err := net.SplitHostPort(cfg.Host)
+	if err != nil {
+		return // no embedded port — leave unchanged
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return // invalid port — leave unchanged
+	}
+	cfg.Host = host
+	if cfg.Port == 0 {
+		cfg.Port = port
+	}
+}
+
 // applyDefaults fills zero-value Config fields with sensible defaults.
 func applyDefaults(cfg *Config) {
+	normalizeHost(cfg)
 	if cfg.Transport == "" {
 		cfg.Transport = "udp"
 	}

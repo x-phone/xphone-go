@@ -181,6 +181,22 @@ func New(opts ...PhoneOption) Phone {
 	return newPhone(cfg)
 }
 
+// hasURIParam checks if a SIP URI contains a specific parameter.
+// Matches ";param" at end of string or followed by ";", ">", or "?".
+func hasURIParam(uri, param string) bool {
+	target := ";" + param
+	idx := strings.Index(uri, target)
+	if idx < 0 {
+		return false
+	}
+	end := idx + len(target)
+	if end == len(uri) {
+		return true // ";param" at end of string
+	}
+	next := uri[end]
+	return next == ';' || next == '>' || next == '?'
+}
+
 // normalizeHost splits an embedded port from cfg.Host (e.g. "10.0.0.7:5060")
 // into the separate Host and Port fields. Only applies when Port is still at
 // the zero value — an explicit Port setting takes precedence.
@@ -326,7 +342,9 @@ func WithICE(enabled bool) PhoneOption {
 func WithOutboundProxy(uri string) PhoneOption {
 	return func(c *Config) {
 		// Ensure loose-routing parameter is present (RFC 3261 §16.6).
-		if uri != "" && !strings.Contains(uri, ";lr") {
+		// Check for ";lr" at end of string or followed by ";" / ">" / "?"
+		// to avoid false-matching parameters like ";lrfoo".
+		if uri != "" && !hasURIParam(uri, "lr") {
 			uri += ";lr"
 		}
 		c.OutboundProxy = uri

@@ -147,6 +147,34 @@ func TestNew_DefaultState(t *testing.T) {
 	assert.Equal(t, PhoneStateDisconnected, p.State())
 }
 
+// --- Outbound proxy config ---
+
+func TestWithOutboundProxy(t *testing.T) {
+	p := New(
+		WithCredentials("1001", "secret", "pbx.example.com"),
+		WithOutboundProxy("sip:proxy.example.com:5060"),
+	).(*phone)
+	assert.Equal(t, "sip:proxy.example.com:5060", p.cfg.OutboundProxy)
+}
+
+func TestWithOutboundCredentials(t *testing.T) {
+	p := New(
+		WithCredentials("1001", "secret", "pbx.example.com"),
+		WithOutboundCredentials("trunk-user", "trunk-pass"),
+	).(*phone)
+	assert.Equal(t, "trunk-user", p.cfg.OutboundUsername)
+	assert.Equal(t, "trunk-pass", p.cfg.OutboundPassword)
+}
+
+func TestOutboundCredentials_FallbackToRegistration(t *testing.T) {
+	p := New(
+		WithCredentials("1001", "secret", "pbx.example.com"),
+	).(*phone)
+	// When OutboundUsername/Password are empty, dialOnce should use Username/Password.
+	assert.Empty(t, p.cfg.OutboundUsername)
+	assert.Empty(t, p.cfg.OutboundPassword)
+}
+
 // --- Host:Port parsing ---
 
 func TestNormalizeHost_SplitsHostPort(t *testing.T) {

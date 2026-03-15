@@ -239,8 +239,27 @@ func (s *sipUA) dialOnce(ctx context.Context, target string, opts DialOptions, o
 	// Create the dialog session and send INVITE.
 	// Content-Type must be set explicitly — sipgo doesn't add it automatically,
 	// and without it Asterisk treats the body as non-SDP (late offer).
-	contentType := sip.NewHeader("Content-Type", contentTypeSDP)
-	sess, err := s.dc.Invite(ctx, recipient, []byte(sdpOffer), contentType)
+	var extraHeaders []sip.Header
+	extraHeaders = append(extraHeaders, sip.NewHeader("Content-Type", contentTypeSDP))
+
+	// Apply custom headers from DialOptions (e.g. P-Asserted-Identity).
+	for name, value := range opts.CustomHeaders {
+		extraHeaders = append(extraHeaders, sip.NewHeader(name, value))
+	}
+
+	// Route the INVITE through the outbound proxy when configured.
+	// Per RFC 3261 §8.1.2, the Route header forces the request through
+	// the proxy while keeping the Request-URI pointing to the target.
+	// The "lr" parameter indicates loose routing.
+	if s.cfg.OutboundProxy != "" {
+		routeURI := s.cfg.OutboundProxy
+		if !strings.Contains(routeURI, ";lr") {
+			routeURI += ";lr"
+		}
+		extraHeaders = append(extraHeaders, sip.NewHeader("Route", "<"+routeURI+">"))
+	}
+
+	sess, err := s.dc.Invite(ctx, recipient, []byte(sdpOffer), extraHeaders...)
 	if err != nil {
 		rtpConn.Close()
 		if videoRtpConn != nil {
@@ -263,6 +282,16 @@ func (s *sipUA) dialOnce(ctx context.Context, target string, opts DialOptions, o
 		}
 	}()
 
+	// Resolve outbound credentials (fall back to registration credentials).
+	authUser := s.cfg.OutboundUsername
+	if authUser == "" {
+		authUser = s.cfg.Username
+	}
+	authPass := s.cfg.OutboundPassword
+	if authPass == "" {
+		authPass = s.cfg.Password
+	}
+
 	// WaitAnswer blocks until 200 OK (or failure/cancel).
 	// The OnResponse callback fires for each provisional and final response.
 	err = sess.WaitAnswer(waitCtx, sipgo.AnswerOptions{
@@ -272,8 +301,8 @@ func (s *sipUA) dialOnce(ctx context.Context, target string, opts DialOptions, o
 			}
 			return nil
 		},
-		Username: s.cfg.Username,
-		Password: s.cfg.Password,
+		Username: authUser,
+		Password: authPass,
 	})
 	if err != nil {
 		// Check for 3xx redirect.

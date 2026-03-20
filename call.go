@@ -1252,6 +1252,7 @@ func (c *call) SendDTMF(digit string) error {
 	if err != nil {
 		return err
 	}
+	var sendErr error
 	for _, pkt := range pkts {
 		if sentRTP != nil {
 			sendDropOldest(sentRTP, pkt)
@@ -1264,9 +1265,14 @@ func (c *call) SendDTMF(digit string) error {
 						continue
 					}
 				}
-				conn.WriteTo(data, addr)
+				if _, err := conn.WriteTo(data, addr); err != nil && sendErr == nil {
+					sendErr = err
+				}
 			}
 		}
+	}
+	if sendErr != nil {
+		c.logger.Warn("DTMF WriteTo failed", "id", c.id, "digit", digit, "dst", addr, "error", sendErr)
 	}
 	return nil
 }

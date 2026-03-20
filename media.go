@@ -120,7 +120,9 @@ func (s *mediaStream) sendRTP(pkt *rtp.Packet, stats *rtcp.Stats, sentCh chan *r
 }
 
 // sendRTCP builds and sends an RTCP Sender Report, optionally SRTCP-protected.
-func (s *mediaStream) sendRTCP(stats *rtcp.Stats, conn net.PacketConn, dst net.Addr, srtcpOut *srtp.Context) {
+func (s *mediaStream) sendRTCP(stats *rtcp.Stats, srtcpOut *srtp.Context) {
+	conn := s.rtcpConn
+	dst := s.rtcpRemoteAddr
 	if conn == nil || dst == nil {
 		return
 	}
@@ -210,7 +212,6 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 	timeout := s.timeout
 	conn := s.conn
 	rtcpConn := s.rtcpConn
-	rtcpRemoteAddr := s.rtcpRemoteAddr
 	done := s.done
 
 	mediaTimer := time.NewTimer(timeout)
@@ -364,7 +365,7 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 			c.mu.Lock()
 			srtcpOut := c.srtpOut
 			c.mu.Unlock()
-			s.sendRTCP(rtcpStats, rtcpConn, rtcpRemoteAddr, srtcpOut)
+			s.sendRTCP(rtcpStats, srtcpOut)
 
 		case data := <-rtcpInbound:
 			c.mu.Lock()
@@ -550,7 +551,6 @@ func (s *mediaStream) runVideo() {
 	defer c.videoWg.Done()
 	conn := s.conn
 	rtcpConn := s.rtcpConn
-	rtcpRemoteAddr := s.rtcpRemoteAddr
 	done := s.done
 
 	defer c.closeVideoOutputChannels()
@@ -667,7 +667,7 @@ func (s *mediaStream) runVideo() {
 			c.mu.Lock()
 			srtcpOut := c.videoSrtpOut
 			c.mu.Unlock()
-			s.sendRTCP(rtcpStats, rtcpConn, rtcpRemoteAddr, srtcpOut)
+			s.sendRTCP(rtcpStats, srtcpOut)
 
 		case data := <-rtcpInbound:
 			c.mu.Lock()

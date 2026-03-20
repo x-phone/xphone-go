@@ -3,6 +3,7 @@ package xphone
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"log/slog"
 	"net"
 	"strconv"
 	"time"
@@ -46,6 +47,7 @@ type mediaStream struct {
 	inboundCount      int
 	lastDTMFTimestamp uint32
 	lastDTMFSeen      bool
+	sendErrLogged     bool
 }
 
 // clonePacket returns a deep copy of an RTP packet so taps are independent.
@@ -111,11 +113,14 @@ func (s *mediaStream) sendRTP(pkt *rtp.Packet, stats *rtcp.Stats, sentCh chan *r
 			return
 		}
 	}
-	conn.WriteTo(data, dst)
+	if _, err := conn.WriteTo(data, dst); err != nil && !s.sendErrLogged {
+		s.sendErrLogged = true
+		s.call.logger.Warn("RTP WriteTo failed", "id", s.call.id, "dst", dst, "error", err)
+	}
 }
 
 // handleRTCPSend builds and sends an RTCP Sender Report, optionally SRTCP-protected.
-func handleRTCPSend(ssrc uint32, stats *rtcp.Stats, conn net.PacketConn, dst net.Addr, srtcpOut *srtp.Context) {
+func handleRTCPSend(ssrc uint32, stats *rtcp.Stats, conn net.PacketConn, dst net.Addr, srtcpOut *srtp.Context, logger *slog.Logger, callID string) {
 	if conn == nil || dst == nil {
 		return
 	}
@@ -127,7 +132,9 @@ func handleRTCPSend(ssrc uint32, stats *rtcp.Stats, conn net.PacketConn, dst net
 			return
 		}
 	}
-	conn.WriteTo(sr, dst)
+	if _, err := conn.WriteTo(sr, dst); err != nil {
+		logger.Warn("RTCP WriteTo failed", "id", callID, "dst", dst, "error", err)
+	}
 }
 
 // handleRTCPReceive decrypts (if SRTCP) and processes an inbound RTCP packet.
@@ -356,7 +363,7 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 			c.mu.Lock()
 			srtcpOut := c.srtpOut
 			c.mu.Unlock()
-			handleRTCPSend(s.outSSRC, rtcpStats, rtcpConn, rtcpRemoteAddr, srtcpOut)
+			handleRTCPSend(s.outSSRC, rtcpStats, rtcpConn, rtcpRemoteAddr, srtcpOut, c.logger, c.id)
 
 		case data := <-rtcpInbound:
 			c.mu.Lock()
@@ -461,7 +468,7 @@ func (c *call) startMedia() {
 	if conn != nil && c.rtcpConn == nil {
 		rtpLocal := conn.LocalAddr().(*net.UDPAddr)
 		rtcpAddr := net.JoinHostPort(rtpLocal.IP.String(), strconv.Itoa(rtpLocal.Port+1))
-		if rc, err := net.ListenPacket("udp", rtcpAddr); err == nil {
+		if rc, err := net.ListenPacket("udp4", rtcpAddr); err == nil {
 			c.rtcpConn = rc
 		} else {
 			c.logger.Warn("RTCP port bind failed, RTCP disabled", "rtcp_addr", rtcpAddr, "error", err)
@@ -657,7 +664,7 @@ func (s *mediaStream) runVideo() {
 			c.mu.Lock()
 			srtcpOut := c.videoSrtpOut
 			c.mu.Unlock()
-			handleRTCPSend(s.outSSRC, rtcpStats, rtcpConn, rtcpRemoteAddr, srtcpOut)
+			handleRTCPSend(s.outSSRC, rtcpStats, rtcpConn, rtcpRemoteAddr, srtcpOut, c.logger, c.id)
 
 		case data := <-rtcpInbound:
 			c.mu.Lock()
@@ -683,7 +690,7 @@ func (c *call) startVideoMedia() {
 	if conn != nil && c.videoRTCPConn == nil {
 		rtpLocal := conn.LocalAddr().(*net.UDPAddr)
 		rtcpAddr := net.JoinHostPort(rtpLocal.IP.String(), strconv.Itoa(rtpLocal.Port+1))
-		if rc, err := net.ListenPacket("udp", rtcpAddr); err == nil {
+		if rc, err := net.ListenPacket("udp4", rtcpAddr); err == nil {
 			c.videoRTCPConn = rc
 		} else {
 			c.logger.Warn("video RTCP port bind failed", "rtcp_addr", rtcpAddr, "error", err)

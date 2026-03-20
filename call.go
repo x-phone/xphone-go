@@ -573,14 +573,14 @@ func listenRTPPort(min, max int) (net.PacketConn, error) {
 			if p%2 != 0 {
 				continue // RTP uses even ports
 			}
-			conn, err := net.ListenPacket("udp", fmt.Sprintf(":%d", p))
+			conn, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", p))
 			if err == nil {
 				return conn, nil
 			}
 		}
 		return nil, fmt.Errorf("xphone: no available RTP port in range %d-%d", min, max)
 	}
-	return net.ListenPacket("udp", ":0")
+	return net.ListenPacket("udp4", ":0")
 }
 
 // ensureRTPPort lazily allocates a UDP socket and caches the local IP and

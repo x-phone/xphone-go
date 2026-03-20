@@ -480,7 +480,7 @@ func (c *call) startMedia() {
 	// Compute remote RTCP address (remote RTP port + 1).
 	var rtcpRemoteAddr net.Addr
 	if c.remotePort > 0 && c.remoteIP != "" {
-		rtcpRemoteAddr, _ = net.ResolveUDPAddr("udp", net.JoinHostPort(c.remoteIP, strconv.Itoa(c.remotePort+1)))
+		rtcpRemoteAddr, _ = net.ResolveUDPAddr("udp4", net.JoinHostPort(c.remoteIP, strconv.Itoa(c.remotePort+1)))
 	}
 
 	s := c.audioStream
@@ -704,7 +704,7 @@ func (c *call) startVideoMedia() {
 	var rtcpRemoteAddr net.Addr
 	if c.videoRemoteAddr != nil {
 		if udpAddr, ok := c.videoRemoteAddr.(*net.UDPAddr); ok {
-			rtcpRemoteAddr, _ = net.ResolveUDPAddr("udp", net.JoinHostPort(udpAddr.IP.String(), strconv.Itoa(udpAddr.Port+1)))
+			rtcpRemoteAddr, _ = net.ResolveUDPAddr("udp4", net.JoinHostPort(udpAddr.IP.String(), strconv.Itoa(udpAddr.Port+1)))
 		}
 	}
 

@@ -1,8 +1,8 @@
 package xphone
 
 import (
-	"bytes"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -736,7 +736,7 @@ func TestSendRTP_WriteTo_ErrorLoggedOnce(t *testing.T) {
 	c.logger = logger
 
 	s := c.audioStream
-	stats := &rtcp.Stats{}
+	stats := rtcp.NewStats()
 	// Closed conn will return an error on WriteTo.
 	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -753,17 +753,7 @@ func TestSendRTP_WriteTo_ErrorLoggedOnce(t *testing.T) {
 	assert.True(t, s.sendErrLogged, "sendErrLogged must be set after first failure")
 	logged := buf.String()
 	assert.Contains(t, logged, "RTP WriteTo failed")
-	// Count occurrences — should be exactly 1.
-	count := 0
-	for i := 0; i < len(logged); i++ {
-		idx := bytes.Index([]byte(logged[i:]), []byte("RTP WriteTo failed"))
-		if idx < 0 {
-			break
-		}
-		count++
-		i += idx + len("RTP WriteTo failed")
-	}
-	assert.Equal(t, 1, count, "RTP WriteTo error should be logged exactly once")
+	assert.Equal(t, 1, strings.Count(logged, "RTP WriteTo failed"), "RTP WriteTo error should be logged exactly once")
 }
 
 func TestPacedPCMWriter_RTPWriterSuppresses(t *testing.T) {

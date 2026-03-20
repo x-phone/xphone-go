@@ -1,6 +1,8 @@
 package xphone
 
 import (
+	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -8,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/x-phone/xphone-go/internal/media"
+	"github.com/x-phone/xphone-go/internal/rtcp"
 	"github.com/x-phone/xphone-go/testutil"
 )
 
@@ -702,6 +705,55 @@ func TestPacedPCMWriter_QueueOverflow(t *testing.T) {
 	// Pipeline should still work — read a few paced packets.
 	p := readPacket(t, c.sentRTP, 500*time.Millisecond)
 	assert.NotNil(t, p, "should still receive paced packets after overflow")
+}
+
+// --- IPv4 socket and WriteTo error logging tests ---
+
+func TestListenRTPPort_BindsIPv4(t *testing.T) {
+	conn, err := listenRTPPort(0, 0)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	addr := conn.LocalAddr().String()
+	// Must be 0.0.0.0:<port>, not [::]:port.
+	assert.Contains(t, addr, "0.0.0.0:", "RTP socket must bind IPv4, got %s", addr)
+}
+
+func TestListenRTPPort_Range_BindsIPv4(t *testing.T) {
+	conn, err := listenRTPPort(30000, 30010)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	addr := conn.LocalAddr().String()
+	assert.Contains(t, addr, "0.0.0.0:", "RTP socket must bind IPv4, got %s", addr)
+}
+
+func TestSendRTP_WriteTo_ErrorLoggedOnce(t *testing.T) {
+	logger, buf := newTestLogger()
+
+	c := newInboundCall(testutil.NewMockDialog())
+	t.Cleanup(c.cleanup)
+	c.logger = logger
+
+	s := c.audioStream
+	stats := rtcp.NewStats()
+	// Closed conn will return an error on WriteTo.
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	conn.Close() // close immediately so WriteTo fails
+
+	dst, _ := net.ResolveUDPAddr("udp4", "127.0.0.1:9999")
+	pkt := &rtp.Packet{Header: rtp.Header{PayloadType: 0, SequenceNumber: 1}, Payload: []byte{0x80}}
+
+	// Send 3 times — should log only once.
+	s.sendRTP(pkt, stats, nil, conn, dst, nil)
+	s.sendRTP(pkt, stats, nil, conn, dst, nil)
+	s.sendRTP(pkt, stats, nil, conn, dst, nil)
+
+	assert.True(t, s.sendErrLogged, "sendErrLogged must be set after first failure")
+	logged := buf.String()
+	assert.Contains(t, logged, "RTP WriteTo failed")
+	assert.Equal(t, 1, strings.Count(logged, "RTP WriteTo failed"), "RTP WriteTo error should be logged exactly once")
 }
 
 func TestPacedPCMWriter_RTPWriterSuppresses(t *testing.T) {

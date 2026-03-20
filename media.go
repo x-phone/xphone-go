@@ -583,8 +583,8 @@ func newVideoPacketizer(codec VideoCodec) media.VideoPacketizer {
 // - RTCP SR/RR
 func (s *mediaStream) runVideo() {
 	c := s.call
-	defer s.logSendErrors("video")
 	defer c.videoWg.Done()
+	defer s.logSendErrors("video")
 	conn := s.conn
 	rtcpConn := s.rtcpConn
 	done := s.done

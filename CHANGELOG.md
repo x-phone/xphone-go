@@ -10,6 +10,8 @@
 ### Bug fixes
 - Force IPv4 (`udp4`) for all RTP/RTCP sockets and address resolution — fixes zero outbound RTP on Linux dual-stack hosts
 - Log `WriteTo` errors on RTP, RTCP (first failure per stream), and DTMF sends for diagnosability
+- Log total RTP/RTCP send error counts when media pipeline exits
+- Log STUN binding response `WriteTo` errors
 - `Connect()` now returns an error when SIP registration fails (previously always returned nil)
 - "phone connected" log no longer emits on registration failure
 - `WithCredentials` now accepts `host:port` format (e.g. `"10.0.0.7:5060"`) — previously caused malformed SIP URIs

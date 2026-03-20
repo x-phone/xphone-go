@@ -3,11 +3,13 @@ package xphone
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"log/slog"
 	"net"
 	"strconv"
 	"time"
 
 	"github.com/pion/rtp"
+	"github.com/x-phone/xphone-go/ice"
 	"github.com/x-phone/xphone-go/internal/media"
 	"github.com/x-phone/xphone-go/internal/rtcp"
 	"github.com/x-phone/xphone-go/internal/srtp"
@@ -48,6 +50,8 @@ type mediaStream struct {
 	lastDTMFSeen      bool
 	sendErrLogged     bool
 	rtcpSendErrLogged bool
+	sendErrCount      int
+	rtcpSendErrCount  int
 }
 
 // clonePacket returns a deep copy of an RTP packet so taps are independent.
@@ -113,9 +117,12 @@ func (s *mediaStream) sendRTP(pkt *rtp.Packet, stats *rtcp.Stats, sentCh chan *r
 			return
 		}
 	}
-	if _, err := conn.WriteTo(data, dst); err != nil && !s.sendErrLogged {
-		s.sendErrLogged = true
-		s.call.logger.Warn("RTP WriteTo failed", "id", s.call.id, "dst", dst, "error", err)
+	if _, err := conn.WriteTo(data, dst); err != nil {
+		s.sendErrCount++
+		if !s.sendErrLogged {
+			s.sendErrLogged = true
+			s.call.logger.Warn("RTP WriteTo failed", "id", s.call.id, "dst", dst, "error", err)
+		}
 	}
 }
 
@@ -134,10 +141,42 @@ func (s *mediaStream) sendRTCP(stats *rtcp.Stats, srtcpOut *srtp.Context) {
 			return
 		}
 	}
-	if _, err := conn.WriteTo(sr, dst); err != nil && !s.rtcpSendErrLogged {
-		s.rtcpSendErrLogged = true
-		s.call.logger.Warn("RTCP WriteTo failed", "id", s.call.id, "dst", dst, "error", err)
+	if _, err := conn.WriteTo(sr, dst); err != nil {
+		s.rtcpSendErrCount++
+		if !s.rtcpSendErrLogged {
+			s.rtcpSendErrLogged = true
+			s.call.logger.Warn("RTCP WriteTo failed", "id", s.call.id, "dst", dst, "error", err)
+		}
 	}
+}
+
+// logSendErrors logs a summary of suppressed WriteTo errors when the pipeline exits.
+func (s *mediaStream) logSendErrors(stream string) {
+	if s.sendErrCount > 1 {
+		s.call.logger.Warn("RTP send errors during call", "id", s.call.id, "stream", stream, "total_errors", s.sendErrCount)
+	}
+	if s.rtcpSendErrCount > 1 {
+		s.call.logger.Warn("RTCP send errors during call", "id", s.call.id, "stream", stream, "total_errors", s.rtcpSendErrCount)
+	}
+}
+
+// handleSTUNDemux intercepts STUN Binding Requests on an RTP socket and sends
+// a response. Returns true if the packet was a STUN message (caller should skip
+// further RTP processing).
+func handleSTUNDemux(conn net.PacketConn, iceAgent *ice.Agent, data []byte, from net.Addr, logger *slog.Logger, callID string) bool {
+	if iceAgent == nil || !stun.IsMessage(data) {
+		return false
+	}
+	fromUDP, ok := from.(*net.UDPAddr)
+	if !ok {
+		return true
+	}
+	if resp := iceAgent.HandleBindingRequest(data, fromUDP); resp != nil {
+		if _, err := conn.WriteTo(resp, from); err != nil {
+			logger.Warn("STUN response WriteTo failed", "id", callID, "dst", from, "error", err)
+		}
+	}
+	return true
 }
 
 // handleRTCPReceive decrypts (if SRTCP) and processes an inbound RTCP packet.
@@ -214,6 +253,7 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 	rtcpConn := s.rtcpConn
 	done := s.done
 
+	defer s.logSendErrors("audio")
 	mediaTimer := time.NewTimer(timeout)
 	defer mediaTimer.Stop()
 	jitterTick := time.NewTicker(5 * time.Millisecond)
@@ -411,14 +451,7 @@ func (c *call) startRTPReader() {
 			cp := make([]byte, n)
 			copy(cp, buf[:n])
 
-			// ICE STUN demux: intercept Binding Requests before RTP processing.
-			if iceAgent != nil && stun.IsMessage(cp) {
-				fromUDP, ok := from.(*net.UDPAddr)
-				if ok {
-					if resp := iceAgent.HandleBindingRequest(cp, fromUDP); resp != nil {
-						conn.WriteTo(resp, from)
-					}
-				}
+			if handleSTUNDemux(conn, iceAgent, cp, from, c.logger, c.id) {
 				continue
 			}
 
@@ -499,6 +532,8 @@ func (c *call) startMedia() {
 	s.lastDTMFSeen = false
 	s.sendErrLogged = false
 	s.rtcpSendErrLogged = false
+	s.sendErrCount = 0
+	s.rtcpSendErrCount = 0
 	c.mu.Unlock()
 
 	jb := media.NewJitterBuffer(jitterDepth)
@@ -548,6 +583,7 @@ func newVideoPacketizer(codec VideoCodec) media.VideoPacketizer {
 // - RTCP SR/RR
 func (s *mediaStream) runVideo() {
 	c := s.call
+	defer s.logSendErrors("video")
 	defer c.videoWg.Done()
 	conn := s.conn
 	rtcpConn := s.rtcpConn
@@ -719,6 +755,8 @@ func (c *call) startVideoMedia() {
 	s.inboundCount = 0
 	s.sendErrLogged = false
 	s.rtcpSendErrLogged = false
+	s.sendErrCount = 0
+	s.rtcpSendErrCount = 0
 	videoFn := c.onVideoFn
 	c.videoWg.Add(1) // must be under lock so stopVideoPipeline.Wait() can't race
 	c.mu.Unlock()
@@ -753,14 +791,7 @@ func (c *call) startVideoRTPReader() {
 			cp := make([]byte, n)
 			copy(cp, buf[:n])
 
-			// ICE STUN demux: intercept Binding Requests before RTP processing.
-			if iceAgent != nil && stun.IsMessage(cp) {
-				fromUDP, ok := from.(*net.UDPAddr)
-				if ok {
-					if resp := iceAgent.HandleBindingRequest(cp, fromUDP); resp != nil {
-						conn.WriteTo(resp, from)
-					}
-				}
+			if handleSTUNDemux(conn, iceAgent, cp, from, c.logger, c.id) {
 				continue
 			}
 

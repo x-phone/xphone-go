@@ -7,6 +7,8 @@
 - Separate outbound credentials: `WithOutboundCredentials("trunk-user", "trunk-pass")` for INVITE auth
 - `WithHeader()` / `DialOptions.CustomHeaders` now applied to outbound INVITEs (previously ignored)
 
+## v0.4.1
+
 ### Bug fixes
 - Force IPv4 (`udp4`) for all RTP/RTCP sockets and address resolution — fixes zero outbound RTP on Linux dual-stack hosts
 - Log `WriteTo` errors on RTP, RTCP (first failure per stream), and DTMF sends for diagnosability

@@ -3,7 +3,6 @@ package xphone
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"log/slog"
 	"net"
 	"strconv"
 	"time"
@@ -48,6 +47,7 @@ type mediaStream struct {
 	lastDTMFTimestamp uint32
 	lastDTMFSeen      bool
 	sendErrLogged     bool
+	rtcpSendErrLogged bool
 }
 
 // clonePacket returns a deep copy of an RTP packet so taps are independent.
@@ -119,12 +119,12 @@ func (s *mediaStream) sendRTP(pkt *rtp.Packet, stats *rtcp.Stats, sentCh chan *r
 	}
 }
 
-// handleRTCPSend builds and sends an RTCP Sender Report, optionally SRTCP-protected.
-func handleRTCPSend(ssrc uint32, stats *rtcp.Stats, conn net.PacketConn, dst net.Addr, srtcpOut *srtp.Context, logger *slog.Logger, callID string) {
+// sendRTCP builds and sends an RTCP Sender Report, optionally SRTCP-protected.
+func (s *mediaStream) sendRTCP(stats *rtcp.Stats, conn net.PacketConn, dst net.Addr, srtcpOut *srtp.Context) {
 	if conn == nil || dst == nil {
 		return
 	}
-	sr := rtcp.BuildSR(ssrc, stats)
+	sr := rtcp.BuildSR(s.outSSRC, stats)
 	if srtcpOut != nil {
 		var err error
 		sr, err = srtcpOut.ProtectRTCP(sr)
@@ -132,8 +132,9 @@ func handleRTCPSend(ssrc uint32, stats *rtcp.Stats, conn net.PacketConn, dst net
 			return
 		}
 	}
-	if _, err := conn.WriteTo(sr, dst); err != nil {
-		logger.Warn("RTCP WriteTo failed", "id", callID, "dst", dst, "error", err)
+	if _, err := conn.WriteTo(sr, dst); err != nil && !s.rtcpSendErrLogged {
+		s.rtcpSendErrLogged = true
+		s.call.logger.Warn("RTCP WriteTo failed", "id", s.call.id, "dst", dst, "error", err)
 	}
 }
 
@@ -363,7 +364,7 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 			c.mu.Lock()
 			srtcpOut := c.srtpOut
 			c.mu.Unlock()
-			handleRTCPSend(s.outSSRC, rtcpStats, rtcpConn, rtcpRemoteAddr, srtcpOut, c.logger, c.id)
+			s.sendRTCP(rtcpStats, rtcpConn, rtcpRemoteAddr, srtcpOut)
 
 		case data := <-rtcpInbound:
 			c.mu.Lock()
@@ -495,6 +496,8 @@ func (c *call) startMedia() {
 	s.inboundCount = 0
 	s.lastDTMFTimestamp = 0
 	s.lastDTMFSeen = false
+	s.sendErrLogged = false
+	s.rtcpSendErrLogged = false
 	c.mu.Unlock()
 
 	jb := media.NewJitterBuffer(jitterDepth)
@@ -664,7 +667,7 @@ func (s *mediaStream) runVideo() {
 			c.mu.Lock()
 			srtcpOut := c.videoSrtpOut
 			c.mu.Unlock()
-			handleRTCPSend(s.outSSRC, rtcpStats, rtcpConn, rtcpRemoteAddr, srtcpOut, c.logger, c.id)
+			s.sendRTCP(rtcpStats, rtcpConn, rtcpRemoteAddr, srtcpOut)
 
 		case data := <-rtcpInbound:
 			c.mu.Lock()
@@ -714,6 +717,8 @@ func (c *call) startVideoMedia() {
 	s.outTimestamp = 0
 	s.rtpWriterUsed = false
 	s.inboundCount = 0
+	s.sendErrLogged = false
+	s.rtcpSendErrLogged = false
 	videoFn := c.onVideoFn
 	c.videoWg.Add(1) // must be under lock so stopVideoPipeline.Wait() can't race
 	c.mu.Unlock()

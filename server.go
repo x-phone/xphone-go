@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -364,8 +365,14 @@ func (s *server) setupSipStack() error {
 		return fmt.Errorf("xphone: server create server: %w", err)
 	}
 
+	contactPort := 0
+	if _, p, err := net.SplitHostPort(s.cfg.Listen); err == nil {
+		if pn, err := strconv.Atoi(p); err == nil && pn != sip.DefaultUdpPort {
+			contactPort = pn
+		}
+	}
 	contactHDR := sip.ContactHeader{
-		Address: sip.Uri{Scheme: "sip", Host: s.localIP},
+		Address: sip.Uri{Scheme: "sip", Host: s.localIP, Port: contactPort},
 	}
 	dc := sipgo.NewDialogClientCache(client, contactHDR)
 	ds := sipgo.NewDialogServerCache(client, contactHDR)

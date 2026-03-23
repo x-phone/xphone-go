@@ -167,6 +167,15 @@ func TestWithOutboundProxy_AlreadyHasLR(t *testing.T) {
 	assert.Equal(t, "sip:proxy.example.com:5060;lr", p.cfg.OutboundProxy)
 }
 
+func TestWithOutboundProxy_CaseInsensitiveLR(t *testing.T) {
+	p := New(
+		WithCredentials("1001", "secret", "pbx.example.com"),
+		WithOutboundProxy("sip:proxy.example.com:5060;LR"),
+	).(*phone)
+	// RFC 3261 §19.1.1: URI parameters are case-insensitive.
+	assert.Equal(t, "sip:proxy.example.com:5060;LR", p.cfg.OutboundProxy)
+}
+
 func TestWithOutboundProxy_LRNotConfusedByPrefix(t *testing.T) {
 	p := New(
 		WithCredentials("1001", "secret", "pbx.example.com"),

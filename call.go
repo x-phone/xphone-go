@@ -241,6 +241,64 @@ type call struct {
 	closeVideoChOnce  sync.Once        // ensures video output channels are closed exactly once
 }
 
+// wireCallCallbacks hooks phone/server-level callbacks (OnCallState, OnCallEnded,
+// OnCallDTMF) onto a call's internal callback fields. The Call interface is
+// captured via closure so the callback receives the correct public type.
+func wireCallCallbacks(c *call, onState func(Call, CallState), onEnded func(Call, EndReason), onDTMF func(Call, string)) {
+	if onState != nil {
+		fn := onState
+		c.onStatePhone = func(state CallState) { fn(c, state) }
+	}
+	if onEnded != nil {
+		fn := onEnded
+		c.onEndedPhone = func(reason EndReason) { fn(c, reason) }
+	}
+	if onDTMF != nil {
+		fn := onDTMF
+		c.onDTMFPhone = func(digit string) { fn(c, digit) }
+	}
+}
+
+// setupSRTP initializes SRTP contexts on a call.
+// Audio and video get separate contexts because srtp.Context has mutable state
+// (ROC, sequence tracking, HMAC) that would corrupt under concurrent access.
+func (c *call) setupSRTP(logger *slog.Logger, localKey, remoteKey string) {
+	outCtx, err := srtp.FromSDESInline(localKey)
+	if err != nil {
+		logger.Error("SRTP outbound context setup failed", "err", err)
+		return
+	}
+	inCtx, err := srtp.FromSDESInline(remoteKey)
+	if err != nil {
+		logger.Error("SRTP inbound context setup failed", "err", err)
+		return
+	}
+	c.mu.Lock()
+	c.srtpLocalKey = localKey
+	c.srtpOut = outCtx
+	c.srtpIn = inCtx
+	hasVideo := c.hasVideo
+	c.mu.Unlock()
+
+	if hasVideo {
+		videoOutCtx, err := srtp.FromSDESInline(localKey)
+		if err != nil {
+			logger.Error("SRTP video outbound context setup failed", "err", err)
+			return
+		}
+		videoInCtx, err := srtp.FromSDESInline(remoteKey)
+		if err != nil {
+			logger.Error("SRTP video inbound context setup failed", "err", err)
+			return
+		}
+		c.mu.Lock()
+		c.videoSrtpOut = videoOutCtx
+		c.videoSrtpIn = videoInCtx
+		c.mu.Unlock()
+	}
+	logger.Info("SRTP enabled for call", "id", c.id)
+}
+
 func newInboundCall(d dialog) *call {
 	c := &call{
 		id:             newCallID(),

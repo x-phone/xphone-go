@@ -862,18 +862,7 @@ func (s *server) findCall(callID string) *call {
 
 // wireCallCallbacks hooks server-level callbacks onto a call. Must be called with s.mu held.
 func (s *server) wireCallCallbacks(c *call) {
-	if s.onCallStateFn != nil {
-		fn := s.onCallStateFn
-		c.onStatePhone = func(state CallState) { fn(c, state) }
-	}
-	if s.onCallEndedFn != nil {
-		fn := s.onCallEndedFn
-		c.onEndedPhone = func(reason EndReason) { fn(c, reason) }
-	}
-	if s.onCallDTMFFn != nil {
-		fn := s.onCallDTMFFn
-		c.onDTMFPhone = func(digit string) { fn(c, digit) }
-	}
+	wireCallCallbacks(c, s.onCallStateFn, s.onCallEndedFn, s.onCallDTMFFn)
 }
 
 // applyCallConfig threads server-level config into a new call.
@@ -885,24 +874,9 @@ func (s *server) applyCallConfig(c *call) {
 	c.dtmfMode = s.cfg.DtmfMode
 }
 
-// setupSRTP initializes SRTP contexts on a call (same as phone.setupSRTP).
+// setupSRTP is a convenience wrapper calling call.setupSRTP with the server logger.
 func (s *server) setupSRTP(c *call, localKey, remoteKey string) {
-	outCtx, err := srtp.FromSDESInline(localKey)
-	if err != nil {
-		s.logger.Error("SRTP outbound context setup failed", "err", err)
-		return
-	}
-	inCtx, err := srtp.FromSDESInline(remoteKey)
-	if err != nil {
-		s.logger.Error("SRTP inbound context setup failed", "err", err)
-		return
-	}
-	c.mu.Lock()
-	c.srtpLocalKey = localKey
-	c.srtpOut = outCtx
-	c.srtpIn = inCtx
-	c.mu.Unlock()
-	s.logger.Info("SRTP enabled for call", "id", c.id)
+	c.setupSRTP(s.logger, localKey, remoteKey)
 }
 
 // runReaper periodically cleans up stale calls that never completed setup

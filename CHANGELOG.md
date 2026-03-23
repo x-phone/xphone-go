@@ -7,6 +7,9 @@
 - Separate outbound credentials: `WithOutboundCredentials("trunk-user", "trunk-pass")` for INVITE auth
 - `WithHeader()` / `DialOptions.CustomHeaders` now applied to outbound INVITEs (previously ignored)
 
+### Bug fixes
+- Server mode: include listening port in SIP Contact header — fixes ACK routing to non-default ports (e.g., 5080)
+
 ## v0.4.1
 
 ### Bug fixes

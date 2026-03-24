@@ -181,42 +181,48 @@ func New(opts ...PhoneOption) Phone {
 	return newPhone(cfg)
 }
 
-// hasURIParam checks if a SIP URI contains a specific parameter.
-// Matches ";param" at end of string or followed by ";", ">", or "?".
+// hasURIParam checks if a SIP URI contains a specific parameter (case-insensitive
+// per RFC 3261 §19.1.1). Matches ";param" at end of string or followed by ";", ">", or "?".
 func hasURIParam(uri, param string) bool {
-	target := ";" + param
-	idx := strings.Index(uri, target)
+	lower := strings.ToLower(uri)
+	target := ";" + strings.ToLower(param)
+	idx := strings.Index(lower, target)
 	if idx < 0 {
 		return false
 	}
 	end := idx + len(target)
-	if end == len(uri) {
-		return true // ";param" at end of string
+	if end == len(lower) {
+		return true
 	}
-	next := uri[end]
+	next := lower[end]
 	return next == ';' || next == '>' || next == '?'
+}
+
+// extractHostPort splits an embedded "host:port" string into separate host and
+// port values. If the port is valid and *port is still zero, it is set.
+// The host string is always updated if splitting succeeds.
+func extractHostPort(host *string, port *int) {
+	if *host == "" {
+		return
+	}
+	h, portStr, err := net.SplitHostPort(*host)
+	if err != nil {
+		return
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil || p <= 0 || p > 65535 {
+		return
+	}
+	*host = h
+	if *port == 0 {
+		*port = p
+	}
 }
 
 // normalizeHost splits an embedded port from cfg.Host (e.g. "10.0.0.7:5060")
 // into the separate Host and Port fields. Only applies when Port is still at
 // the zero value — an explicit Port setting takes precedence.
-func normalizeHost(cfg *Config) {
-	if cfg.Host == "" {
-		return
-	}
-	host, portStr, err := net.SplitHostPort(cfg.Host)
-	if err != nil {
-		return // no embedded port — leave unchanged
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port <= 0 || port > 65535 {
-		return // invalid port — leave unchanged
-	}
-	cfg.Host = host
-	if cfg.Port == 0 {
-		cfg.Port = port
-	}
-}
+func normalizeHost(cfg *Config) { extractHostPort(&cfg.Host, &cfg.Port) }
 
 // applyDefaults fills zero-value Config fields with sensible defaults.
 func applyDefaults(cfg *Config) {
@@ -458,25 +464,8 @@ type PeerAuthConfig struct {
 	Password string
 }
 
-// normalizePeerHost splits an embedded port from PeerConfig.Host (e.g. "10.0.0.1:5080")
-// into the separate Host and Port fields. Same logic as normalizeHost for Config.
-func normalizePeerHost(p *PeerConfig) {
-	if p.Host == "" {
-		return
-	}
-	host, portStr, err := net.SplitHostPort(p.Host)
-	if err != nil {
-		return
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port <= 0 || port > 65535 {
-		return
-	}
-	p.Host = host
-	if p.Port == 0 {
-		p.Port = port
-	}
-}
+// normalizePeerHost splits an embedded port from PeerConfig.Host.
+func normalizePeerHost(p *PeerConfig) { extractHostPort(&p.Host, &p.Port) }
 
 // applyServerDefaults fills zero-value ServerConfig fields with sensible defaults.
 func applyServerDefaults(cfg *ServerConfig) {

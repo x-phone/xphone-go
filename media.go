@@ -54,6 +54,25 @@ type mediaStream struct {
 	rtcpSendErrCount  int
 }
 
+// reset zeroes all goroutine-local pipeline state on a mediaStream.
+// Must be called (with c.mu held) before launching run/runVideo.
+func (s *mediaStream) reset(conn net.PacketConn, rtcpConn net.PacketConn, rtcpRemoteAddr net.Addr, done chan struct{}) {
+	s.conn = conn
+	s.rtcpConn = rtcpConn
+	s.rtcpRemoteAddr = rtcpRemoteAddr
+	s.done = done
+	s.outSeq = 0
+	s.outTimestamp = 0
+	s.rtpWriterUsed = false
+	s.inboundCount = 0
+	s.lastDTMFTimestamp = 0
+	s.lastDTMFSeen = false
+	s.sendErrLogged = false
+	s.rtcpSendErrLogged = false
+	s.sendErrCount = 0
+	s.rtcpSendErrCount = 0
+}
+
 // clonePacket returns a deep copy of an RTP packet so taps are independent.
 func clonePacket(pkt *rtp.Packet) *rtp.Packet {
 	clone := &rtp.Packet{Header: pkt.Header}
@@ -242,6 +261,34 @@ func (s *mediaStream) handleDTMF(pkt *rtp.Packet) {
 	}
 }
 
+// startRTCPReader launches a goroutine that reads RTCP packets from conn and
+// feeds them into the returned channel. The goroutine exits when conn is closed.
+func startRTCPReader(conn net.PacketConn) <-chan []byte {
+	ch := make(chan []byte, 16)
+	if conn == nil {
+		return ch
+	}
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, _, err := conn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if n < 8 {
+				continue
+			}
+			cp := make([]byte, n)
+			copy(cp, buf[:n])
+			select {
+			case ch <- cp:
+			default:
+			}
+		}
+	}()
+	return ch
+}
+
 // run is the media pipeline goroutine for a single stream.
 // It handles: inbound RTP demux, jitter buffer, DTMF interception, codec encode/decode,
 // outbound RTP forwarding, RTCP, and media timeout.
@@ -270,28 +317,7 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 		defer rtcpTicker.Stop()
 	}
 
-	// RTCP reader goroutine.
-	rtcpInbound := make(chan []byte, 16)
-	if rtcpConn != nil {
-		go func() {
-			buf := make([]byte, 1500)
-			for {
-				n, _, err := rtcpConn.ReadFrom(buf)
-				if err != nil {
-					return
-				}
-				if n < 8 {
-					continue
-				}
-				cp := make([]byte, n)
-				copy(cp, buf[:n])
-				select {
-				case rtcpInbound <- cp:
-				default:
-				}
-			}
-		}()
-	}
+	rtcpInbound := startRTCPReader(rtcpConn)
 
 	resetTimer := func(d time.Duration) {
 		if !mediaTimer.Stop() {
@@ -428,17 +454,17 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 	}
 }
 
-// startRTPReader launches a goroutine that reads RTP packets from the
-// network socket (rtpConn) and feeds them into the media pipeline's
-// rtpInbound channel. The goroutine exits when rtpConn is closed.
-func (c *call) startRTPReader() {
-	c.mu.Lock()
-	conn := c.rtpConn
-	iceAgent := c.iceAgent // immutable after call setup
-	c.mu.Unlock()
+// startRTPReaderFor launches a goroutine that reads RTP packets from conn,
+// decrypts with the SRTP context returned by getSRTP (re-read each packet to
+// handle re-INVITE key changes), and feeds parsed packets into dest.
+// The goroutine exits when conn is closed.
+func (c *call) startRTPReaderFor(conn net.PacketConn, getSRTP func() *srtp.Context, dest chan *rtp.Packet) {
 	if conn == nil {
 		return
 	}
+	c.mu.Lock()
+	iceAgent := c.iceAgent // immutable after call setup
+	c.mu.Unlock()
 
 	go func() {
 		buf := make([]byte, 1500)
@@ -447,7 +473,6 @@ func (c *call) startRTPReader() {
 			if err != nil {
 				return // socket closed
 			}
-			// Copy before unmarshal since we reuse the read buffer.
 			cp := make([]byte, n)
 			copy(cp, buf[:n])
 
@@ -455,14 +480,10 @@ func (c *call) startRTPReader() {
 				continue
 			}
 
-			// Re-read srtpIn each iteration so a re-INVITE key change takes effect.
-			c.mu.Lock()
-			srtpIn := c.srtpIn
-			c.mu.Unlock()
-			if srtpIn != nil {
+			if srtpIn := getSRTP(); srtpIn != nil {
 				cp, err = srtpIn.Unprotect(cp)
 				if err != nil {
-					continue // auth failed or malformed — drop
+					continue
 				}
 			}
 
@@ -470,9 +491,21 @@ func (c *call) startRTPReader() {
 			if err := pkt.Unmarshal(cp); err != nil {
 				continue
 			}
-			sendDropOldest(c.rtpInbound, pkt)
+			sendDropOldest(dest, pkt)
 		}
 	}()
+}
+
+// startRTPReader launches the audio RTP reader goroutine.
+func (c *call) startRTPReader() {
+	c.mu.Lock()
+	conn := c.rtpConn
+	c.mu.Unlock()
+	c.startRTPReaderFor(conn, func() *srtp.Context {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.srtpIn
+	}, c.rtpInbound)
 }
 
 // startMedia initializes the media pipeline (jitter buffer, RTP demux,
@@ -518,22 +551,8 @@ func (c *call) startMedia() {
 	}
 
 	s := c.audioStream
-	// Set pipeline config on stream and reset goroutine-local state.
+	s.reset(conn, rtcpConn, rtcpRemoteAddr, done)
 	s.timeout = timeout
-	s.conn = conn
-	s.rtcpConn = rtcpConn
-	s.rtcpRemoteAddr = rtcpRemoteAddr
-	s.done = done
-	s.outSeq = 0
-	s.outTimestamp = 0
-	s.rtpWriterUsed = false
-	s.inboundCount = 0
-	s.lastDTMFTimestamp = 0
-	s.lastDTMFSeen = false
-	s.sendErrLogged = false
-	s.rtcpSendErrLogged = false
-	s.sendErrCount = 0
-	s.rtcpSendErrCount = 0
 	c.mu.Unlock()
 
 	jb := media.NewJitterBuffer(jitterDepth)
@@ -607,28 +626,7 @@ func (s *mediaStream) runVideo() {
 		defer rtcpTicker.Stop()
 	}
 
-	// RTCP reader goroutine.
-	rtcpInbound := make(chan []byte, 16)
-	if rtcpConn != nil {
-		go func() {
-			buf := make([]byte, 1500)
-			for {
-				n, _, err := rtcpConn.ReadFrom(buf)
-				if err != nil {
-					return
-				}
-				if n < 8 {
-					continue
-				}
-				cp := make([]byte, n)
-				copy(cp, buf[:n])
-				select {
-				case rtcpInbound <- cp:
-				default:
-				}
-			}
-		}()
-	}
+	rtcpInbound := startRTCPReader(rtcpConn)
 
 	for {
 		select {
@@ -745,18 +743,7 @@ func (c *call) startVideoMedia() {
 	}
 
 	s := c.videoStream
-	s.conn = conn
-	s.rtcpConn = c.videoRTCPConn
-	s.rtcpRemoteAddr = rtcpRemoteAddr
-	s.done = done
-	s.outSeq = 0
-	s.outTimestamp = 0
-	s.rtpWriterUsed = false
-	s.inboundCount = 0
-	s.sendErrLogged = false
-	s.rtcpSendErrLogged = false
-	s.sendErrCount = 0
-	s.rtcpSendErrCount = 0
+	s.reset(conn, c.videoRTCPConn, rtcpRemoteAddr, done)
 	videoFn := c.onVideoFn
 	c.videoWg.Add(1) // must be under lock so stopVideoPipeline.Wait() can't race
 	c.mu.Unlock()
@@ -775,43 +762,12 @@ func (c *call) startVideoMedia() {
 func (c *call) startVideoRTPReader() {
 	c.mu.Lock()
 	conn := c.videoRTPConn
-	iceAgent := c.iceAgent // immutable after call setup
 	c.mu.Unlock()
-	if conn == nil {
-		return
-	}
-
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, from, err := conn.ReadFrom(buf)
-			if err != nil {
-				return // socket closed
-			}
-			cp := make([]byte, n)
-			copy(cp, buf[:n])
-
-			if handleSTUNDemux(conn, iceAgent, cp, from, c.logger, c.id) {
-				continue
-			}
-
-			c.mu.Lock()
-			srtpIn := c.videoSrtpIn
-			c.mu.Unlock()
-			if srtpIn != nil {
-				cp, err = srtpIn.Unprotect(cp)
-				if err != nil {
-					continue
-				}
-			}
-
-			pkt := &rtp.Packet{}
-			if err := pkt.Unmarshal(cp); err != nil {
-				continue
-			}
-			sendDropOldest(c.videoRTPInbound, pkt)
-		}
-	}()
+	c.startRTPReaderFor(conn, func() *srtp.Context {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.videoSrtpIn
+	}, c.videoRTPInbound)
 }
 
 // stopMedia tears down the media pipeline and releases RTP ports.

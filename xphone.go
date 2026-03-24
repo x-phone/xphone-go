@@ -115,61 +115,12 @@ func newPhone(cfg Config) *phone {
 // OnCallDTMF) onto a call's internal callback fields so they coexist with
 // user-set per-call callbacks. Must be called with p.mu held.
 func (p *phone) wireCallCallbacks(c *call) {
-	if p.onCallStateFn != nil {
-		fn := p.onCallStateFn
-		c.onStatePhone = func(state CallState) { fn(c, state) }
-	}
-	if p.onCallEndedFn != nil {
-		fn := p.onCallEndedFn
-		c.onEndedPhone = func(reason EndReason) { fn(c, reason) }
-	}
-	if p.onCallDTMFFn != nil {
-		fn := p.onCallDTMFFn
-		c.onDTMFPhone = func(digit string) { fn(c, digit) }
-	}
+	wireCallCallbacks(c, p.onCallStateFn, p.onCallEndedFn, p.onCallDTMFFn)
 }
 
-// setupSRTP initializes SRTP contexts on a call.
-// localKey is the base64 inline key for outbound encryption.
-// remoteKey is the base64 inline key from the remote SDP for inbound decryption.
-// Audio and video get separate contexts because srtp.Context has mutable state
-// (ROC, sequence tracking, HMAC) that would corrupt under concurrent access.
+// setupSRTP is a convenience wrapper calling call.setupSRTP with the phone logger.
 func (p *phone) setupSRTP(c *call, localKey, remoteKey string) {
-	outCtx, err := srtp.FromSDESInline(localKey)
-	if err != nil {
-		p.logger.Error("SRTP outbound context setup failed", "err", err)
-		return
-	}
-	inCtx, err := srtp.FromSDESInline(remoteKey)
-	if err != nil {
-		p.logger.Error("SRTP inbound context setup failed", "err", err)
-		return
-	}
-	c.mu.Lock()
-	c.srtpLocalKey = localKey
-	c.srtpOut = outCtx
-	c.srtpIn = inCtx
-	hasVideo := c.hasVideo
-	c.mu.Unlock()
-
-	// Video needs its own contexts — independent ROC/seq/HMAC state.
-	if hasVideo {
-		videoOutCtx, err := srtp.FromSDESInline(localKey)
-		if err != nil {
-			p.logger.Error("SRTP video outbound context setup failed", "err", err)
-			return
-		}
-		videoInCtx, err := srtp.FromSDESInline(remoteKey)
-		if err != nil {
-			p.logger.Error("SRTP video inbound context setup failed", "err", err)
-			return
-		}
-		c.mu.Lock()
-		c.videoSrtpOut = videoOutCtx
-		c.videoSrtpIn = videoInCtx
-		c.mu.Unlock()
-	}
-	p.logger.Info("SRTP enabled for call", "id", c.id)
+	c.setupSRTP(p.logger, localKey, remoteKey)
 }
 
 // applyCallConfig threads phone-level config into a new call.

@@ -7,6 +7,18 @@
 - Separate outbound credentials: `WithOutboundCredentials("trunk-user", "trunk-pass")` for INVITE auth
 - `WithHeader()` / `DialOptions.CustomHeaders` now applied to outbound INVITEs (previously ignored)
 
+### Bug fixes
+- Server mode: SRTP now covers video streams (previously only audio contexts were initialized)
+- `hasURIParam` is now case-insensitive per RFC 3261 §19.1.1
+
+### Internal
+- Extract `mediaStream.reset()` to deduplicate field-reset blocks in `startMedia`/`startVideoMedia`
+- Extract `startRTCPReader()` helper from duplicated RTCP reader goroutines in audio/video pipelines
+- Extract `startRTPReaderFor()` to unify `startRTPReader`/`startVideoRTPReader` (~40 lines deduped)
+- Extract `wireCallCallbacks()` free function shared by phone and server modes
+- Extract `extractHostPort()` to unify `normalizeHost`/`normalizePeerHost`
+- Unify `setupSRTP` as a `call` method shared by phone and server modes
+
 ## v0.4.2
 
 ### Bug fixes

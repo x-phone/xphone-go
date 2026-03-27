@@ -36,6 +36,23 @@ type dialogBase struct {
 	onNotify func(int)
 }
 
+// remoteTarget returns the URI for in-dialog requests (re-INVITE, REFER, INFO).
+// Per RFC 3261 §12.2.1.1, this is the remote party's Contact address:
+// UAC → Contact from the INVITE response; UAS → Contact from the incoming INVITE.
+func (d *dialogBase) remoteTarget() sip.Uri {
+	if d.response != nil {
+		if cont := d.response.Contact(); cont != nil {
+			return cont.Address
+		}
+	}
+	if d.invite != nil {
+		if cont := d.invite.Contact(); cont != nil {
+			return cont.Address
+		}
+	}
+	return d.invite.Recipient
+}
+
 func (d *dialogBase) SendBye() error {
 	ctx, cancel := context.WithTimeout(context.Background(), sipRequestTimeout)
 	defer cancel()
@@ -45,7 +62,7 @@ func (d *dialogBase) SendBye() error {
 func (d *dialogBase) SendReInvite(sdpBody []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sipRequestTimeout)
 	defer cancel()
-	req := sip.NewRequest(sip.INVITE, d.invite.Recipient)
+	req := sip.NewRequest(sip.INVITE, d.remoteTarget())
 	if len(sdpBody) > 0 {
 		req.AppendHeader(sip.NewHeader("Content-Type", contentTypeSDP))
 	}
@@ -57,7 +74,7 @@ func (d *dialogBase) SendReInvite(sdpBody []byte) error {
 func (d *dialogBase) SendRefer(target string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sipRequestTimeout)
 	defer cancel()
-	req := sip.NewRequest(sip.REFER, d.invite.Recipient)
+	req := sip.NewRequest(sip.REFER, d.remoteTarget())
 	req.AppendHeader(sip.NewHeader("Refer-To", target))
 	_, err := d.sess.Do(ctx, req)
 	return err
@@ -70,7 +87,7 @@ func (d *dialogBase) SendInfoDTMF(digit string, duration int) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sipRequestTimeout)
 	defer cancel()
-	req := sip.NewRequest(sip.INFO, d.invite.Recipient)
+	req := sip.NewRequest(sip.INFO, d.remoteTarget())
 	req.AppendHeader(sip.NewHeader("Content-Type", contentTypeDTMFRelay))
 	req.SetBody([]byte(body))
 	_, err = d.sess.Do(ctx, req)

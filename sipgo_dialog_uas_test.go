@@ -89,6 +89,12 @@ func testServerInviteRequest() *sip.Request {
 
 	req.AppendHeader(sip.NewHeader("X-Server-Custom", "server-value"))
 
+	// Contact from the remote party (the caller).
+	contact := sip.ContactHeader{
+		Address: sip.Uri{Scheme: "sip", User: "1001", Host: "192.168.1.2", Port: 5060},
+	}
+	req.AppendHeader(&contact)
+
 	return req
 }
 
@@ -207,6 +213,47 @@ func TestSipgoDialogUAS_SendRefer(t *testing.T) {
 	referTo := sess.doReq.GetHeader("Refer-To")
 	require.NotNil(t, referTo, "Refer-To header should be present")
 	assert.Equal(t, "sip:transfer@example.com", referTo.Value())
+}
+
+func TestSipgoDialogUAS_SendRefer_UsesRemoteContact(t *testing.T) {
+	resp := sip.NewResponseFromRequest(testServerInviteRequest(), 202, "Accepted", nil)
+	sess := &mockServerSession{doResp: resp}
+	d := testDialogUAS(sess)
+
+	err := d.SendRefer("sip:transfer@example.com")
+	require.NoError(t, err)
+	require.NotNil(t, sess.doReq)
+
+	// The REFER Request-URI must be the remote party's Contact (192.168.1.2),
+	// NOT the server's own address (192.168.1.1) from the INVITE Request-URI.
+	assert.Equal(t, "192.168.1.2", sess.doReq.Recipient.Host)
+	assert.Equal(t, "1001", sess.doReq.Recipient.User)
+}
+
+func TestSipgoDialogUAS_SendReInvite_UsesRemoteContact(t *testing.T) {
+	resp := sip.NewResponseFromRequest(testServerInviteRequest(), 200, "OK", nil)
+	sess := &mockServerSession{doResp: resp}
+	d := testDialogUAS(sess)
+
+	err := d.SendReInvite([]byte("v=0\r\n"))
+	require.NoError(t, err)
+	require.NotNil(t, sess.doReq)
+
+	assert.Equal(t, "192.168.1.2", sess.doReq.Recipient.Host)
+	assert.Equal(t, "1001", sess.doReq.Recipient.User)
+}
+
+func TestSipgoDialogUAS_SendInfoDTMF_UsesRemoteContact(t *testing.T) {
+	resp := sip.NewResponseFromRequest(testServerInviteRequest(), 200, "OK", nil)
+	sess := &mockServerSession{doResp: resp}
+	d := testDialogUAS(sess)
+
+	err := d.SendInfoDTMF("1", 160)
+	require.NoError(t, err)
+	require.NotNil(t, sess.doReq)
+
+	assert.Equal(t, "192.168.1.2", sess.doReq.Recipient.Host)
+	assert.Equal(t, "1001", sess.doReq.Recipient.User)
 }
 
 func TestSipgoDialogUAS_CallID(t *testing.T) {

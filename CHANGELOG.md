@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug fixes
+- Fix in-dialog request routing (REFER, re-INVITE, INFO) for inbound UAS calls — use remote party's Contact address per RFC 3261 §12.2.1.1 instead of the original INVITE Request-URI, which looped back to the server itself (#51)
+
 ### Features
 - Outbound proxy support: `WithOutboundProxy("sip:proxy.example.com:5060")` routes INVITEs through a proxy
 - Separate outbound credentials: `WithOutboundCredentials("trunk-user", "trunk-pass")` for INVITE auth

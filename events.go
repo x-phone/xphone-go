@@ -29,14 +29,14 @@ const (
 type EndReason int
 
 const (
-	EndedByLocal     EndReason = iota // End() while Active/OnHold
-	EndedByRemote                     // BYE received
-	EndedByTimeout                    // MediaTimeout exceeded
-	EndedByError                      // internal or transport error
-	EndedByTransfer                   // REFER completed (200 OK)
-	EndedByRejected                   // Reject() called
-	EndedByCancelled                  // End() before 200 OK (outbound)
-	EndedByTransferFailed             // REFER rejected by remote party
+	EndedByLocal          EndReason = iota // End() while Active/OnHold
+	EndedByRemote                          // BYE received
+	EndedByTimeout                         // MediaTimeout exceeded
+	EndedByError                           // internal or transport error
+	EndedByTransfer                        // REFER completed (200 OK)
+	EndedByRejected                        // Reject() called
+	EndedByCancelled                       // End() before 200 OK (outbound)
+	EndedByTransferFailed                  // REFER rejected by remote party
 )
 
 // Direction indicates whether a call is inbound or outbound.

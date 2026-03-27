@@ -2,13 +2,15 @@
 
 ## Unreleased
 
-### Bug fixes
-- `BlindTransfer` and `AttendedTransfer` now surface REFER failures via `EndedByTransferFailed` end reason — previously failure NOTIFYs (>= 300) were silently ignored (#54)
-
 ### Features
 - Outbound proxy support: `WithOutboundProxy("sip:proxy.example.com:5060")` routes INVITEs through a proxy
 - Separate outbound credentials: `WithOutboundCredentials("trunk-user", "trunk-pass")` for INVITE auth
 - `WithHeader()` / `DialOptions.CustomHeaders` now applied to outbound INVITEs (previously ignored)
+
+## v0.4.5
+
+### Bug fixes
+- `BlindTransfer` and `AttendedTransfer` now surface REFER failures via `EndedByTransferFailed` end reason — previously failure NOTIFYs (>= 300) were silently ignored (#54)
 
 ## v0.4.4
 

@@ -33,9 +33,10 @@ const (
 	EndedByRemote                     // BYE received
 	EndedByTimeout                    // MediaTimeout exceeded
 	EndedByError                      // internal or transport error
-	EndedByTransfer                   // REFER completed
+	EndedByTransfer                   // REFER completed (200 OK)
 	EndedByRejected                   // Reject() called
 	EndedByCancelled                  // End() before 200 OK (outbound)
+	EndedByTransferFailed             // REFER rejected by remote party
 )
 
 // Direction indicates whether a call is inbound or outbound.

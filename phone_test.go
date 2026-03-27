@@ -1035,3 +1035,30 @@ func TestPhone_AttendedTransferNotifyNon200KeepsCallsAlive(t *testing.T) {
 	assert.Equal(t, StateActive, callA.State())
 	assert.Equal(t, StateActive, callB.State())
 }
+
+func TestPhone_AttendedTransferNotifyFailureEndsBothCalls(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	dlgA := mockDlgWithTags("call-a", "<sip:1001@pbx>;tag=a1", "<sip:bob@pbx>;tag=b1")
+	callA := testOutboundCall(t, dlgA)
+	callA.simulateResponse(200, "OK")
+
+	dlgB := mockDlgWithTags("call-b", "<sip:1001@pbx>;tag=a2", "<sip:charlie@pbx>;tag=c2")
+	callB := testOutboundCall(t, dlgB)
+	callB.simulateResponse(200, "OK")
+
+	endedA := make(chan EndReason, 1)
+	callA.OnEnded(func(r EndReason) { endedA <- r })
+	endedB := make(chan EndReason, 1)
+	callB.OnEnded(func(r EndReason) { endedB <- r })
+
+	require.NoError(t, p.AttendedTransfer(callA, callB))
+
+	dlgA.SimulateNotify(503)
+
+	assert.Equal(t, EndedByTransferFailed, <-endedA)
+	assert.Equal(t, EndedByTransferFailed, <-endedB)
+}

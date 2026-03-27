@@ -74,6 +74,11 @@ func testInviteRequest() *sip.Request {
 func testInviteResponse(req *sip.Request) *sip.Response {
 	resp := sip.NewResponseFromRequest(req, 200, "OK", nil)
 	resp.AppendHeader(sip.NewHeader("Session-Expires", "1800"))
+	// Contact from the remote party (the callee).
+	contact := sip.ContactHeader{
+		Address: sip.Uri{Scheme: "sip", User: "1001", Host: "10.0.0.5", Port: 5060},
+	}
+	resp.AppendHeader(&contact)
 	return resp
 }
 
@@ -159,6 +164,31 @@ func TestSipgoDialogUAC_SendRefer(t *testing.T) {
 	referTo := sess.doReq.GetHeader("Refer-To")
 	require.NotNil(t, referTo, "Refer-To header should be present")
 	assert.Equal(t, "sip:transfer@example.com", referTo.Value())
+}
+
+func TestSipgoDialogUAC_SendRefer_UsesRemoteContact(t *testing.T) {
+	resp := sip.NewResponseFromRequest(testInviteRequest(), 202, "Accepted", nil)
+	sess := &mockClientSession{doResp: resp}
+	d := testDialogUAC(sess)
+
+	err := d.SendRefer("sip:transfer@example.com")
+	require.NoError(t, err)
+	require.NotNil(t, sess.doReq)
+
+	// The REFER Request-URI must be the remote party's Contact from the 200 OK.
+	assert.Equal(t, "10.0.0.5", sess.doReq.Recipient.Host)
+	assert.Equal(t, "1001", sess.doReq.Recipient.User)
+}
+
+func TestDialogBase_RemoteTarget_Fallback(t *testing.T) {
+	inv := sip.NewRequest(sip.INVITE, sip.Uri{
+		Scheme: "sip", User: "1001", Host: "10.0.0.1", Port: 5060,
+	})
+	d := &dialogBase{invite: inv}
+
+	target := d.remoteTarget()
+	assert.Equal(t, "10.0.0.1", target.Host)
+	assert.Equal(t, "1001", target.User)
 }
 
 func TestSipgoDialogUAC_Respond_ReturnsError(t *testing.T) {

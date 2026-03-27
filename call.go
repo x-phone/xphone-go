@@ -1348,6 +1348,8 @@ func (c *call) BlindTransfer(target string) error {
 	c.dlg.OnNotify(func(code int) {
 		if code == 200 {
 			c.endWithReason(EndedByTransfer)
+		} else if code >= 300 {
+			c.endWithReason(EndedByTransferFailed)
 		}
 	})
 	return nil

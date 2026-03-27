@@ -1274,6 +1274,8 @@ func endReasonName(r xphone.EndReason) string {
 		return "error"
 	case xphone.EndedByTransfer:
 		return "transferred"
+	case xphone.EndedByTransferFailed:
+		return "transfer failed"
 	case xphone.EndedByRejected:
 		return "rejected"
 	case xphone.EndedByCancelled:

@@ -460,6 +460,32 @@ func TestCall_BlindTransferFiresEndedByTransfer(t *testing.T) {
 	assert.Equal(t, EndedByTransfer, <-ended)
 }
 
+func TestCall_BlindTransferFiresEndedByTransferFailed(t *testing.T) {
+	dialog := testutil.NewMockDialog()
+	call := testInboundCall(t, dialog)
+	call.Accept()
+
+	ended := make(chan EndReason, 1)
+	call.OnEnded(func(r EndReason) { ended <- r })
+
+	call.BlindTransfer("sip:1003@pbx")
+	dialog.SimulateNotify(503)
+
+	assert.Equal(t, EndedByTransferFailed, <-ended)
+}
+
+func TestCall_BlindTransferNotify1xxKeepsCallActive(t *testing.T) {
+	dialog := testutil.NewMockDialog()
+	call := testInboundCall(t, dialog)
+	call.Accept()
+
+	call.BlindTransfer("sip:1003@pbx")
+	dialog.SimulateNotify(100)
+	time.Sleep(50 * time.Millisecond)
+
+	assert.Equal(t, StateActive, call.State())
+}
+
 func TestCall_BlindTransferWhenNotActiveReturnsInvalidState(t *testing.T) {
 	call := testInboundCall(t)
 	assert.ErrorIs(t, call.BlindTransfer("sip:1003@pbx"), ErrInvalidState)

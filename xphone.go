@@ -516,7 +516,8 @@ func (p *phone) Calls() []Call {
 
 // AttendedTransfer performs an attended (consultative) transfer.
 // Call A's dialog sends a REFER with a Replaces header built from Call B's
-// dialog identifiers. On NOTIFY 200, both calls end with EndedByTransfer.
+// dialog identifiers. On NOTIFY 200, both calls end with EndedByTransfer;
+// on failure (NOTIFY >= 300), both end with EndedByTransferFailed.
 // Both calls must be Active or OnHold.
 func (p *phone) AttendedTransfer(callA Call, callB Call) error {
 	// Validate states.
@@ -568,11 +569,14 @@ func (p *phone) AttendedTransfer(callA Call, callB Call) error {
 		return err
 	}
 
-	// Wire NOTIFY handler: on 200, end both calls with Transfer reason.
+	// Wire NOTIFY handler: end both calls on success (200) or failure (>=300).
 	a.dlg.OnNotify(func(code int) {
 		if code == 200 {
 			a.endWithReason(EndedByTransfer)
 			b.endWithReason(EndedByTransfer)
+		} else if code >= 300 {
+			a.endWithReason(EndedByTransferFailed)
+			b.endWithReason(EndedByTransferFailed)
 		}
 	})
 

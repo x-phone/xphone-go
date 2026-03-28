@@ -491,6 +491,45 @@ func TestCall_BlindTransferWhenNotActiveReturnsInvalidState(t *testing.T) {
 	assert.ErrorIs(t, call.BlindTransfer("sip:1003@pbx"), ErrInvalidState)
 }
 
+// --- ReplaceAudioWriter ---
+
+func TestCall_ReplaceAudioWriter_BasicSwap(t *testing.T) {
+	call := testInboundCall(t)
+	call.Accept()
+
+	src := make(chan []int16, 1)
+	err := call.ReplaceAudioWriter(src)
+	require.NoError(t, err)
+}
+
+func TestCall_ReplaceAudioWriter_NilPauses(t *testing.T) {
+	call := testInboundCall(t)
+	call.Accept()
+
+	err := call.ReplaceAudioWriter(nil)
+	require.NoError(t, err)
+}
+
+func TestCall_ReplaceAudioWriter_ErrorOnEndedCall(t *testing.T) {
+	call := testInboundCall(t)
+	call.Accept()
+	call.End()
+	time.Sleep(50 * time.Millisecond)
+
+	err := call.ReplaceAudioWriter(make(chan []int16))
+	assert.ErrorIs(t, err, ErrInvalidState)
+}
+
+func TestCall_ReplaceAudioWriter_DoubleSwap(t *testing.T) {
+	call := testInboundCall(t)
+	call.Accept()
+
+	src1 := make(chan []int16, 1)
+	src2 := make(chan []int16, 1)
+	require.NoError(t, call.ReplaceAudioWriter(src1))
+	require.NoError(t, call.ReplaceAudioWriter(src2))
+}
+
 // --- sipHeaderTag ---
 
 func TestSipHeaderTag(t *testing.T) {

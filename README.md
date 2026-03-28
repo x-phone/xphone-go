@@ -4,129 +4,64 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/x-phone/xphone-go)](https://goreportcard.com/report/github.com/x-phone/xphone-go)
 [![CI](https://github.com/x-phone/xphone-go/actions/workflows/ci.yml/badge.svg)](https://github.com/x-phone/xphone-go/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/x-phone/xphone-go)](https://github.com/x-phone/xphone-go)
+[![Go Version](https://img.shields.io/github/go-mod-go-version/x-phone/xphone-go)](https://github.com/x-phone/xphone-go)
 
-**A Go library for embedding real phone calls into any application.**
-No PBX. No Twilio. No per-minute fees. Just clean PCM audio, in and out.
+A Go library for SIP calling and RTP media. Register with a SIP trunk or PBX, make and receive phone calls, and get decoded PCM audio frames through Go channels.
 
-xphone handles SIP signaling, RTP media, codecs, and call state so you can focus on what your application actually does with the audio — whether that's feeding frames to a speech model, recording to disk, or building a full softphone.
-
-> **xphone** is also available in [Rust](https://github.com/x-phone/xphone-rust).
+> Also available in [Rust](https://github.com/x-phone/xphone-rust).
 
 ---
 
-## Why xphone?
+## Status — Beta
 
-Building anything that needs to make or receive real phone calls is surprisingly painful. Your options are usually:
-
-- **Twilio / Vonage / Telnyx SDKs** — easy to start, but you're paying platform fees per minute, your audio routes through their cloud, and the media pipeline is a black box.
-- **Raw SIP libraries** — full control, but you wire everything yourself: signaling, RTP sessions, jitter buffers, codec negotiation, call state machines. Weeks of work before you can answer a call.
-- **Asterisk / FreeSWITCH via AMI/ARI** — mature and powerful, but now you're running and operating a PBX just to make a call from your application.
-
-xphone sits in the middle: a high-level, event-driven Go API that handles all the protocol complexity and hands you clean PCM audio frames — ready to pipe into Whisper, Deepgram, or any audio pipeline you choose. Your audio never leaves your infrastructure unless you choose to send it somewhere.
+xphone is in active development and used in internal production workloads. APIs may change between minor versions. If you're evaluating, start with the [Quick Start](#quick-start) below or the [demos repo](https://github.com/x-phone/demos).
 
 ---
 
-## What can you build with it?
+## Scope and limitations
 
-### AI Voice Agents
-Connect a real phone number directly to your LLM pipeline. No cloud telephony platform required.
+xphone is a **voice data-plane library** — SIP signaling and RTP media. It is not a telephony platform.
 
-```
-DID (phone number)
-    +-- SIP Trunk (Telnyx, Twilio SIP, Vonage...)
-            +-- xphone (Phone mode or Server mode)
-                    |-- PCMReader -> Whisper / Deepgram (speech-to-text)
-                    +-- PacedPCMWriter <- ElevenLabs / TTS (text-to-speech)
-```
+**You are responsible for:**
 
-Your bot gets a real phone number and handles calls end-to-end — no Asterisk, no middleman, no per-minute platform fees. Use Phone mode to register with the trunk, or Server mode to receive INVITEs directly on a public IP.
+- Billing, number provisioning, and call routing rules
+- Recording storage and playback infrastructure
+- High availability, persistence, and failover
+- Rate limiting, authentication, and abuse prevention at the application level
 
-### Softphones & Click-to-Call
-Embed a SIP phone into any Go application. Accept calls, dial out, hold, transfer — all from code. Works against any SIP PBX (Asterisk, FreeSWITCH, 3CX, Cisco) or directly to a SIP trunk.
+**Security boundaries:**
 
-### Call Recording & Monitoring
-Tap into the PCM audio stream on any call and write it to disk, stream it to S3, or run real-time transcription and analysis.
+- SRTP uses SDES key exchange only. DTLS-SRTP is not supported — xphone cannot interop with WebRTC endpoints that require it.
+- TLS is supported for SIP transport. See [Configuration](#configuration) for transport options.
+- There is no built-in authentication layer for your application — xphone authenticates to SIP servers, not your end users.
 
-### Outbound Dialers
-Programmatically dial numbers, play audio, detect DTMF responses — classic IVR automation without the IVR infrastructure.
+**Codec constraints:**
 
-### Unit-testable Call Flows
-`MockPhone` and `MockCall` implement the full `Phone` and `Call` interfaces. Test every branch of your call logic — accept, reject, hold, transfer, DTMF, hangup — without a real SIP server or network. Server mode calls use the same `Call` interface, so mock tests cover both modes. This is a first-class design goal, not an afterthought.
+- Opus and G.729 require CGO and external C libraries. The default build is CGO-free (G.711, G.722 only).
+- PCM sample rate is fixed at 8 kHz (narrowband) or 16 kHz (G.722 wideband). There is no configurable sample rate.
 
 ---
 
-## Connection Modes
+## Tested against
 
-xphone supports two ways to connect to the SIP world. Both produce the same `Call` interface — the downstream API (Accept, End, SendDTMF, PCMReader/Writer) is identical.
+| Category | Tested with |
+|---|---|
+| **SIP trunks** | Telnyx, Twilio SIP, VoIP.ms, Vonage |
+| **PBXes** | Asterisk, FreeSWITCH, 3CX |
+| **Integration tests** | [fakepbx](https://github.com/x-phone/fakepbx) (in-process, no Docker) + [xpbx](https://github.com/x-phone/xpbx) (Dockerized Asterisk) in CI |
+| **Unit tests** | MockPhone & MockCall — full Phone/Call interface mocks |
 
-### Phone mode (SIP client)
-
-Registers with a SIP server like a normal endpoint. Use this with SIP trunks (Telnyx, Vonage), PBXes (Asterisk, FreeSWITCH), or any SIP registrar:
-
-```go
-phone := xphone.New(
-    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
-)
-phone.OnIncoming(func(call xphone.Call) { call.Accept() })
-phone.Connect(ctx)
-```
-
-### Server mode (SIP trunk)
-
-Accepts and places calls directly with trusted SIP peers — no registration required. Use this when trunk providers (Twilio SIP Trunk, Telnyx) send INVITEs to your public IP, or when a PBX routes calls to your application:
-
-```go
-server := xphone.NewServer(xphone.ServerConfig{
-    Listen:     "0.0.0.0:5080",
-    RTPPortMin: 10000,
-    RTPPortMax: 20000,
-    RTPAddress: "203.0.113.1",  // your public IP
-    Peers: []xphone.PeerConfig{
-        {Name: "twilio", Hosts: []string{"54.172.60.0/30", "54.244.51.0/30"}},
-        {Name: "office-pbx", Host: "192.168.1.10"},
-    },
-})
-server.OnIncoming(func(call xphone.Call) { call.Accept() })
-server.Listen(ctx)
-```
-
-Peers are authenticated by IP/CIDR or SIP digest auth. Per-peer codec and RTP address overrides are supported.
-
-> **Which mode?** Use **Phone** when you register to a SIP server (most setups). Use **Server** when SIP peers send INVITEs directly to your application (Twilio SIP Trunk, direct PBX routing, peer-to-peer).
-
-## No PBX required
-
-A common misconception: you don't need Asterisk or FreeSWITCH to use xphone. A SIP trunk is just a SIP server — xphone registers with it directly (Phone mode), or sends INVITEs straight to your app (Server mode).
-
-```go
-phone := xphone.New(
-    xphone.WithCredentials("your-username", "your-password", "sip.telnyx.com"),
-)
-```
-
-That's it. Your application registers with the SIP trunk, receives calls on your DID, and can dial out — no additional infrastructure.
-
-> A PBX only becomes relevant when you need to route calls across multiple agents or extensions. For single-purpose applications — a voice bot, a recorder, a dialer — xphone + SIP trunk is all you need.
+This is not a comprehensive compatibility matrix. If you hit issues with a provider or PBX not listed here, please open an issue.
 
 ---
 
-## Self-hosted vs cloud telephony
+## Use cases
 
-Most cloud telephony SDKs are excellent for getting started, but come with tradeoffs that matter at scale or in regulated environments:
-
-| | xphone + SIP Trunk | Cloud Telephony SDK |
-|---|---|---|
-| **Cost** | SIP trunk rates only | Per-minute platform fees on top |
-| **Audio privacy** | Media stays on your infrastructure | Audio routed through provider cloud |
-| **Latency** | Direct RTP to your server | Extra hop through provider media servers |
-| **Control** | Full access to raw PCM / RTP | API-level access only |
-| **Compliance** | You control data residency | Provider's data policies apply |
-| **Complexity** | You manage the SIP stack | Provider handles it |
-
-xphone is the right choice when cost, latency, privacy, or compliance make self-hosting the media pipeline worth it.
-
-> **SIP trunk providers** (Telnyx, Twilio SIP, Vonage, Bandwidth, and many others) offer DIDs and SIP credentials at wholesale rates — typically $0.001-$0.005/min, with no additional platform markup when you bring your own SIP client.
+- **AI voice agents** — pipe call audio directly into your STT/LLM/TTS pipeline without a telephony platform
+- **Softphones and click-to-call** — embed SIP calling into any Go application against a trunk or PBX
+- **Call recording and monitoring** — tap the PCM audio stream for transcription, analysis, or storage
+- **Outbound dialers** — programmatic dialing with DTMF detection for IVR automation
+- **Unit-testable call flows** — MockPhone and MockCall let you test every call branch without a SIP server
 
 ---
 
@@ -140,9 +75,7 @@ go get github.com/x-phone/xphone-go
 
 Requires Go 1.23+.
 
----
-
-### Build an AI voice agent in ~30 lines
+### Receive calls
 
 ```go
 package main
@@ -169,7 +102,6 @@ func main() {
         fmt.Printf("Incoming call from %s\n", call.From())
         call.Accept()
 
-        // Read decoded audio -- pipe to Whisper, Deepgram, etc.
         go func() {
             for frame := range call.PCMReader() {
                 // frame is []int16, mono, 8000 Hz, 160 samples (20ms)
@@ -182,26 +114,23 @@ func main() {
         log.Fatal(err)
     }
 
-    select {} // block forever
+    select {}
 }
 ```
 
 PCM format: `[]int16`, mono, 8000 Hz, 160 samples per frame (20ms) — the standard input format for most speech-to-text APIs.
 
----
-
 ### Make an outbound call
 
 ```go
 call, err := phone.Dial(ctx, "+15551234567",
-    xphone.WithEarlyMedia(),                    // hear ringback tones before answer
+    xphone.WithEarlyMedia(),
     xphone.WithDialTimeout(30 * time.Second),
 )
 if err != nil {
     log.Fatal(err)
 }
 
-// Stream audio in and out.
 go func() {
     for frame := range call.PCMReader() {
         processAudio(frame)
@@ -213,193 +142,198 @@ go func() {
 
 ---
 
+## Connection Modes
+
+xphone supports two ways to connect to the SIP world. Both produce the same `Call` interface — accept, end, DTMF, PCMReader/Writer are identical.
+
+### Phone mode (SIP client)
+
+Registers with a SIP server like a normal endpoint. Use this with SIP trunks (Telnyx, Vonage), PBXes (Asterisk, FreeSWITCH), or any SIP registrar. No PBX is required — you can register directly with a SIP trunk provider:
+
+```go
+phone := xphone.New(
+    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
+)
+phone.OnIncoming(func(call xphone.Call) { call.Accept() })
+phone.Connect(ctx)
+```
+
+### Server mode (SIP trunk)
+
+Accepts and places calls directly with trusted SIP peers — no registration required. Use this when trunk providers send INVITEs to your public IP, or when a PBX routes calls to your application:
+
+```go
+server := xphone.NewServer(xphone.ServerConfig{
+    Listen:     "0.0.0.0:5080",
+    RTPPortMin: 10000,
+    RTPPortMax: 20000,
+    RTPAddress: "203.0.113.1",  // your public IP
+    Peers: []xphone.PeerConfig{
+        {Name: "twilio", Hosts: []string{"54.172.60.0/30", "54.244.51.0/30"}},
+        {Name: "office-pbx", Host: "192.168.1.10"},
+    },
+})
+server.OnIncoming(func(call xphone.Call) { call.Accept() })
+server.Listen(ctx)
+```
+
+Peers are authenticated by IP/CIDR or SIP digest auth. Per-peer codec and RTP address overrides are supported.
+
+> **Which mode?** Use **Phone** when you register to a SIP server (most setups). Use **Server** when SIP peers send INVITEs directly to your application (Twilio SIP Trunk, direct PBX routing, peer-to-peer).
+
+---
+
+## Working with Audio
+
+xphone exposes audio as a stream of PCM frames through Go channels.
+
+### Frame format
+
+| Property | Value |
+|---|---|
+| Encoding | 16-bit signed PCM |
+| Channels | Mono |
+| Sample rate | 8000 Hz |
+| Samples per frame | 160 |
+| Frame duration | 20ms |
+
+### Reading inbound audio
+
+`call.PCMReader()` returns a `<-chan []int16`. Each receive gives you one 20ms frame of decoded audio from the remote party:
+
+```go
+go func() {
+    for frame := range call.PCMReader() {
+        sendToSTT(frame)
+    }
+    // channel closes when the call ends
+}()
+```
+
+> **Important:** Read frames promptly. The inbound buffer holds 256 frames (~5 seconds). If you fall behind, the oldest frames are silently dropped.
+
+### Writing outbound audio
+
+`call.PCMWriter()` returns a `chan<- []int16`. Send one 20ms frame at a time:
+
+```go
+go func() {
+    ticker := time.NewTicker(20 * time.Millisecond)
+    defer ticker.Stop()
+    for range ticker.C {
+        frame := getNextTTSFrame() // []int16, 160 samples
+        select {
+        case call.PCMWriter() <- frame:
+        default:
+            // outbound buffer full -- frame dropped, keep going
+        }
+    }
+}()
+```
+
+> **Important:** `PCMWriter()` sends each buffer as an RTP packet immediately — the caller must provide frames at real-time rate (one 160-sample frame every 20ms). For TTS or file playback, use `PacedPCMWriter()` instead.
+
+### Paced writer (for TTS / pre-generated audio)
+
+`call.PacedPCMWriter()` accepts arbitrary-length PCM buffers and handles framing + pacing internally:
+
+```go
+ttsAudio := elevenLabs.Synthesize("Hello, how can I help you?")
+call.PacedPCMWriter() <- ttsAudio
+```
+
+### Raw RTP access
+
+For lower-level control — pre-encoded audio, custom codecs, or RTP header inspection:
+
+```go
+go func() {
+    for pkt := range call.RTPReader() {
+        processRTP(pkt) // *rtp.Packet (pion/rtp)
+    }
+}()
+
+call.RTPWriter() <- myRTPPacket
+```
+
+> `RTPWriter` and `PCMWriter` are mutually exclusive — if you write to `RTPWriter`, `PCMWriter` is ignored for that call.
+
+### Converting to float32
+
+```go
+func pcmToFloat32(frame []int16) []float32 {
+    out := make([]float32, len(frame))
+    for i, s := range frame {
+        out[i] = float32(s) / 32768.0
+    }
+    return out
+}
+```
+
+---
+
 ## Features
 
-| Feature | Status |
-|---|---|
-| **Connection modes** | |
-| Phone mode (SIP client with REGISTER) | Done |
-| Server mode (SIP trunk, no registration) | Done |
-| Peer authentication (IP/CIDR + digest auth) | Done |
-| Per-peer RTP address and codec overrides | Done |
-| **Calling** | |
-| SIP Registration (auth, keepalive, auto-reconnect) | Done |
-| Inbound & outbound calls | Done |
-| Hold / Resume (re-INVITE) | Done |
-| Blind transfer (REFER) | Done |
-| Attended transfer (REFER with Replaces, RFC 3891) | Done |
-| Call waiting (`Phone.Calls()` API) | Done |
-| Session timers (RFC 4028) | Done |
-| Mute / Unmute | Done |
-| 302 redirect following | Done |
-| Early media (183 Session Progress) | Done |
-| **DTMF** | |
-| RFC 4733 (RTP telephone-events) | Done |
-| SIP INFO (RFC 2976) | Done |
-| **Audio codecs** | |
-| G.711 u-law (PCMU), G.711 A-law (PCMA) | Done |
-| G.722 wideband | Done |
-| Opus (optional, requires libopus) | Done |
-| G.729 (optional, requires bcg729) | Done |
-| PCM audio frames (`[]int16`) and raw RTP access | Done |
-| Jitter buffer | Done |
-| **Video** | |
-| H.264 (RFC 6184) and VP8 (RFC 7741) | Done |
-| Video RTP pipeline with depacketizer/packetizer | Done |
-| Mid-call video upgrade/downgrade (re-INVITE) | Done |
-| VideoReader / VideoWriter / VideoRTPReader / VideoRTPWriter | Done |
-| RTCP PLI/FIR for keyframe requests | Done |
-| **Security** | |
-| SRTP (AES_CM_128_HMAC_SHA1_80) with SDES key exchange | Done |
-| SRTP replay protection (RFC 3711) | Done |
-| SRTCP encryption (RFC 3711 §3.4) | Done |
-| Key material zeroization | Done |
-| Video SRTP (separate contexts for audio/video) | Done |
-| **Network** | |
-| TCP and TLS SIP transport | Done |
-| STUN NAT traversal (RFC 5389) | Done |
-| TURN relay for symmetric NAT (RFC 5766) | Done |
-| ICE-Lite (RFC 8445 §2.2) | Done |
-| RTCP Sender/Receiver Reports (RFC 3550) | Done |
-| **Messaging** | |
-| SIP MESSAGE instant messaging (RFC 3428) | Done |
-| SIP SUBSCRIBE/NOTIFY (RFC 6665) | Done |
-| MWI / voicemail notification (RFC 3842) | Done |
-| BLF / Busy Lamp Field monitoring | Done |
-| SIP Presence (RFC 3856) | Done |
-| **Testing** | |
-| MockPhone & MockCall for unit testing | Done |
+### Calling — stable
 
----
+- SIP registration with auto-reconnect and keepalive
+- Inbound and outbound calls
+- Hold / resume (re-INVITE)
+- Blind transfer (REFER) and attended transfer (REFER with Replaces, RFC 3891)
+- Call waiting (`Phone.Calls()` API)
+- Session timers (RFC 4028)
+- Mute / unmute
+- 302 redirect following
+- Early media (183 Session Progress)
 
-## Configuration
+### DTMF — stable
 
-```go
-phone := xphone.New(
-    xphone.WithCredentials("1001", "secret", "pbx.example.com"),
-    xphone.WithTransport("udp", nil),                      // "udp" | "tcp" | "tls"
-    xphone.WithRTPPorts(10000, 20000),                      // RTP port range
-    xphone.WithCodecs(xphone.CodecOpus, xphone.CodecPCMU),  // codec preference
-    xphone.WithJitterBuffer(50 * time.Millisecond),
-    xphone.WithMediaTimeout(30 * time.Second),
-    xphone.WithNATKeepalive(25 * time.Second),
-    xphone.WithStunServer("stun.l.google.com:19302"),
-    xphone.WithSRTP(),
-    xphone.WithDtmfMode(xphone.DtmfModeRFC4733),           // or DtmfModeSIPInfo
-    xphone.WithICE(true),                                   // ICE-Lite
-    xphone.WithTurnServer("turn.example.com:3478"),
-    xphone.WithTurnCredentials("user", "pass"),
-    xphone.WithLogger(slog.Default()),
-)
-```
+- RFC 4733 (RTP telephone-events)
+- SIP INFO (RFC 2976)
 
-See the [Go documentation](https://pkg.go.dev/github.com/x-phone/xphone-go) for all options.
+### Audio codecs — stable
 
----
+- G.711 u-law (PCMU), G.711 A-law (PCMA) — built-in
+- G.722 wideband — built-in
+- Opus — optional, requires CGO + libopus (`-tags opus`)
+- G.729 — optional, requires CGO + bcg729 (`-tags g729`)
+- Jitter buffer
 
-## RTP Port Range
+### Video — newer, less production mileage
 
-Each active call requires an even-numbered UDP port for RTP audio (and a second one if video is negotiated). By default, xphone lets the OS assign ports automatically. For production deployments — especially behind firewalls where you need predictable port ranges — configure an explicit range:
+- H.264 (RFC 6184) and VP8 (RFC 7741)
+- Depacketizer/packetizer pipeline
+- Mid-call video upgrade/downgrade (re-INVITE)
+- VideoReader / VideoWriter / VideoRTPReader / VideoRTPWriter
+- RTCP PLI/FIR for keyframe requests
 
-```go
-phone := xphone.New(
-    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
-    xphone.WithRTPPorts(10000, 20000), // 5000 even ports = 5000 concurrent calls
-)
-```
+### Security — stable
 
-**Sizing the range:** only even ports are used (per RTP spec), so the maximum number of concurrent audio-only calls is `(max - min) / 2`. A range of `10000-10100` supports only ~50 calls. For production, `10000-20000` is a safe default.
+- SRTP (AES_CM_128_HMAC_SHA1_80) with SDES key exchange
+- SRTP replay protection (RFC 3711)
+- SRTCP encryption (RFC 3711 §3.4)
+- Key material zeroization
+- Separate SRTP contexts for audio and video
 
-**What happens when ports run out:** inbound calls receive a `500 Internal Server Error` and outbound dials fail with an error. The symptom is not obvious — widen the range before investigating SIP server configuration.
+### Network — stable
 
-| Range | Even ports | Max concurrent calls |
-|---|---|---|
-| 10000–10100 | 50 | ~50 |
-| 10000–12000 | 1000 | ~1000 |
-| 10000–20000 | 5000 | ~5000 |
+- TCP and TLS SIP transport
+- STUN NAT traversal (RFC 5389)
+- TURN relay for symmetric NAT (RFC 5766)
+- ICE-Lite (RFC 8445 §2.2)
+- RTCP Sender/Receiver Reports (RFC 3550)
 
-> If no range is configured (`WithRTPPorts` not called), the OS assigns ephemeral ports. This works for development but is impractical in production where firewall rules need a known range.
+### Messaging — newer, less production mileage
 
----
+- SIP MESSAGE (RFC 3428)
+- SIP SUBSCRIBE/NOTIFY (RFC 6665)
+- MWI / voicemail notification (RFC 3842)
+- BLF / Busy Lamp Field monitoring
+- SIP Presence (RFC 3856)
 
-## NAT Traversal
+### Testing — stable
 
-xphone supports three levels of NAT traversal, depending on your network environment:
-
-### STUN (most deployments)
-
-Discovers your public IP via a STUN Binding Request. Sufficient when your NAT allows direct UDP:
-
-```go
-phone := xphone.New(
-    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
-    xphone.WithStunServer("stun.l.google.com:19302"),
-)
-```
-
-Common public STUN servers: `stun.l.google.com:19302`, `stun1.l.google.com:19302`, `stun.cloudflare.com:3478`
-
-### TURN (symmetric NAT)
-
-For environments where STUN alone fails (cloud VMs, corporate firewalls with symmetric NAT), TURN relays media through an intermediary:
-
-```go
-phone := xphone.New(
-    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
-    xphone.WithTurnServer("turn.example.com:3478"),
-    xphone.WithTurnCredentials("user", "pass"),
-)
-```
-
-### ICE-Lite
-
-Enables ICE-Lite (RFC 8445 §2.2) for SDP-level candidate negotiation:
-
-```go
-phone := xphone.New(
-    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
-    xphone.WithICE(true),
-    xphone.WithStunServer("stun.l.google.com:19302"),
-)
-```
-
-> Only enable STUN/TURN/ICE when the SIP server is on the public internet. Do not enable it when connecting via VPN or private network, as the discovered address will be unreachable from the server.
-
----
-
-## Opus Codec
-
-Opus support is optional and requires CGO + libopus. The default build is CGO-free.
-
-### Install libopus
-
-```bash
-# Debian / Ubuntu
-sudo apt-get install libopus-dev libopusfile-dev
-
-# macOS
-brew install opus opusfile
-```
-
-### Build with Opus
-
-```bash
-go build -tags opus ./...
-go test -tags opus ./...
-```
-
-### Usage
-
-```go
-phone := xphone.New(
-    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
-    xphone.WithCodecs(xphone.CodecOpus, xphone.CodecPCMU), // prefer Opus, fall back to PCMU
-)
-```
-
-Opus runs at 8kHz natively — no resampling needed. PCM frames remain `[]int16`, mono, 160 samples (20ms), same as G.711. RTP timestamps use 48kHz clock per RFC 7587.
-
-Without the `opus` build tag, `CodecOpus` is accepted in configuration but will not be negotiated (the codec processor returns nil, so SDP negotiation falls through to the next preferred codec).
+- MockPhone and MockCall — full interface mocks for unit testing
 
 ---
 
@@ -422,110 +356,34 @@ call.OnEnded(func(reason xphone.EndReason) {
 
 ---
 
-## Working with Audio
-
-xphone exposes audio as a stream of **PCM frames** through Go channels. Understanding the frame format and channel behaviour is key to building anything on top of the library.
-
-### Frame format
-
-Every frame is an `[]int16` with these fixed properties:
-
-| Property | Value |
-|---|---|
-| Encoding | 16-bit signed PCM |
-| Channels | Mono |
-| Sample rate | 8000 Hz |
-| Samples per frame | 160 |
-| Frame duration | 20ms |
-
-This is the native format expected by most speech-to-text APIs (Whisper, Deepgram, Google STT) and easily converted to `float32` for audio processing pipelines.
-
-### Reading inbound audio
-
-`call.PCMReader()` returns a `<-chan []int16`. Each receive gives you one 20ms frame of decoded audio from the remote party:
+## Call Control
 
 ```go
-go func() {
-    for frame := range call.PCMReader() {
-        // frame is []int16, 160 samples, 20ms of audio
-        sendToSTT(frame)
-    }
-    // channel closes when the call ends
-}()
+call.Hold()
+call.Resume()
+
+call.BlindTransfer("sip:1003@pbx.example.com")
+phone.AttendedTransfer(callA, callB)
+
+call.Mute()
+call.Unmute()
+
+call.SendDTMF("5")
+call.OnDTMF(func(digit string) {
+    fmt.Printf("Received: %s\n", digit)
+})
+
+// Mid-call video upgrade
+call.AddVideo(xphone.VideoCodecH264, xphone.VideoCodecVP8)
+call.OnVideoRequest(func(req *xphone.VideoUpgradeRequest) {
+    req.Accept()
+})
+call.OnVideo(func() {
+    // read frames from call.VideoReader()
+})
+
+phone.SendMessage(ctx, "sip:1002@pbx", "Hello!")
 ```
-
-> **Important:** Read frames promptly. The inbound buffer holds 256 frames (~5 seconds). If you fall behind, the oldest frames are silently dropped.
-
-### Writing outbound audio
-
-`call.PCMWriter()` returns a `chan<- []int16`. Send one 20ms frame at a time to transmit audio to the remote party:
-
-```go
-go func() {
-    ticker := time.NewTicker(20 * time.Millisecond)
-    defer ticker.Stop()
-    for range ticker.C {
-        frame := getNextTTSFrame() // []int16, 160 samples
-        select {
-        case call.PCMWriter() <- frame:
-        default:
-            // outbound buffer full -- frame dropped, keep going
-        }
-    }
-}()
-```
-
-> **Important:** `PCMWriter()` sends each buffer as an RTP packet immediately — the caller must provide frames at real-time rate (one 160-sample frame every 20ms). For live microphone input this is natural; for TTS or file playback, use `PacedPCMWriter()` instead.
-
-### Paced writer (for TTS / pre-generated audio)
-
-`call.PacedPCMWriter()` accepts arbitrary-length PCM buffers and handles framing + pacing internally. Send entire TTS utterances at once — xphone splits them into 20ms frames and sends RTP at real-time pace:
-
-```go
-// Send an entire TTS utterance — any length, xphone handles pacing
-ttsAudio := elevenLabs.Synthesize("Hello, how can I help you?")
-call.PacedPCMWriter() <- ttsAudio
-```
-
-### Silence frame
-
-```go
-silence := make([]int16, 160) // zero-value is silence
-call.PCMWriter() <- silence
-```
-
-### Converting to float32 (for ML pipelines)
-
-Many audio and ML libraries expect `[]float32` normalized to `[-1.0, 1.0]`:
-
-```go
-func pcmToFloat32(frame []int16) []float32 {
-    out := make([]float32, len(frame))
-    for i, s := range frame {
-        out[i] = float32(s) / 32768.0
-    }
-    return out
-}
-```
-
-### Raw RTP access
-
-For lower-level control — sending pre-encoded audio, implementing a custom codec, or inspecting RTP headers — use `RTPReader()` and `RTPWriter()` instead of the PCM channels:
-
-```go
-// Read raw RTP packets (post-jitter buffer, pre-decode)
-go func() {
-    for pkt := range call.RTPReader() {
-        // pkt is *rtp.Packet (pion/rtp)
-        processRTP(pkt)
-    }
-}()
-
-// Write raw RTP packets (bypasses PCMWriter entirely)
-call.RTPWriter() <- myRTPPacket
-```
-
-> Note: `RTPWriter` and `PCMWriter` are mutually exclusive — if you write to `RTPWriter`, `PCMWriter` is ignored for that call.
 
 ---
 
@@ -561,51 +419,140 @@ Video uses a separate RTP port and independent SRTP contexts. RTCP PLI/FIR reque
 
 All channels are buffered (256 entries). Inbound taps drop oldest on overflow; outbound writers drop newest. Audio frames are 160 samples at 8000 Hz = 20ms. Video frames carry codec-specific NAL units (H.264) or encoded frames (VP8).
 
-Each pipeline runs on a dedicated goroutine per call, bridged to the application via Go channels.
+---
+
+## Configuration
+
+```go
+phone := xphone.New(
+    xphone.WithCredentials("1001", "secret", "pbx.example.com"),
+    xphone.WithTransport("udp", nil),                      // "udp" | "tcp" | "tls"
+    xphone.WithRTPPorts(10000, 20000),                      // RTP port range
+    xphone.WithCodecs(xphone.CodecOpus, xphone.CodecPCMU),  // codec preference
+    xphone.WithJitterBuffer(50 * time.Millisecond),
+    xphone.WithMediaTimeout(30 * time.Second),
+    xphone.WithNATKeepalive(25 * time.Second),
+    xphone.WithStunServer("stun.l.google.com:19302"),
+    xphone.WithSRTP(),
+    xphone.WithDtmfMode(xphone.DtmfModeRFC4733),           // or DtmfModeSIPInfo
+    xphone.WithICE(true),                                   // ICE-Lite
+    xphone.WithTurnServer("turn.example.com:3478"),
+    xphone.WithTurnCredentials("user", "pass"),
+    xphone.WithLogger(slog.Default()),
+)
+```
+
+See [pkg.go.dev](https://pkg.go.dev/github.com/x-phone/xphone-go) for all options.
 
 ---
 
-## Call Control
+## RTP Port Range
+
+Each active call requires an even-numbered UDP port for RTP audio. Configure an explicit range for production deployments behind firewalls:
 
 ```go
-// Hold & resume
-call.Hold()
-call.Resume()
-
-// Blind transfer
-call.BlindTransfer("sip:1003@pbx.example.com")
-
-// Attended transfer (consult callB, then bridge)
-phone.AttendedTransfer(callA, callB)
-
-// Mute (suppresses outbound audio, inbound still flows)
-call.Mute()
-call.Unmute()
-
-// DTMF
-call.SendDTMF("5")
-call.OnDTMF(func(digit string) {
-    fmt.Printf("Received: %s\n", digit)
-})
-
-// Mid-call video upgrade
-call.AddVideo(xphone.VideoCodecH264, xphone.VideoCodecVP8)
-call.OnVideoRequest(func(req *xphone.VideoUpgradeRequest) {
-    req.Accept() // or req.Reject()
-})
-call.OnVideo(func() {
-    // Video is now active — read frames from call.VideoReader()
-})
-
-// Instant messaging
-phone.SendMessage(ctx, "sip:1002@pbx", "Hello!")
+phone := xphone.New(
+    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
+    xphone.WithRTPPorts(10000, 20000),
+)
 ```
+
+Only even ports are used (per RTP spec). Maximum concurrent audio-only calls = `(max - min) / 2`.
+
+| Range | Even ports | Max concurrent calls |
+|---|---|---|
+| 10000–10100 | 50 | ~50 |
+| 10000–12000 | 1000 | ~1000 |
+| 10000–20000 | 5000 | ~5000 |
+
+**When ports run out:** inbound calls receive a `500 Internal Server Error` and outbound dials fail with an error. Widen the range before investigating SIP server configuration.
+
+If `WithRTPPorts` is not called, the OS assigns ephemeral ports. This works for development but is impractical in production where firewall rules need a known range.
+
+---
+
+## NAT Traversal
+
+### STUN (most deployments)
+
+Discovers your public IP via a STUN Binding Request:
+
+```go
+phone := xphone.New(
+    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
+    xphone.WithStunServer("stun.l.google.com:19302"),
+)
+```
+
+### TURN (symmetric NAT)
+
+For environments where STUN alone fails (cloud VMs, corporate firewalls):
+
+```go
+phone := xphone.New(
+    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
+    xphone.WithTurnServer("turn.example.com:3478"),
+    xphone.WithTurnCredentials("user", "pass"),
+)
+```
+
+### ICE-Lite
+
+SDP-level candidate negotiation (RFC 8445 §2.2):
+
+```go
+phone := xphone.New(
+    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
+    xphone.WithICE(true),
+    xphone.WithStunServer("stun.l.google.com:19302"),
+)
+```
+
+> Only enable STUN/TURN/ICE when the SIP server is on the public internet. Do not enable it when connecting via VPN or private network.
+
+---
+
+## Opus Codec
+
+Opus is optional and requires CGO + libopus. The default build is CGO-free.
+
+### Install libopus
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install libopus-dev libopusfile-dev
+
+# macOS
+brew install opus opusfile
+```
+
+### Build with Opus
+
+```bash
+go build -tags opus ./...
+go test -tags opus ./...
+```
+
+### Usage
+
+```go
+phone := xphone.New(
+    xphone.WithCredentials("1001", "secret", "sip.telnyx.com"),
+    xphone.WithCodecs(xphone.CodecOpus, xphone.CodecPCMU),
+)
+```
+
+Opus runs at 8kHz natively — no resampling needed. PCM frames remain `[]int16`, mono, 160 samples (20ms). RTP timestamps use 48kHz clock per RFC 7587.
+
+Without the `opus` build tag, `CodecOpus` is accepted in configuration but will not be negotiated.
 
 ---
 
 ## Testing
 
-`MockPhone` and `MockCall` implement the `Phone` and `Call` interfaces — no real SIP server needed.
+### Unit tests with mocks
+
+`MockPhone` and `MockCall` implement the `Phone` and `Call` interfaces:
 
 ```go
 phone := xphone.NewMockPhone()
@@ -625,23 +572,18 @@ call.Accept()
 call.SendDTMF("5")
 assert.Equal(t, []string{"5"}, call.SentDTMF())
 
-// Simulate inbound events
 call.SimulateDTMF("9")
 call.InjectRTP(pkt)
 ```
 
----
-
-## Integration Tests
-
-**[FakePBX](https://github.com/x-phone/fakepbx) (no Docker required)** — fast, in-process SIP tests that cover registration, dial, BYE, hold, DTMF, RTP, busy, provisionals, and server mode (inbound/outbound, peer auth, concurrent calls). These run with the standard test suite:
+### Integration tests with FakePBX (no Docker)
 
 ```bash
-go test -v -run TestFakePBX ./...          # Phone mode tests
-go test -v -run TestServerFakePBX ./...    # Server mode tests
+go test -v -run TestFakePBX ./...
+go test -v -run TestServerFakePBX ./...
 ```
 
-**Asterisk via Docker** — full end-to-end tests against a real PBX:
+### End-to-end tests with Asterisk
 
 ```bash
 cd testutil/docker && docker compose up -d
@@ -653,14 +595,11 @@ cd testutil/docker && docker compose down
 
 ## Example App
 
-`examples/sipcli` is a fully interactive terminal SIP client — registration, inbound/outbound calls, hold, resume, DTMF, mute, transfer, echo mode, and system speaker output:
+`examples/sipcli` is a terminal SIP client with registration, calls, hold, resume, DTMF, mute, transfer, echo mode, and speaker output:
 
 ```bash
-# Using a profile from ~/.sipcli.yaml
 cd examples/sipcli
-go run . -profile myserver
-
-# Direct flags
+go run . -profile myserver       # from ~/.sipcli.yaml
 go run . -server pbx.example.com -user 1001 -pass secret
 ```
 
@@ -668,10 +607,9 @@ go run . -server pbx.example.com -user 1001 -pass secret
 
 ## Logging
 
-xphone uses Go's standard `log/slog`. Pass your own logger to control level, format, and destination:
+xphone uses Go's `log/slog`:
 
 ```go
-// Structured JSON logs at debug level
 phone := xphone.New(
     xphone.WithLogger(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
         Level: slog.LevelDebug,
@@ -684,7 +622,7 @@ phone := xphone.New(
 )
 ```
 
-If no logger is provided, `slog.Default()` is used. The library logs registration events, call state transitions, media timeouts, and errors.
+If no logger is provided, `slog.Default()` is used.
 
 ---
 
@@ -695,8 +633,8 @@ If no logger is provided, `slog.Default()` is used. The library logs registratio
 | SIP Signaling | [sipgo](https://github.com/emiago/sipgo) |
 | RTP / SRTP | [pion/rtp](https://github.com/pion/rtp) + built-in SRTP (AES_CM_128_HMAC_SHA1_80) |
 | G.711 / G.722 | Built-in (PCMU, PCMA) + [gotranspile/g722](https://github.com/gotranspile/g722) |
-| G.729 | [AoiEnoki/bcg729](https://github.com/AoiEnoki/bcg729) (optional, build tag `g729`) |
-| Opus | [hraban/opus](https://github.com/hraban/opus) (optional, build tag `opus`) |
+| G.729 | [AoiEnoki/bcg729](https://github.com/AoiEnoki/bcg729) (optional, `-tags g729`) |
+| Opus | [hraban/opus](https://github.com/hraban/opus) (optional, `-tags opus`) |
 | H.264 / VP8 | Built-in packetizer/depacketizer (RFC 6184, RFC 7741) |
 | RTCP | Built-in (RFC 3550 SR/RR + PLI/FIR) |
 | Jitter Buffer | Built-in |
@@ -704,20 +642,6 @@ If no logger is provided, `slog.Default()` is used. The library logs registratio
 | TURN | Built-in (RFC 5766) |
 | ICE-Lite | Built-in (RFC 8445 §2.2) |
 | TUI (sipcli) | [bubbletea](https://github.com/charmbracelet/bubbletea) + [lipgloss](https://github.com/charmbracelet/lipgloss) |
-
----
-
-## Known Limitations
-
-### Security
-
-**SRTP uses SDES key exchange only.** DTLS-SRTP key exchange is not supported. SDES works well with most SIP trunks but is not suitable for WebRTC interop, which requires DTLS-SRTP.
-
-### Codec coverage
-
-**Opus and G.729 require CGO.** Both are optional build-tag codecs (`-tags opus`, `-tags g729`) that need C libraries installed. The default build is CGO-free with G.711 and G.722.
-
-**PCM sample rate is fixed at 8 kHz (narrowband) or 16 kHz (G.722 wideband).** Codec selection determines the rate — there is no configurable sample rate.
 
 ---
 

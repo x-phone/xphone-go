@@ -42,6 +42,7 @@ type Server interface {
 	Listen(ctx context.Context) error
 	Shutdown() error
 	Dial(ctx context.Context, peer string, to string, from string, opts ...DialOption) (Call, error)
+	DialURI(ctx context.Context, uri string, from string, opts ...DialOption) (Call, error)
 	OnIncoming(func(call Call))
 	OnCallState(func(call Call, state CallState))
 	OnCallEnded(func(call Call, reason EndReason))
@@ -211,20 +212,72 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 
 	s.logger.Info("server dialing", "peer", peer, "to", to, "from", from, "target", target)
 
-	// Collect provisional responses to replay after call construction.
-	type sipResponse struct {
-		code   int
-		reason string
-	}
-	var responses []sipResponse
+	var responses []sipResponseEntry
 
 	dlg, err := s.dialOnce(dialCtx, target, from, rtpAddr, peerCodecs, dialOpts, func(code int, reason string) {
-		responses = append(responses, sipResponse{code, reason})
+		responses = append(responses, sipResponseEntry{code, reason})
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	return s.setupOutboundCall(dlg, responses, opts...)
+}
+
+// DialURI initiates an outbound call to an arbitrary SIP URI.
+// Unlike Dial, it does not require a pre-configured peer. Server-level
+// RTP address and codec preferences are used.
+func (s *server) DialURI(ctx context.Context, uri string, from string, opts ...DialOption) (Call, error) {
+	if !strings.HasPrefix(uri, "sip:") && !strings.HasPrefix(uri, "sips:") {
+		return nil, fmt.Errorf("xphone: invalid SIP URI: %q", uri)
+	}
+	if !strings.Contains(uri, "@") {
+		return nil, fmt.Errorf("xphone: SIP URI has no user part: %q", uri)
+	}
+
+	s.mu.Lock()
+	if s.state != ServerStateListening {
+		s.mu.Unlock()
+		return nil, ErrNotListening
+	}
+	s.mu.Unlock()
+
+	dialOpts := applyDialOptions(opts)
+	if from != "" {
+		dialOpts.CallerID = from
+	}
+
+	var dialCtx context.Context
+	var dialCancel context.CancelFunc
+	if dialOpts.Timeout > 0 {
+		dialCtx, dialCancel = context.WithTimeout(ctx, dialOpts.Timeout)
+	} else {
+		dialCtx, dialCancel = context.WithCancel(ctx)
+	}
+	defer dialCancel()
+
+	s.logger.Info("server dialing URI", "uri", uri, "from", from)
+
+	var responses []sipResponseEntry
+
+	dlg, err := s.dialOnce(dialCtx, uri, from, s.localIP, nil, dialOpts, func(code int, reason string) {
+		responses = append(responses, sipResponseEntry{code, reason})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return s.setupOutboundCall(dlg, responses, opts...)
+}
+
+// sipResponseEntry collects provisional SIP responses during dial.
+type sipResponseEntry struct {
+	code   int
+	reason string
+}
+
+// setupOutboundCall wires an outbound dialog into a Call after dialOnce succeeds.
+func (s *server) setupOutboundCall(dlg dialog, responses []sipResponseEntry, opts ...DialOption) (Call, error) {
 	c := newOutboundCall(dlg, opts...)
 	c.logger = s.logger
 	c.localIP = s.localIP

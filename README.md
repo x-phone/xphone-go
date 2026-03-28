@@ -285,6 +285,11 @@ func pcmToFloat32(frame []int16) []float32 {
 - Mute / unmute
 - 302 redirect following
 - Early media (183 Session Progress)
+- `ReplaceAudioWriter` — atomic audio source swap (e.g., music on hold)
+- Outbound proxy routing (`WithOutboundProxy`)
+- Separate outbound credentials (`WithOutboundCredentials`)
+- Custom headers on outbound INVITEs (`WithHeader`, `DialOptions.CustomHeaders`)
+- `Server.DialURI` — dial arbitrary SIP URIs without pre-configured peers
 
 ### DTMF — stable
 
@@ -438,6 +443,8 @@ phone := xphone.New(
     xphone.WithICE(true),                                   // ICE-Lite
     xphone.WithTurnServer("turn.example.com:3478"),
     xphone.WithTurnCredentials("user", "pass"),
+    xphone.WithOutboundProxy("sip:proxy.example.com:5060"),   // route INVITEs via proxy
+    xphone.WithOutboundCredentials("trunk-user", "trunk-pass"), // separate INVITE auth
     xphone.WithLogger(slog.Default()),
 )
 ```

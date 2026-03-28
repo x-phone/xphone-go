@@ -414,6 +414,15 @@ func (c *MockCall) BlindTransfer(target string) error {
 	return nil
 }
 
+func (c *MockCall) AttendedTransfer(other Call) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state != StateActive && c.state != StateOnHold {
+		return ErrInvalidState
+	}
+	return nil
+}
+
 func (c *MockCall) RTPRawReader() <-chan *rtp.Packet { return c.rtpRawReader }
 func (c *MockCall) RTPReader() <-chan *rtp.Packet    { return c.rtpReader }
 func (c *MockCall) RTPWriter() chan<- *rtp.Packet    { return c.rtpWriter }

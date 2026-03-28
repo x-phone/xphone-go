@@ -377,7 +377,7 @@ call.Hold()
 call.Resume()
 
 call.BlindTransfer("sip:1003@pbx.example.com")
-phone.AttendedTransfer(callA, callB)
+callA.AttendedTransfer(callB)
 
 call.Mute()
 call.Unmute()

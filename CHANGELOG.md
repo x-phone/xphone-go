@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Features
+- `Call.AttendedTransfer(other Call)` — attended transfer now lives on the Call interface, works for both Phone and Server calls (#67)
+- `Phone.AttendedTransfer(callA, callB)` remains as a thin delegate (non-breaking)
+
 ## v0.5.2
 
 ### Features

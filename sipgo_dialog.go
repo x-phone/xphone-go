@@ -2,6 +2,7 @@ package xphone
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -67,8 +68,21 @@ func (d *dialogBase) SendReInvite(sdpBody []byte) error {
 		req.AppendHeader(sip.NewHeader("Content-Type", contentTypeSDP))
 	}
 	req.SetBody(sdpBody)
-	_, err := d.sess.Do(ctx, req)
-	return err
+	res, err := d.sess.Do(ctx, req)
+	if err != nil {
+		return err
+	}
+	if res == nil || !res.IsSuccess() {
+		return fmt.Errorf("re-INVITE rejected: %d", res.StatusCode)
+	}
+	// ACK the 2xx response per RFC 3261 §13.2.2.4.
+	// Do() terminates the client transaction on return, but the ACK for a
+	// 2xx INVITE is sent directly by the TU, not via a transaction.
+	ack := sip.NewRequest(sip.ACK, d.remoteTarget())
+	if err := d.sess.WriteRequest(ack); err != nil {
+		return fmt.Errorf("send ACK: %w", err)
+	}
+	return nil
 }
 
 func (d *dialogBase) SendRefer(target string) error {

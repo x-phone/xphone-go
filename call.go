@@ -1214,8 +1214,13 @@ func (c *call) Hold() error {
 	if c.state != StateActive {
 		return ErrInvalidState
 	}
+	prevSDP := c.localSDP
 	c.localSDP = c.buildLocalSDP(sdp.DirSendOnly)
-	c.dlg.SendReInvite([]byte(c.localSDP))
+	if err := c.dlg.SendReInvite([]byte(c.localSDP)); err != nil {
+		c.localSDP = prevSDP
+		c.logger.Warn("hold re-INVITE failed", "id", c.id, "error", err)
+		return err
+	}
 	c.state = StateOnHold
 	c.fireOnState(StateOnHold)
 	c.signalMediaTimerReset(defaultHoldMediaTimeout)
@@ -1229,8 +1234,13 @@ func (c *call) Resume() error {
 	if c.state != StateOnHold {
 		return ErrInvalidState
 	}
+	prevSDP := c.localSDP
 	c.localSDP = c.buildLocalSDP(sdp.DirSendRecv)
-	c.dlg.SendReInvite([]byte(c.localSDP))
+	if err := c.dlg.SendReInvite([]byte(c.localSDP)); err != nil {
+		c.localSDP = prevSDP
+		c.logger.Warn("resume re-INVITE failed", "id", c.id, "error", err)
+		return err
+	}
 	c.state = StateActive
 	c.fireOnState(StateActive)
 	c.signalMediaTimerReset(c.effectiveMediaTimeout())

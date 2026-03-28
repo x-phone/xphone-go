@@ -228,6 +228,13 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 // Unlike Dial, it does not require a pre-configured peer. Server-level
 // RTP address and codec preferences are used.
 func (s *server) DialURI(ctx context.Context, uri string, from string, opts ...DialOption) (Call, error) {
+	if !strings.HasPrefix(uri, "sip:") && !strings.HasPrefix(uri, "sips:") {
+		return nil, fmt.Errorf("xphone: invalid SIP URI: %q", uri)
+	}
+	if !strings.Contains(uri, "@") {
+		return nil, fmt.Errorf("xphone: SIP URI has no user part: %q", uri)
+	}
+
 	s.mu.Lock()
 	if s.state != ServerStateListening {
 		s.mu.Unlock()
@@ -248,10 +255,6 @@ func (s *server) DialURI(ctx context.Context, uri string, from string, opts ...D
 		dialCtx, dialCancel = context.WithCancel(ctx)
 	}
 	defer dialCancel()
-
-	if !strings.HasPrefix(uri, "sip:") && !strings.HasPrefix(uri, "sips:") {
-		return nil, fmt.Errorf("xphone: invalid SIP URI: %q", uri)
-	}
 
 	s.logger.Info("server dialing URI", "uri", uri, "from", from)
 

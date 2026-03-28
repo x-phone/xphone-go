@@ -2,6 +2,7 @@ package xphone
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -242,12 +243,17 @@ func TestServer_DialURINotListening(t *testing.T) {
 
 func TestServer_DialURIInvalidURI(t *testing.T) {
 	srv := NewServer(ServerConfig{})
-	// Even if not listening, invalid URI should be caught — but state check runs first.
-	// Start by checking that a listening server rejects bad URIs.
 	_, err := srv.DialURI(nil, "http://example.com", "+15559876543")
-	// Not listening, so we get ErrNotListening before URI validation.
-	if !errors.Is(err, ErrNotListening) {
-		t.Fatalf("expected ErrNotListening, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid SIP URI") {
+		t.Fatalf("expected invalid SIP URI error, got %v", err)
+	}
+}
+
+func TestServer_DialURINoUserPart(t *testing.T) {
+	srv := NewServer(ServerConfig{})
+	_, err := srv.DialURI(nil, "sip:10.0.0.1:5060", "+15559876543")
+	if err == nil || !strings.Contains(err.Error(), "no user part") {
+		t.Fatalf("expected no user part error, got %v", err)
 	}
 }
 

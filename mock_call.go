@@ -52,6 +52,7 @@ type MockCall struct {
 	pcmReader      chan []int16
 	pcmWriter      chan []int16
 	pacedPCMWriter chan []int16
+	audioSrc       <-chan []int16
 
 	hasVideo       bool
 	videoCodecType VideoCodec
@@ -419,6 +420,16 @@ func (c *MockCall) RTPWriter() chan<- *rtp.Packet    { return c.rtpWriter }
 func (c *MockCall) PCMReader() <-chan []int16        { return c.pcmReader }
 func (c *MockCall) PCMWriter() chan<- []int16        { return c.pcmWriter }
 func (c *MockCall) PacedPCMWriter() chan<- []int16   { return c.pacedPCMWriter }
+
+func (c *MockCall) ReplaceAudioWriter(newSrc <-chan []int16) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state == StateEnded {
+		return ErrInvalidState
+	}
+	c.audioSrc = newSrc
+	return nil
+}
 
 func (c *MockCall) OnDTMF(fn func(string)) {
 	c.mu.Lock()

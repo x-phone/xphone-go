@@ -341,6 +341,11 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 		frameSize = int(cp.SamplesPerFrame())
 	}
 
+	// Swappable audio source (ReplaceAudioWriter).
+	c.mu.Lock()
+	userAudioCh := c.audioSrc
+	c.mu.Unlock()
+
 	for {
 		select {
 		case <-done:
@@ -426,6 +431,35 @@ func (s *mediaStream) run(jb *media.JitterBuffer, cp media.CodecProcessor, rtpCl
 			frame := pacerQueue[0]
 			pacerQueue = pacerQueue[1:]
 			s.encodePCMAndSend(frame, cp, rtcpStats, conn)
+
+		case <-c.audioSwap:
+			// Drain residual frames from old channel (non-blocking).
+			if userAudioCh != nil {
+			drain:
+				for {
+					select {
+					case _, ok := <-userAudioCh:
+						if !ok {
+							break drain
+						}
+					default:
+						break drain
+					}
+				}
+			}
+			c.mu.Lock()
+			userAudioCh = c.audioSrc
+			c.mu.Unlock()
+
+		case pcmFrame, ok := <-userAudioCh:
+			if !ok {
+				userAudioCh = nil
+				continue
+			}
+			if s.rtpWriterUsed || cp == nil {
+				continue
+			}
+			s.encodePCMAndSend(pcmFrame, cp, rtcpStats, conn)
 
 		case <-rtcpTick:
 			c.mu.Lock()

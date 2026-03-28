@@ -123,6 +123,7 @@ type Call interface {
 	PCMReader() <-chan []int16
 	PCMWriter() chan<- []int16
 	PacedPCMWriter() chan<- []int16
+	ReplaceAudioWriter(newSrc <-chan []int16) error
 	OnDTMF(func(digit string))
 	OnHold(func())
 	OnResume(func())
@@ -218,6 +219,8 @@ type call struct {
 	pcmReader       chan []int16
 	pcmWriter       chan []int16
 	pacedPCMWriter  chan []int16       // paced PCM: accepts arbitrary-length buffers, auto-framed at 20ms
+	audioSrc        <-chan []int16     // swappable audio input (protected by mu); nil = paused
+	audioSwap       chan struct{}      // signals media goroutine to re-read audioSrc
 	sentRTP         chan *rtp.Packet   // test hook: outbound packets copied here
 	mediaTimerReset chan time.Duration // signals the media goroutine to reset the timeout
 	callbackCh      chan func()        // single dispatch goroutine for all callbacks
@@ -313,6 +316,7 @@ func newInboundCall(d dialog) *call {
 		pcmReader:      make(chan []int16, 256),
 		pcmWriter:      make(chan []int16, 256),
 		pacedPCMWriter: make(chan []int16, 256),
+		audioSwap:      make(chan struct{}, 1),
 		callbackCh:     make(chan func(), 16),
 	}
 	c.audioStream = &mediaStream{call: c, outSSRC: randUint32()}
@@ -336,6 +340,7 @@ func newOutboundCall(d dialog, dialOpts ...DialOption) *call {
 		pcmReader:      make(chan []int16, 256),
 		pcmWriter:      make(chan []int16, 256),
 		pacedPCMWriter: make(chan []int16, 256),
+		audioSwap:      make(chan struct{}, 1),
 		callbackCh:     make(chan func(), 16),
 	}
 	c.audioStream = &mediaStream{call: c, outSSRC: randUint32()}
@@ -1396,6 +1401,22 @@ func (c *call) RTPWriter() chan<- *rtp.Packet    { return c.rtpWriter }
 func (c *call) PCMReader() <-chan []int16        { return c.pcmReader }
 func (c *call) PCMWriter() chan<- []int16        { return c.pcmWriter }
 func (c *call) PacedPCMWriter() chan<- []int16   { return c.pacedPCMWriter }
+
+func (c *call) ReplaceAudioWriter(newSrc <-chan []int16) error {
+	c.mu.Lock()
+	if c.state == StateEnded {
+		c.mu.Unlock()
+		return ErrInvalidState
+	}
+	c.audioSrc = newSrc
+	c.mu.Unlock()
+	// Non-blocking signal to media goroutine to re-read audioSrc.
+	select {
+	case c.audioSwap <- struct{}{}:
+	default:
+	}
+	return nil
+}
 
 func (c *call) HasVideo() bool {
 	c.mu.Lock()

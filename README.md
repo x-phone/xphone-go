@@ -290,6 +290,7 @@ func pcmToFloat32(frame []int16) []float32 {
 - Separate outbound credentials (`WithOutboundCredentials`)
 - Custom headers on outbound INVITEs (`WithHeader`, `DialOptions.CustomHeaders`)
 - `Server.DialURI` — dial arbitrary SIP URIs without pre-configured peers
+- Transfer failure surfaced via `EndedByTransferFailed` end reason
 
 ### DTMF — stable
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.5.0
+
 ### Features
 - `ReplaceAudioWriter(newSrc <-chan []int16)` atomically swaps the audio input channel on an active call — enables in-app music on hold without audio bleed (#58)
 - Outbound proxy support: `WithOutboundProxy("sip:proxy.example.com:5060")` routes INVITEs through a proxy

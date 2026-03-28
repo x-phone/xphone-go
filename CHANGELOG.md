@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Bug fixes
+- Fix Hold/Resume re-INVITE: send ACK after 200 OK per RFC 3261 §13.2.2.4 — previously the client transaction was destroyed before the 200 OK arrived, leaving the dialog in an undefined state (#61)
+- Hold() and Resume() now return errors from the re-INVITE instead of silently ignoring failures
+
 ## v0.5.0
 
 ### Features

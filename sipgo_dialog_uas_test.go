@@ -190,6 +190,10 @@ func TestSipgoDialogUAS_SendReInvite(t *testing.T) {
 	require.NotNil(t, sess.doReq, "Do should have been called")
 	assert.Equal(t, sip.INVITE, sess.doReq.Method, "request method should be INVITE")
 	assert.Equal(t, sdpBody, sess.doReq.Body(), "request body should be the SDP")
+
+	// ACK must be sent after 200 OK.
+	require.NotNil(t, sess.writeReq, "WriteRequest should have been called for ACK")
+	assert.Equal(t, sip.ACK, sess.writeReq.Method, "ACK should be sent after 200 OK")
 }
 
 func TestSipgoDialogUAS_SendReInvite_Error(t *testing.T) {

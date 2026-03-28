@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/github/go-mod-go-version/x-phone/xphone-go)](https://github.com/x-phone/xphone-go)
 
-A Go library for SIP calling and RTP media. Register with a SIP trunk or PBX, make and receive phone calls, and get decoded PCM audio frames through Go channels.
+A Go library for SIP calling and RTP media. Register with a SIP trunk or PBX, or accept calls directly as a SIP server — and get decoded PCM audio frames through Go channels.
 
 > Also available in [Rust](https://github.com/x-phone/xphone-rust).
 

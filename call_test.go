@@ -491,6 +491,24 @@ func TestCall_BlindTransferWhenNotActiveReturnsInvalidState(t *testing.T) {
 	assert.ErrorIs(t, call.BlindTransfer("sip:1003@pbx"), ErrInvalidState)
 }
 
+// --- AttendedTransfer (on Call) ---
+
+func TestCall_AttendedTransfer_RejectsInactiveCall(t *testing.T) {
+	callA := testInboundCall(t)
+	callB := testInboundCall(t)
+	callB.Accept()
+
+	assert.ErrorIs(t, callA.AttendedTransfer(callB), ErrInvalidState)
+}
+
+func TestCall_AttendedTransfer_RejectsInactiveOther(t *testing.T) {
+	callA := testInboundCall(t)
+	callA.Accept()
+	callB := testInboundCall(t)
+
+	assert.ErrorIs(t, callA.AttendedTransfer(callB), ErrInvalidState)
+}
+
 // --- ReplaceAudioWriter ---
 
 func TestCall_ReplaceAudioWriter_BasicSwap(t *testing.T) {

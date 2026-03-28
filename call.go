@@ -117,6 +117,7 @@ type Call interface {
 	UnmuteAudio() error
 	SendDTMF(digit string) error
 	BlindTransfer(target string) error
+	AttendedTransfer(other Call) error
 	RTPRawReader() <-chan *rtp.Packet
 	RTPReader() <-chan *rtp.Packet
 	RTPWriter() chan<- *rtp.Packet
@@ -1367,6 +1368,86 @@ func (c *call) BlindTransfer(target string) error {
 			c.endWithReason(EndedByTransferFailed)
 		}
 	})
+	return nil
+}
+
+// AttendedTransfer performs an attended (consultative) transfer.
+// This call's dialog sends a REFER with a Replaces header built from the
+// other call's dialog identifiers. On NOTIFY 200, both calls end with
+// EndedByTransfer; on failure (NOTIFY >= 300), both end with EndedByTransferFailed.
+// Both calls must be Active or OnHold.
+func (c *call) AttendedTransfer(other Call) error {
+	if other == nil {
+		return fmt.Errorf("xphone: other call is nil")
+	}
+	b, ok := other.(*call)
+	if !ok {
+		return fmt.Errorf("xphone: unsupported Call implementation")
+	}
+	if b == c {
+		return fmt.Errorf("xphone: cannot transfer a call to itself")
+	}
+	// Validate both call states before touching dialog internals.
+	if s := other.State(); s != StateActive && s != StateOnHold {
+		return ErrInvalidState
+	}
+	c.mu.Lock()
+	if c.state != StateActive && c.state != StateOnHold {
+		c.mu.Unlock()
+		return ErrInvalidState
+	}
+	c.mu.Unlock()
+
+	// Extract other call's dialog identifiers for the Replaces header.
+	// Read from b without holding c.mu to avoid lock ordering issues.
+	bCallID, bLocalTag, bRemoteTag := b.dialogID()
+	if bCallID == "" || bLocalTag == "" || bRemoteTag == "" {
+		return fmt.Errorf("xphone: attended transfer: other call dialog missing call-id or tags")
+	}
+
+	// Build remote party URI from other call's headers.
+	var remoteURI string
+	if other.Direction() == DirectionOutbound {
+		if vals := b.dlg.Header("To"); len(vals) > 0 {
+			remoteURI = sipHeaderURI(vals[0])
+		}
+	} else {
+		if vals := b.dlg.Header("From"); len(vals) > 0 {
+			remoteURI = sipHeaderURI(vals[0])
+		}
+	}
+	if remoteURI == "" {
+		return fmt.Errorf("xphone: attended transfer: cannot determine other call remote URI")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state != StateActive && c.state != StateOnHold {
+		return ErrInvalidState
+	}
+
+	// Build Refer-To with Replaces parameter (RFC 3891).
+	referTo := remoteURI + "?Replaces=" +
+		uriEncode(bCallID) + "%3Bto-tag%3D" +
+		uriEncode(bRemoteTag) + "%3Bfrom-tag%3D" +
+		uriEncode(bLocalTag)
+
+	// Send REFER, then wire NOTIFY handler on success.
+	if err := c.dlg.SendRefer(referTo); err != nil {
+		return err
+	}
+
+	// Wire NOTIFY handler: end both calls on success (200) or failure (>=300).
+	c.dlg.OnNotify(func(code int) {
+		if code == 200 {
+			c.endWithReason(EndedByTransfer)
+			b.endWithReason(EndedByTransfer)
+		} else if code >= 300 {
+			c.endWithReason(EndedByTransferFailed)
+			b.endWithReason(EndedByTransferFailed)
+		}
+	})
+
 	return nil
 }
 

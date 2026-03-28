@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Features
+- `Server.DialURI(ctx, uri, from, opts...)` initiates outbound calls to arbitrary SIP URIs without requiring a pre-configured peer (#64)
+
 ## v0.5.1
 
 ### Bug fixes

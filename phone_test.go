@@ -312,7 +312,8 @@ func TestPhone_ConnectWithEmptyConfig(t *testing.T) {
 
 func TestPhone_DisconnectTransitionsToDisconnected(t *testing.T) {
 	tr := testutil.NewMockTransport()
-	tr.RespondWith(200, "OK")
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
 
 	p := newPhone(testConfig())
 	p.connectWithTransport(tr)
@@ -324,7 +325,8 @@ func TestPhone_DisconnectTransitionsToDisconnected(t *testing.T) {
 
 func TestPhone_DisconnectStopsRefreshLoop(t *testing.T) {
 	tr := testutil.NewMockTransport()
-	tr.RespondWith(200, "OK")
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
 
 	cfg := testConfig()
 	cfg.RegisterExpiry = 50 * time.Millisecond
@@ -342,7 +344,8 @@ func TestPhone_DisconnectStopsRefreshLoop(t *testing.T) {
 
 func TestPhone_DisconnectClosesTransport(t *testing.T) {
 	tr := testutil.NewMockTransport()
-	tr.RespondWith(200, "OK")
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
 
 	p := newPhone(testConfig())
 	p.connectWithTransport(tr)
@@ -359,7 +362,8 @@ func TestPhone_DisconnectWhenDisconnectedReturnsError(t *testing.T) {
 
 func TestPhone_DisconnectTwiceReturnsError(t *testing.T) {
 	tr := testutil.NewMockTransport()
-	tr.RespondWith(200, "OK")
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
 
 	p := newPhone(testConfig())
 	p.connectWithTransport(tr)
@@ -370,7 +374,8 @@ func TestPhone_DisconnectTwiceReturnsError(t *testing.T) {
 
 func TestPhone_CannotDialAfterDisconnect(t *testing.T) {
 	tr := testutil.NewMockTransport()
-	tr.RespondWith(200, "OK")
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
 
 	p := newPhone(testConfig())
 	p.connectWithTransport(tr)
@@ -383,7 +388,8 @@ func TestPhone_CannotDialAfterDisconnect(t *testing.T) {
 
 func TestPhone_DisconnectFiresOnUnregistered(t *testing.T) {
 	tr := testutil.NewMockTransport()
-	tr.RespondWith(200, "OK")
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
 
 	p := newPhone(testConfig())
 	p.connectWithTransport(tr)
@@ -398,6 +404,42 @@ func TestPhone_DisconnectFiresOnUnregistered(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("OnUnregistered never fired after Disconnect")
 	}
+}
+
+func TestPhone_DisconnectSendsUnregister(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
+
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	p.Disconnect()
+
+	// Should have sent 2 REGISTERs: initial + un-REGISTER (Expires: 0).
+	assert.Equal(t, 2, tr.CountSent("REGISTER"))
+
+	last := tr.LastSent("REGISTER")
+	require.NotNil(t, last)
+	assert.Equal(t, "0", last.Header("Expires"),
+		"Disconnect must send REGISTER with Expires: 0")
+}
+
+func TestPhone_DisconnectSendsUnregisterBeforeClosingTransport(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
+
+	p := newPhone(testConfig())
+	p.connectWithTransport(tr)
+
+	p.Disconnect()
+
+	// Verify un-REGISTER was sent (transport would reject requests after Close).
+	last := tr.LastSent("REGISTER")
+	require.NotNil(t, last)
+	assert.Equal(t, "0", last.Header("Expires"))
+	assert.True(t, tr.Closed(), "transport must be closed after un-REGISTER")
 }
 
 // --- Callback buffering (set before Connect, apply after) ---
@@ -848,7 +890,8 @@ func TestPhone_ByeOneCallLeavesOtherActive(t *testing.T) {
 
 func TestPhone_DisconnectEndsAllCalls(t *testing.T) {
 	tr := testutil.NewMockTransport()
-	tr.RespondWith(200, "OK")
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
 
 	p := newPhone(testConfig())
 	p.connectWithTransport(tr)

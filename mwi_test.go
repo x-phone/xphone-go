@@ -169,8 +169,9 @@ func TestMWI_SubscribesOnConnect(t *testing.T) {
 	applyDefaults(&p.cfg)
 
 	tr := testutil.NewMockTransport()
-	// Queue: REGISTER 200, SUBSCRIBE 200, unsubscribe 200.
+	// Queue: REGISTER 200, SUBSCRIBE 200, unsubscribe 200, un-REGISTER 200.
 	tr.RespondSequence(
+		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
@@ -201,7 +202,8 @@ func TestMWI_NoSubscribeWithoutURI(t *testing.T) {
 	applyDefaults(&p.cfg)
 
 	tr := testutil.NewMockTransport()
-	tr.RespondWith(200, "OK")
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
 
 	p.connectWithTransport(tr)
 	defer p.Disconnect()
@@ -229,8 +231,9 @@ func TestMWI_FiresOnVoicemailCallback(t *testing.T) {
 	})
 
 	tr := testutil.NewMockTransport()
-	// Queue: REGISTER 200, SUBSCRIBE 200, unsubscribe 200.
+	// Queue: REGISTER 200, SUBSCRIBE 200, unsubscribe 200, un-REGISTER 200.
 	tr.RespondSequence(
+		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
@@ -268,8 +271,9 @@ func TestMWI_CallbackSetAfterConnect(t *testing.T) {
 	applyDefaults(&p.cfg)
 
 	tr := testutil.NewMockTransport()
-	// Queue: REGISTER 200, SUBSCRIBE 200, unsubscribe 200.
+	// Queue: REGISTER 200, SUBSCRIBE 200, unsubscribe 200, un-REGISTER 200.
 	tr.RespondSequence(
+		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
@@ -315,8 +319,9 @@ func TestMWI_DisconnectStopsSubscription(t *testing.T) {
 	applyDefaults(&p.cfg)
 
 	tr := testutil.NewMockTransport()
-	// Queue: REGISTER 200, initial SUBSCRIBE 200, unsubscribe SUBSCRIBE 200.
+	// Queue: REGISTER 200, initial SUBSCRIBE 200, unsubscribe SUBSCRIBE 200, un-REGISTER 200.
 	tr.RespondSequence(
+		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},

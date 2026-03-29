@@ -76,7 +76,8 @@ func TestLogger_ConnectDisconnect(t *testing.T) {
 	logger, buf := newTestLogger()
 
 	tr := testutil.NewMockTransport()
-	tr.RespondWith(200, "OK")
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
 
 	cfg := testConfig()
 	cfg.Logger = logger

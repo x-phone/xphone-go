@@ -186,6 +186,54 @@ func TestRegistry_StopsCleanlyOnDisconnect(t *testing.T) {
 	assert.Equal(t, countAfterStop, tr.CountSent("REGISTER"))
 }
 
+func TestRegistry_UnregisterSendsExpiresZero(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK") // initial REGISTER
+	tr.RespondWith(200, "OK") // un-REGISTER
+
+	r := newRegistry(tr, testConfig())
+	r.Start(context.Background())
+
+	r.Unregister()
+
+	// Should have sent 2 REGISTERs: initial + un-REGISTER.
+	assert.Equal(t, 2, tr.CountSent("REGISTER"))
+
+	last := tr.LastSent("REGISTER")
+	require.NotNil(t, last)
+	assert.Equal(t, "0", last.Header("Expires"), "un-REGISTER must have Expires: 0")
+}
+
+func TestRegistry_UnregisterSkippedWhenNotRegistered(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.FailNext(99)
+
+	cfg := testConfig()
+	cfg.RegisterMaxRetry = 1
+	r := newRegistry(tr, cfg)
+	r.Start(context.Background())
+
+	// Registration failed — Unregister should be a no-op.
+	r.Unregister()
+
+	// Only the failed initial REGISTER should have been sent.
+	assert.Equal(t, 1, tr.CountSent("REGISTER"))
+}
+
+func TestRegistry_UnregisterLogsWarningOnFailure(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondWith(200, "OK")           // initial REGISTER
+	tr.RespondWith(500, "Server Error") // un-REGISTER rejected
+
+	r := newRegistry(tr, testConfig())
+	r.Start(context.Background())
+
+	// Should not panic or hang — logs warning internally.
+	r.Unregister()
+
+	assert.Equal(t, 2, tr.CountSent("REGISTER"))
+}
+
 func TestRegistry_NATKeepalivesSentOnInterval(t *testing.T) {
 	tr := testutil.NewMockTransport()
 	tr.RespondWith(200, "OK")

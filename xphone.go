@@ -398,6 +398,13 @@ func (p *phone) Disconnect() error {
 		mwi.stop()
 	}
 
+	// Send un-REGISTER (Expires: 0) to remove our contact from the registrar
+	// per RFC 3261 §10.2.2. This must happen before Stop() cancels the
+	// lifecycle context and before Close() tears down the transport.
+	if reg != nil {
+		reg.Unregister()
+	}
+
 	// Stop the registry (cancels refresh loop and re-registration goroutines).
 	if reg != nil {
 		reg.Stop()

@@ -184,19 +184,19 @@ func TestServer_Callbacks(t *testing.T) {
 	srv.OnError(func(error) { errorCalled = true })
 
 	s := srv.(*server)
-	if s.incoming == nil {
+	if len(s.incomingFns) == 0 {
 		t.Error("OnIncoming not set")
 	}
-	if s.onCallStateFn == nil {
+	if len(s.onCallStateFns) == 0 {
 		t.Error("OnCallState not set")
 	}
-	if s.onCallEndedFn == nil {
+	if len(s.onCallEndedFns) == 0 {
 		t.Error("OnCallEnded not set")
 	}
-	if s.onCallDTMFFn == nil {
+	if len(s.onCallDTMFFns) == 0 {
 		t.Error("OnCallDTMF not set")
 	}
-	if s.onErrorFn == nil {
+	if len(s.onErrorFns) == 0 {
 		t.Error("OnError not set")
 	}
 

@@ -227,7 +227,8 @@ func (c *call) handleReInvite(responder reInviteResponder, rawSDP string) {
 
 	// Video upgrade: remote adds m=video with codecs, we don't have video yet.
 	if !currentlyHasVideo && vm != nil && vm.Port > 0 && len(vm.Codecs) > 0 {
-		requestFn := c.onVideoRequestFn
+		requestFns := make([]func(*VideoUpgradeRequest), len(c.onVideoRequestFns))
+		copy(requestFns, c.onVideoRequestFns)
 		c.mu.Unlock()
 
 		// Pre-allocate video socket outside the lock.
@@ -248,8 +249,10 @@ func (c *call) handleReInvite(responder reInviteResponder, rawSDP string) {
 		c.pendingVideoUpgrade = req
 		c.mu.Unlock()
 
-		if requestFn != nil {
-			c.dispatch(func() { requestFn(req) })
+		if len(requestFns) > 0 {
+			for _, fn := range requestFns {
+				c.dispatch(func() { fn(req) })
+			}
 		} else {
 			// No handler — auto-reject (safe default, no video without consent).
 			req.Reject()
@@ -264,16 +267,18 @@ func (c *call) handleReInvite(responder reInviteResponder, rawSDP string) {
 	c.setRemoteEndpoint(sess)
 
 	dir := sess.Dir()
-	var holdFn, resumeFn func()
+	var holdFns, resumeFns []func()
 	switch {
 	case dir == sdp.DirSendOnly && c.state == StateActive:
 		c.state = StateOnHold
-		holdFn = c.onHoldFn
+		holdFns = make([]func(), len(c.onHoldFns))
+		copy(holdFns, c.onHoldFns)
 		c.fireOnState(StateOnHold)
 		c.signalMediaTimerReset(defaultHoldMediaTimeout)
 	case dir == sdp.DirSendRecv && c.state == StateOnHold:
 		c.state = StateActive
-		resumeFn = c.onResumeFn
+		resumeFns = make([]func(), len(c.onResumeFns))
+		copy(resumeFns, c.onResumeFns)
 		c.fireOnState(StateActive)
 		c.signalMediaTimerReset(c.effectiveMediaTimeout())
 	}
@@ -293,11 +298,11 @@ func (c *call) handleReInvite(responder reInviteResponder, rawSDP string) {
 		responder.Respond(200, "OK", []byte(answerSDP))
 	}
 
-	if holdFn != nil {
-		c.dispatch(holdFn)
+	for _, fn := range holdFns {
+		c.dispatch(fn)
 	}
-	if resumeFn != nil {
-		c.dispatch(resumeFn)
+	for _, fn := range resumeFns {
+		c.dispatch(fn)
 	}
 }
 
@@ -407,7 +412,7 @@ func (c *call) AddVideo(codecs ...VideoCodec) error {
 func (c *call) OnVideoRequest(fn func(*VideoUpgradeRequest)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onVideoRequestFn = fn
+	c.onVideoRequestFns = append(c.onVideoRequestFns, fn)
 }
 
 // OnVideo registers a callback that fires when video becomes active on the call
@@ -415,5 +420,5 @@ func (c *call) OnVideoRequest(fn func(*VideoUpgradeRequest)) {
 func (c *call) OnVideo(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onVideoFn = fn
+	c.onVideoFns = append(c.onVideoFns, fn)
 }

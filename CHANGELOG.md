@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Features
-- `WithDisplayName(name)` sets the display name in SIP Contact/From headers and User-Agent — helps PBXes identify the device (#75)
+- `WithDisplayName(name)` sets the display name in SIP Contact headers — helps PBXes identify the device (#75)
 
 ## v0.5.4
 

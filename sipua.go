@@ -120,12 +120,8 @@ func newSipUA(cfg Config, contactIP string) (*sipUA, error) {
 		return nil, fmt.Errorf("xphone: unsupported protocol %q", cfg.Transport)
 	}
 
-	userAgent := cfg.Username
-	if cfg.DisplayName != "" {
-		userAgent = cfg.DisplayName
-	}
 	ua, err := sipgo.NewUA(
-		sipgo.WithUserAgent(userAgent),
+		sipgo.WithUserAgent(cfg.Username),
 		sipgo.WithUserAgentHostname(cfg.Host),
 	)
 	if err != nil {
@@ -639,7 +635,8 @@ func (s *sipUA) SendRequest(ctx context.Context, method string, headers map[stri
 	// Add Contact for REGISTER.
 	if method == "REGISTER" {
 		contact := sip.ContactHeader{
-			Address: sip.Uri{Scheme: "sip", User: s.cfg.Username, Host: s.localIP},
+			DisplayName: s.cfg.DisplayName,
+			Address:     sip.Uri{Scheme: "sip", User: s.cfg.Username, Host: s.localIP},
 		}
 		req.AppendHeader(&contact)
 	}

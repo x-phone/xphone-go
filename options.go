@@ -61,7 +61,7 @@ type Config struct {
 	// Example: "sip:*97@pbx.local". When set, the phone auto-subscribes on connect.
 	VoicemailURI string
 
-	// DisplayName is included in SIP Contact/From headers and User-Agent.
+	// DisplayName is included in SIP Contact headers.
 	// Helps PBXes identify the device (e.g., "VoiceApp/1.0").
 	DisplayName string
 
@@ -404,7 +404,7 @@ func WithVoicemailURI(uri string) PhoneOption {
 	}
 }
 
-// WithDisplayName sets the display name for SIP Contact/From headers and User-Agent.
+// WithDisplayName sets the display name for SIP Contact headers.
 // Helps PBXes identify the device (e.g., "VoiceApp/1.0").
 func WithDisplayName(name string) PhoneOption {
 	return func(c *Config) {

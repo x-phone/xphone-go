@@ -778,16 +778,17 @@ func (c *call) startVideoMedia() {
 
 	s := c.videoStream
 	s.reset(conn, c.videoRTCPConn, rtcpRemoteAddr, done)
-	videoFn := c.onVideoFn
+	videoFns := make([]func(), len(c.onVideoFns))
+	copy(videoFns, c.onVideoFns)
 	c.videoWg.Add(1) // must be under lock so stopVideoPipeline.Wait() can't race
 	c.mu.Unlock()
 
 	c.logger.Debug("video pipeline started", "id", c.id)
 	go s.runVideo()
 
-	// Fire OnVideo callback for all paths (initial video call, mid-call upgrade).
-	if videoFn != nil {
-		c.dispatch(videoFn)
+	// Fire OnVideo callbacks for all paths (initial video call, mid-call upgrade).
+	for _, fn := range videoFns {
+		c.dispatch(fn)
 	}
 }
 

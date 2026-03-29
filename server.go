@@ -70,14 +70,14 @@ type server struct {
 
 	peerMatchers  []peerMatcher // pre-parsed IP/CIDR data for auth
 	cancelListen  context.CancelFunc
-	incoming      func(Call)
+	incomingFns   []func(Call)
 	calls         map[string]*call
 	callCreatedAt map[string]time.Time // tracks when each call was registered
 
-	onCallStateFn func(Call, CallState)
-	onCallEndedFn func(Call, EndReason)
-	onCallDTMFFn  func(Call, string)
-	onErrorFn     func(error)
+	onCallStateFns []func(Call, CallState)
+	onCallEndedFns []func(Call, EndReason)
+	onCallDTMFFns  []func(Call, string)
+	onErrorFns     []func(error)
 }
 
 // NewServer creates a new Server with the given configuration.
@@ -325,31 +325,31 @@ func (s *server) setupOutboundCall(dlg dialog, responses []sipResponseEntry, opt
 func (s *server) OnIncoming(fn func(Call)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.incoming = fn
+	s.incomingFns = append(s.incomingFns, fn)
 }
 
 func (s *server) OnCallState(fn func(Call, CallState)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.onCallStateFn = fn
+	s.onCallStateFns = append(s.onCallStateFns, fn)
 }
 
 func (s *server) OnCallEnded(fn func(Call, EndReason)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.onCallEndedFn = fn
+	s.onCallEndedFns = append(s.onCallEndedFns, fn)
 }
 
 func (s *server) OnCallDTMF(fn func(Call, string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.onCallDTMFFn = fn
+	s.onCallDTMFFns = append(s.onCallDTMFFns, fn)
 }
 
 func (s *server) OnError(fn func(error)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.onErrorFn = fn
+	s.onErrorFns = append(s.onErrorFns, fn)
 }
 
 func (s *server) FindCall(callID string) Call {
@@ -662,10 +662,11 @@ func (s *server) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 func (s *server) handleDialogInvite(dlg dialog, from, to, sdpBody, peerName string) {
 	// Check handler BEFORE allocating resources.
 	s.mu.Lock()
-	fn := s.incoming
+	incomingFns := make([]func(Call), len(s.incomingFns))
+	copy(incomingFns, s.incomingFns)
 	s.mu.Unlock()
 
-	if fn == nil {
+	if len(incomingFns) == 0 {
 		s.logger.Warn("no OnIncoming handler, rejecting call", "from", from)
 		if err := dlg.Respond(480, "Temporarily Unavailable", nil); err != nil {
 			s.logger.Error("failed to send 480", "err", err)
@@ -728,7 +729,9 @@ func (s *server) handleDialogInvite(dlg dialog, from, to, sdpBody, peerName stri
 		s.logger.Error("failed to send 180 Ringing", "err", err)
 	}
 
-	fn(c)
+	for _, fn := range incomingFns {
+		fn(c)
+	}
 }
 
 // dialOnce sends a single INVITE to a peer target.
@@ -915,7 +918,52 @@ func (s *server) findCall(callID string) *call {
 
 // wireCallCallbacks hooks server-level callbacks onto a call. Must be called with s.mu held.
 func (s *server) wireCallCallbacks(c *call) {
-	wireCallCallbacks(c, s.onCallStateFn, s.onCallEndedFn, s.onCallDTMFFn)
+	wireCallCallbacks(c, s.composedOnCallState(), s.composedOnCallEnded(), s.composedOnCallDTMF())
+}
+
+// composedOnCallState returns a single function that calls all registered
+// OnCallState callbacks, or nil if none are registered. Must be called with s.mu held.
+func (s *server) composedOnCallState() func(Call, CallState) {
+	if len(s.onCallStateFns) == 0 {
+		return nil
+	}
+	fns := make([]func(Call, CallState), len(s.onCallStateFns))
+	copy(fns, s.onCallStateFns)
+	return func(call Call, state CallState) {
+		for _, fn := range fns {
+			fn(call, state)
+		}
+	}
+}
+
+// composedOnCallEnded returns a single function that calls all registered
+// OnCallEnded callbacks, or nil if none are registered. Must be called with s.mu held.
+func (s *server) composedOnCallEnded() func(Call, EndReason) {
+	if len(s.onCallEndedFns) == 0 {
+		return nil
+	}
+	fns := make([]func(Call, EndReason), len(s.onCallEndedFns))
+	copy(fns, s.onCallEndedFns)
+	return func(call Call, reason EndReason) {
+		for _, fn := range fns {
+			fn(call, reason)
+		}
+	}
+}
+
+// composedOnCallDTMF returns a single function that calls all registered
+// OnCallDTMF callbacks, or nil if none are registered. Must be called with s.mu held.
+func (s *server) composedOnCallDTMF() func(Call, string) {
+	if len(s.onCallDTMFFns) == 0 {
+		return nil
+	}
+	fns := make([]func(Call, string), len(s.onCallDTMFFns))
+	copy(fns, s.onCallDTMFFns)
+	return func(call Call, digit string) {
+		for _, fn := range fns {
+			fn(call, digit)
+		}
+	}
 }
 
 // applyCallConfig threads server-level config into a new call.

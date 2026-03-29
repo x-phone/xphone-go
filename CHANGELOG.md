@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug fixes
+- `On*` callback setters on `Call`, `Phone`, and `Server` now append instead of replace — calling `OnEnded` (or any other `On*` method) multiple times registers all callbacks instead of silently dropping earlier ones (#71)
+
 ## v0.5.3
 
 ### Features

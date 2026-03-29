@@ -48,16 +48,16 @@ type Phone interface {
 type phone struct {
 	mu sync.Mutex
 
-	cfg        Config
-	logger     *slog.Logger
-	tr         sipTransport
-	reg        *registry
-	localIP    string // cached localIPFor(cfg.Host), or STUN-mapped IP after Connect
-	hostIP     string // real local interface IP (pre-STUN, for ICE host candidate)
-	codecPrefs []int  // cached codecPrefsToInts(cfg.CodecPrefs), set at construction
-	state      PhoneState
-	incoming   func(Call)
-	calls      map[string]*call // active calls keyed by SIP Call-ID
+	cfg         Config
+	logger      *slog.Logger
+	tr          sipTransport
+	reg         *registry
+	localIP     string // cached localIPFor(cfg.Host), or STUN-mapped IP after Connect
+	hostIP      string // real local interface IP (pre-STUN, for ICE host candidate)
+	codecPrefs  []int  // cached codecPrefsToInts(cfg.CodecPrefs), set at construction
+	state       PhoneState
+	incomingFns []func(Call)
+	calls       map[string]*call // active calls keyed by SIP Call-ID
 
 	// dialFn establishes an outbound SIP dialog and returns a dialog interface.
 	// Production: set by Connect() to use sipgo's dialog API.
@@ -66,21 +66,21 @@ type phone struct {
 	dialFn func(ctx context.Context, target string, opts DialOptions, onResponse func(code int, reason string)) (dialog, error)
 
 	// Buffered callbacks set before Connect.
-	onRegisteredFn   func()
-	onUnregisteredFn func()
-	onErrorFn        func(error)
+	onRegisteredFns   []func()
+	onUnregisteredFns []func()
+	onErrorFns        []func(error)
 
 	// Phone-level call callbacks — auto-wired to every new call.
-	onCallStateFn func(Call, CallState)
-	onCallEndedFn func(Call, EndReason)
-	onCallDTMFFn  func(Call, string)
+	onCallStateFns []func(Call, CallState)
+	onCallEndedFns []func(Call, EndReason)
+	onCallDTMFFns  []func(Call, string)
 
 	// SIP MESSAGE callback.
-	onMessageFn func(SipMessage)
+	onMessageFns []func(SipMessage)
 
 	// MWI (voicemail) state.
-	onVoicemailFn func(VoicemailStatus)
-	mwi           *mwiSubscriber
+	onVoicemailFns []func(VoicemailStatus)
+	mwi            *mwiSubscriber
 
 	// Subscription manager for Watch/SubscribeEvent.
 	subMgr *subscriptionManager
@@ -115,7 +115,52 @@ func newPhone(cfg Config) *phone {
 // OnCallDTMF) onto a call's internal callback fields so they coexist with
 // user-set per-call callbacks. Must be called with p.mu held.
 func (p *phone) wireCallCallbacks(c *call) {
-	wireCallCallbacks(c, p.onCallStateFn, p.onCallEndedFn, p.onCallDTMFFn)
+	wireCallCallbacks(c, p.composedOnCallState(), p.composedOnCallEnded(), p.composedOnCallDTMF())
+}
+
+// composedOnCallState returns a single function that calls all registered
+// OnCallState callbacks, or nil if none are registered. Must be called with p.mu held.
+func (p *phone) composedOnCallState() func(Call, CallState) {
+	if len(p.onCallStateFns) == 0 {
+		return nil
+	}
+	fns := make([]func(Call, CallState), len(p.onCallStateFns))
+	copy(fns, p.onCallStateFns)
+	return func(call Call, state CallState) {
+		for _, fn := range fns {
+			fn(call, state)
+		}
+	}
+}
+
+// composedOnCallEnded returns a single function that calls all registered
+// OnCallEnded callbacks, or nil if none are registered. Must be called with p.mu held.
+func (p *phone) composedOnCallEnded() func(Call, EndReason) {
+	if len(p.onCallEndedFns) == 0 {
+		return nil
+	}
+	fns := make([]func(Call, EndReason), len(p.onCallEndedFns))
+	copy(fns, p.onCallEndedFns)
+	return func(call Call, reason EndReason) {
+		for _, fn := range fns {
+			fn(call, reason)
+		}
+	}
+}
+
+// composedOnCallDTMF returns a single function that calls all registered
+// OnCallDTMF callbacks, or nil if none are registered. Must be called with p.mu held.
+func (p *phone) composedOnCallDTMF() func(Call, string) {
+	if len(p.onCallDTMFFns) == 0 {
+		return nil
+	}
+	fns := make([]func(Call, string), len(p.onCallDTMFFns))
+	copy(fns, p.onCallDTMFFns)
+	return func(call Call, digit string) {
+		for _, fn := range fns {
+			fn(call, digit)
+		}
+	}
 }
 
 // setupSRTP is a convenience wrapper calling call.setupSRTP with the phone logger.
@@ -174,14 +219,32 @@ func (p *phone) connectWithTransport(tr sipTransport) error {
 	}
 	p.reg = newRegistry(tr, p.cfg)
 	// Apply buffered callbacks to the registry.
-	if p.onRegisteredFn != nil {
-		p.reg.OnRegistered(p.onRegisteredFn)
+	if len(p.onRegisteredFns) > 0 {
+		fns := make([]func(), len(p.onRegisteredFns))
+		copy(fns, p.onRegisteredFns)
+		p.reg.OnRegistered(func() {
+			for _, fn := range fns {
+				fn()
+			}
+		})
 	}
-	if p.onUnregisteredFn != nil {
-		p.reg.OnUnregistered(p.onUnregisteredFn)
+	if len(p.onUnregisteredFns) > 0 {
+		fns := make([]func(), len(p.onUnregisteredFns))
+		copy(fns, p.onUnregisteredFns)
+		p.reg.OnUnregistered(func() {
+			for _, fn := range fns {
+				fn()
+			}
+		})
 	}
-	if p.onErrorFn != nil {
-		p.reg.OnError(p.onErrorFn)
+	if len(p.onErrorFns) > 0 {
+		fns := make([]func(error), len(p.onErrorFns))
+		copy(fns, p.onErrorFns)
+		p.reg.OnError(func(err error) {
+			for _, fn := range fns {
+				fn(err)
+			}
+		})
 	}
 	p.mu.Unlock()
 
@@ -199,14 +262,19 @@ func (p *phone) connectWithTransport(tr sipTransport) error {
 		p.state = PhoneStateRegistrationFailed
 	}
 	voicemailURI := p.cfg.VoicemailURI
-	voicemailFn := p.onVoicemailFn
+	voicemailFns := make([]func(VoicemailStatus), len(p.onVoicemailFns))
+	copy(voicemailFns, p.onVoicemailFns)
 	p.mu.Unlock()
 
 	// Auto-start MWI subscription if configured and registration succeeded.
 	if err == nil && voicemailURI != "" {
 		sub := newMWISubscriber(tr, voicemailURI, p.logger)
-		if voicemailFn != nil {
-			sub.setOnVoicemail(voicemailFn)
+		if len(voicemailFns) > 0 {
+			sub.setOnVoicemail(func(status VoicemailStatus) {
+				for _, fn := range voicemailFns {
+					fn(status)
+				}
+			})
 		}
 		sub.start()
 		p.mu.Lock()
@@ -304,7 +372,8 @@ func (p *phone) Disconnect() error {
 	p.tr = nil
 	p.mwi = nil
 	p.subMgr = nil
-	fn := p.onUnregisteredFn
+	unregFns := make([]func(), len(p.onUnregisteredFns))
+	copy(unregFns, p.onUnregisteredFns)
 
 	// Snapshot and clear active calls so we can end them outside the lock.
 	activeCalls := make([]*call, 0, len(p.calls))
@@ -341,8 +410,8 @@ func (p *phone) Disconnect() error {
 
 	p.logger.Info("phone disconnected")
 
-	// Fire OnUnregistered callback.
-	if fn != nil {
+	// Fire OnUnregistered callbacks.
+	for _, fn := range unregFns {
 		go fn()
 	}
 
@@ -591,9 +660,10 @@ func (p *phone) handleDialogInvite(dlg dialog, from, to, sdpBody string) {
 	}
 
 	p.mu.Lock()
-	fn := p.incoming
+	fns := make([]func(Call), len(p.incomingFns))
+	copy(fns, p.incomingFns)
 	p.mu.Unlock()
-	if fn != nil {
+	for _, fn := range fns {
 		fn(c)
 	}
 }
@@ -673,11 +743,12 @@ func (p *phone) handleIncoming(from, to string) {
 	p.registerCall(c)
 
 	p.mu.Lock()
-	fn := p.incoming
+	incomingFns := make([]func(Call), len(p.incomingFns))
+	copy(incomingFns, p.incomingFns)
 	p.mu.Unlock()
 
 	p.logger.Info("incoming call", "from", from, "to", to)
-	if fn != nil {
+	for _, fn := range incomingFns {
 		fn(c)
 	}
 
@@ -687,72 +758,96 @@ func (p *phone) handleIncoming(from, to string) {
 func (p *phone) OnIncoming(fn func(Call)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.incoming = fn
+	p.incomingFns = append(p.incomingFns, fn)
 }
 
 func (p *phone) OnRegistered(fn func()) {
 	p.mu.Lock()
-	p.onRegisteredFn = fn
+	p.onRegisteredFns = append(p.onRegisteredFns, fn)
 	reg := p.reg
+	fns := make([]func(), len(p.onRegisteredFns))
+	copy(fns, p.onRegisteredFns)
 	p.mu.Unlock()
 	if reg != nil {
-		reg.OnRegistered(fn)
+		reg.OnRegistered(func() {
+			for _, f := range fns {
+				f()
+			}
+		})
 	}
 }
 
 func (p *phone) OnUnregistered(fn func()) {
 	p.mu.Lock()
-	p.onUnregisteredFn = fn
+	p.onUnregisteredFns = append(p.onUnregisteredFns, fn)
 	reg := p.reg
+	fns := make([]func(), len(p.onUnregisteredFns))
+	copy(fns, p.onUnregisteredFns)
 	p.mu.Unlock()
 	if reg != nil {
-		reg.OnUnregistered(fn)
+		reg.OnUnregistered(func() {
+			for _, f := range fns {
+				f()
+			}
+		})
 	}
 }
 
 func (p *phone) OnError(fn func(error)) {
 	p.mu.Lock()
-	p.onErrorFn = fn
+	p.onErrorFns = append(p.onErrorFns, fn)
 	reg := p.reg
+	fns := make([]func(error), len(p.onErrorFns))
+	copy(fns, p.onErrorFns)
 	p.mu.Unlock()
 	if reg != nil {
-		reg.OnError(fn)
+		reg.OnError(func(err error) {
+			for _, f := range fns {
+				f(err)
+			}
+		})
 	}
 }
 
 func (p *phone) OnCallState(fn func(Call, CallState)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onCallStateFn = fn
+	p.onCallStateFns = append(p.onCallStateFns, fn)
 }
 
 func (p *phone) OnCallEnded(fn func(Call, EndReason)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onCallEndedFn = fn
+	p.onCallEndedFns = append(p.onCallEndedFns, fn)
 }
 
 func (p *phone) OnCallDTMF(fn func(Call, string)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onCallDTMFFn = fn
+	p.onCallDTMFFns = append(p.onCallDTMFFns, fn)
 }
 
 func (p *phone) OnVoicemail(fn func(VoicemailStatus)) {
 	p.mu.Lock()
-	p.onVoicemailFn = fn
+	p.onVoicemailFns = append(p.onVoicemailFns, fn)
 	mwi := p.mwi
+	fns := make([]func(VoicemailStatus), len(p.onVoicemailFns))
+	copy(fns, p.onVoicemailFns)
 	p.mu.Unlock()
-	// If already subscribed, apply the callback immediately.
+	// If already subscribed, apply the composed callback immediately.
 	if mwi != nil {
-		mwi.setOnVoicemail(fn)
+		mwi.setOnVoicemail(func(status VoicemailStatus) {
+			for _, f := range fns {
+				f(status)
+			}
+		})
 	}
 }
 
 func (p *phone) OnMessage(fn func(SipMessage)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onMessageFn = fn
+	p.onMessageFns = append(p.onMessageFns, fn)
 }
 
 func (p *phone) SendMessage(ctx context.Context, target string, body string) error {
@@ -818,10 +913,12 @@ func (p *phone) UnsubscribeEvent(subscriptionID string) error {
 
 func (p *phone) handleMessage(from, to, contentType, body string) {
 	p.mu.Lock()
-	fn := p.onMessageFn
+	fns := make([]func(SipMessage), len(p.onMessageFns))
+	copy(fns, p.onMessageFns)
 	p.mu.Unlock()
-	if fn != nil {
-		fn(SipMessage{From: from, To: to, ContentType: contentType, Body: body})
+	msg := SipMessage{From: from, To: to, ContentType: contentType, Body: body}
+	for _, fn := range fns {
+		fn(msg)
 	}
 }
 

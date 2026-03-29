@@ -142,7 +142,8 @@ func newSipUA(cfg Config, contactIP string) (*sipUA, error) {
 	}
 
 	contactHDR := sip.ContactHeader{
-		Address: sip.Uri{Scheme: "sip", User: cfg.Username, Host: contactIP},
+		DisplayName: cfg.DisplayName,
+		Address:     sip.Uri{Scheme: "sip", User: cfg.Username, Host: contactIP},
 	}
 	dc := sipgo.NewDialogClientCache(client, contactHDR)
 	ds := sipgo.NewDialogServerCache(client, contactHDR)
@@ -634,7 +635,8 @@ func (s *sipUA) SendRequest(ctx context.Context, method string, headers map[stri
 	// Add Contact for REGISTER.
 	if method == "REGISTER" {
 		contact := sip.ContactHeader{
-			Address: sip.Uri{Scheme: "sip", User: s.cfg.Username, Host: s.localIP},
+			DisplayName: s.cfg.DisplayName,
+			Address:     sip.Uri{Scheme: "sip", User: s.cfg.Username, Host: s.localIP},
 		}
 		req.AppendHeader(&contact)
 	}

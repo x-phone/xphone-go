@@ -81,8 +81,9 @@ func (r *registry) Stop() error {
 }
 
 // unregisterTimeout is how long to wait for the un-REGISTER response before
-// giving up. Disconnect must not block indefinitely on a failing registrar.
-const unregisterTimeout = 3 * time.Second
+// giving up. Keep short to avoid delaying shutdown or racing with transport
+// teardown during hot-reload cycles.
+const unregisterTimeout = 500 * time.Millisecond
 
 // Unregister sends a REGISTER with Expires: 0 to remove our contact from the
 // registrar (RFC 3261 §10.2.2). It waits up to unregisterTimeout for a

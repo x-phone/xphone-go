@@ -133,7 +133,7 @@ func (s *server) Listen(ctx context.Context) error {
 	go s.runReaper(listenCtx)
 
 	// Block until the listener exits.
-	err := s.srv.ListenAndServe(listenCtx, "udp", s.cfg.Listen)
+	err := s.srv.ListenAndServe(listenCtx, "udp4", s.cfg.Listen)
 
 	// Clean up.
 	s.mu.Lock()

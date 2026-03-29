@@ -120,6 +120,13 @@ func newSipUA(cfg Config, contactIP string) (*sipUA, error) {
 		return nil, fmt.Errorf("xphone: unsupported protocol %q", cfg.Transport)
 	}
 
+	// Resolve the SIP host to IPv4 to avoid dual-stack issues where Go's
+	// resolver picks IPv6 but the PBX only listens on IPv4.
+	resolvedHost := resolveHostIPv4(cfg.Host)
+	if resolvedHost != cfg.Host {
+		cfg.Host = resolvedHost
+	}
+
 	ua, err := sipgo.NewUA(
 		sipgo.WithUserAgent(cfg.Username),
 		sipgo.WithUserAgentHostname(cfg.Host),

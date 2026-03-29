@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug fixes
+- Force IPv4 (`udp4`) for SIP signaling transport and address resolution — fixes registration failure on dual-stack hosts where Go's resolver picks IPv6 but PBX only listens on IPv4 (#79)
+
 ## v0.5.5
 
 ### Features

@@ -10,18 +10,18 @@ import (
 type MockPhone struct {
 	mu sync.Mutex
 
-	state          PhoneState
-	onIncomingFn   func(Call)
-	onRegisteredFn func()
-	onUnregFn      func()
-	onErrorFn      func(error)
-	onCallStateFn  func(Call, CallState)
-	onCallEndedFn  func(Call, EndReason)
-	onCallDTMFFn   func(Call, string)
-	onVoicemailFn  func(VoicemailStatus)
-	onMessageFn    func(SipMessage)
-	lastCall       Call
-	calls          map[string]Call
+	state           PhoneState
+	onIncomingFns   []func(Call)
+	onRegisteredFns []func()
+	onUnregFns      []func()
+	onErrorFns      []func(error)
+	onCallStateFns  []func(Call, CallState)
+	onCallEndedFns  []func(Call, EndReason)
+	onCallDTMFFns   []func(Call, string)
+	onVoicemailFns  []func(VoicemailStatus)
+	onMessageFns    []func(SipMessage)
+	lastCall        Call
+	calls           map[string]Call
 }
 
 // NewMockPhone creates a new MockPhone in the Disconnected state.
@@ -39,9 +39,10 @@ func (p *MockPhone) Connect(_ context.Context) error {
 		return ErrAlreadyConnected
 	}
 	p.state = PhoneStateRegistered
-	fn := p.onRegisteredFn
+	fns := make([]func(), len(p.onRegisteredFns))
+	copy(fns, p.onRegisteredFns)
 	p.mu.Unlock()
-	if fn != nil {
+	for _, fn := range fns {
 		fn()
 	}
 	return nil
@@ -54,7 +55,8 @@ func (p *MockPhone) Disconnect() error {
 		return ErrNotConnected
 	}
 	p.state = PhoneStateDisconnected
-	fn := p.onUnregFn
+	unregFns := make([]func(), len(p.onUnregFns))
+	copy(unregFns, p.onUnregFns)
 	activeCalls := make([]*MockCall, 0, len(p.calls))
 	for _, c := range p.calls {
 		activeCalls = append(activeCalls, c.(*MockCall))
@@ -64,7 +66,7 @@ func (p *MockPhone) Disconnect() error {
 	for _, c := range activeCalls {
 		c.End()
 	}
-	if fn != nil {
+	for _, fn := range unregFns {
 		fn()
 	}
 	return nil
@@ -94,55 +96,55 @@ func (p *MockPhone) Dial(_ context.Context, target string, opts ...DialOption) (
 func (p *MockPhone) OnIncoming(fn func(Call)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onIncomingFn = fn
+	p.onIncomingFns = append(p.onIncomingFns, fn)
 }
 
 func (p *MockPhone) OnRegistered(fn func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onRegisteredFn = fn
+	p.onRegisteredFns = append(p.onRegisteredFns, fn)
 }
 
 func (p *MockPhone) OnUnregistered(fn func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onUnregFn = fn
+	p.onUnregFns = append(p.onUnregFns, fn)
 }
 
 func (p *MockPhone) OnError(fn func(error)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onErrorFn = fn
+	p.onErrorFns = append(p.onErrorFns, fn)
 }
 
 func (p *MockPhone) OnCallState(fn func(Call, CallState)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onCallStateFn = fn
+	p.onCallStateFns = append(p.onCallStateFns, fn)
 }
 
 func (p *MockPhone) OnCallEnded(fn func(Call, EndReason)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onCallEndedFn = fn
+	p.onCallEndedFns = append(p.onCallEndedFns, fn)
 }
 
 func (p *MockPhone) OnCallDTMF(fn func(Call, string)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onCallDTMFFn = fn
+	p.onCallDTMFFns = append(p.onCallDTMFFns, fn)
 }
 
 func (p *MockPhone) OnVoicemail(fn func(VoicemailStatus)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onVoicemailFn = fn
+	p.onVoicemailFns = append(p.onVoicemailFns, fn)
 }
 
 func (p *MockPhone) OnMessage(fn func(SipMessage)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.onMessageFn = fn
+	p.onMessageFns = append(p.onMessageFns, fn)
 }
 
 func (p *MockPhone) SendMessage(_ context.Context, _ string, _ string) error {
@@ -173,17 +175,32 @@ func (p *MockPhone) UnsubscribeEvent(_ string) error {
 // internal fields so they coexist with user-set per-call callbacks.
 // Must be called with p.mu held.
 func (p *MockPhone) wireCallCallbacks(c *MockCall) {
-	if p.onCallStateFn != nil {
-		fn := p.onCallStateFn
-		c.onStatePhone = func(state CallState) { fn(c, state) }
+	if len(p.onCallStateFns) > 0 {
+		fns := make([]func(Call, CallState), len(p.onCallStateFns))
+		copy(fns, p.onCallStateFns)
+		c.onStatePhone = func(state CallState) {
+			for _, fn := range fns {
+				fn(c, state)
+			}
+		}
 	}
-	if p.onCallEndedFn != nil {
-		fn := p.onCallEndedFn
-		c.onEndedPhone = func(reason EndReason) { fn(c, reason) }
+	if len(p.onCallEndedFns) > 0 {
+		fns := make([]func(Call, EndReason), len(p.onCallEndedFns))
+		copy(fns, p.onCallEndedFns)
+		c.onEndedPhone = func(reason EndReason) {
+			for _, fn := range fns {
+				fn(c, reason)
+			}
+		}
 	}
-	if p.onCallDTMFFn != nil {
-		fn := p.onCallDTMFFn
-		c.onDTMFPhone = func(digit string) { fn(c, digit) }
+	if len(p.onCallDTMFFns) > 0 {
+		fns := make([]func(Call, string), len(p.onCallDTMFFns))
+		copy(fns, p.onCallDTMFFns)
+		c.onDTMFPhone = func(digit string) {
+			for _, fn := range fns {
+				fn(c, digit)
+			}
+		}
 	}
 }
 
@@ -237,40 +254,44 @@ func (p *MockPhone) SimulateIncoming(from string) {
 	p.wireCallCallbacks(c)
 	callID := c.CallID()
 	c.onEndedCleanup = func(_ EndReason) { p.untrackCall(callID) }
-	fn := p.onIncomingFn
+	fns := make([]func(Call), len(p.onIncomingFns))
+	copy(fns, p.onIncomingFns)
 	p.mu.Unlock()
 
-	if fn != nil {
+	for _, fn := range fns {
 		fn(c)
 	}
 }
 
-// SimulateError fires the OnError callback with the given error.
+// SimulateError fires the OnError callbacks with the given error.
 func (p *MockPhone) SimulateError(err error) {
 	p.mu.Lock()
-	fn := p.onErrorFn
+	fns := make([]func(error), len(p.onErrorFns))
+	copy(fns, p.onErrorFns)
 	p.mu.Unlock()
-	if fn != nil {
+	for _, fn := range fns {
 		fn(err)
 	}
 }
 
-// SimulateMWI fires the OnVoicemail callback with the given status.
+// SimulateMWI fires the OnVoicemail callbacks with the given status.
 func (p *MockPhone) SimulateMWI(status VoicemailStatus) {
 	p.mu.Lock()
-	fn := p.onVoicemailFn
+	fns := make([]func(VoicemailStatus), len(p.onVoicemailFns))
+	copy(fns, p.onVoicemailFns)
 	p.mu.Unlock()
-	if fn != nil {
+	for _, fn := range fns {
 		fn(status)
 	}
 }
 
-// SimulateMessage fires the OnMessage callback with the given message.
+// SimulateMessage fires the OnMessage callbacks with the given message.
 func (p *MockPhone) SimulateMessage(msg SipMessage) {
 	p.mu.Lock()
-	fn := p.onMessageFn
+	fns := make([]func(SipMessage), len(p.onMessageFns))
+	copy(fns, p.onMessageFns)
 	p.mu.Unlock()
-	if fn != nil {
+	for _, fn := range fns {
 		fn(msg)
 	}
 }

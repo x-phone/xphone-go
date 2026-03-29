@@ -159,20 +159,20 @@ type call struct {
 	startTime time.Time
 	logger    *slog.Logger
 
-	onEndedFn           func(EndReason)
+	onEndedFns          []func(EndReason)
 	onEndedCleanup      func(EndReason) // internal: call tracking (untrackCall)
 	onStatePhone        func(CallState) // internal: phone-level OnCallState
 	onEndedPhone        func(EndReason) // internal: phone-level OnCallEnded
 	onDTMFPhone         func(string)    // internal: phone-level OnCallDTMF
-	onMediaFn           func()
-	onStateFn           func(CallState)
-	onDTMFFn            func(string)
-	onHoldFn            func()
-	onResumeFn          func()
-	onMuteFn            func()
-	onUnmuteFn          func()
-	onVideoRequestFn    func(*VideoUpgradeRequest)
-	onVideoFn           func()
+	onMediaFns          []func()
+	onStateFns          []func(CallState)
+	onDTMFFns           []func(string)
+	onHoldFns           []func()
+	onResumeFns         []func()
+	onMuteFns           []func()
+	onUnmuteFns         []func()
+	onVideoRequestFns   []func(*VideoUpgradeRequest)
+	onVideoFns          []func()
 	pendingVideoUpgrade *VideoUpgradeRequest
 
 	audioStream    *mediaStream
@@ -967,13 +967,15 @@ func (c *call) dispatch(fn func()) {
 // Acquires c.mu internally to snapshot function pointers.
 func (c *call) fireOnDTMF(digit string) {
 	c.mu.Lock()
-	fn := c.onDTMFFn
+	fns := make([]func(string), len(c.onDTMFFns))
+	copy(fns, c.onDTMFFns)
 	fnPhone := c.onDTMFPhone
 	c.mu.Unlock()
 	if fnPhone != nil {
 		c.dispatch(func() { fnPhone(digit) })
 	}
-	if fn != nil {
+	for _, fn := range fns {
+		fn := fn
 		c.dispatch(func() { fn(digit) })
 	}
 }
@@ -986,8 +988,8 @@ func (c *call) fireOnState(state CallState) {
 		fn := c.onStatePhone
 		c.dispatch(func() { fn(state) })
 	}
-	if c.onStateFn != nil {
-		fn := c.onStateFn
+	for _, fn := range c.onStateFns {
+		fn := fn
 		c.dispatch(func() { fn(state) })
 	}
 }
@@ -1072,8 +1074,8 @@ func (c *call) fireOnEnded(reason EndReason) {
 		fn := c.onEndedPhone
 		c.dispatch(func() { fn(reason) })
 	}
-	if c.onEndedFn != nil {
-		fn := c.onEndedFn
+	for _, fn := range c.onEndedFns {
+		fn := fn
 		c.dispatch(func() { fn(reason) })
 	}
 	// Close the dispatch channel — the dispatcher goroutine exits after
@@ -1134,7 +1136,8 @@ func (c *call) Accept(opts ...AcceptOption) error {
 	c.logger.Info("call accepted", "id", c.id)
 	hasRTP := c.rtpConn != nil
 	hasVideoRTP := c.hasVideo && c.videoRTPConn != nil
-	onMediaFn := c.onMediaFn
+	onMediaFns := make([]func(), len(c.onMediaFns))
+	copy(onMediaFns, c.onMediaFns)
 	c.mu.Unlock()
 
 	// Start media pipeline and RTP socket I/O for production calls.
@@ -1146,8 +1149,8 @@ func (c *call) Accept(opts ...AcceptOption) error {
 		c.startVideoMedia()
 		c.startVideoRTPReader()
 	}
-	if onMediaFn != nil {
-		c.dispatch(onMediaFn)
+	for _, fn := range onMediaFns {
+		c.dispatch(fn)
 	}
 	return nil
 }
@@ -1263,9 +1266,10 @@ func (c *call) Mute() error {
 	if c.videoStream != nil {
 		c.videoStream.muted = true
 	}
-	fn := c.onMuteFn
+	fns := make([]func(), len(c.onMuteFns))
+	copy(fns, c.onMuteFns)
 	c.mu.Unlock()
-	if fn != nil {
+	for _, fn := range fns {
 		c.dispatch(fn)
 	}
 	return nil
@@ -1285,9 +1289,10 @@ func (c *call) Unmute() error {
 	if c.videoStream != nil {
 		c.videoStream.muted = false
 	}
-	fn := c.onUnmuteFn
+	fns := make([]func(), len(c.onUnmuteFns))
+	copy(fns, c.onUnmuteFns)
 	c.mu.Unlock()
-	if fn != nil {
+	for _, fn := range fns {
 		c.dispatch(fn)
 	}
 	return nil
@@ -1619,48 +1624,49 @@ func (c *call) RequestKeyframe() error {
 func (c *call) OnDTMF(fn func(string)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onDTMFFn = fn
+	c.onDTMFFns = append(c.onDTMFFns, fn)
 }
 
 func (c *call) OnHold(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onHoldFn = fn
+	c.onHoldFns = append(c.onHoldFns, fn)
 }
 
 func (c *call) OnResume(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onResumeFn = fn
+	c.onResumeFns = append(c.onResumeFns, fn)
 }
+
 func (c *call) OnMute(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onMuteFn = fn
+	c.onMuteFns = append(c.onMuteFns, fn)
 }
 
 func (c *call) OnUnmute(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onUnmuteFn = fn
+	c.onUnmuteFns = append(c.onUnmuteFns, fn)
 }
 
 func (c *call) OnMedia(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onMediaFn = fn
+	c.onMediaFns = append(c.onMediaFns, fn)
 }
 
 func (c *call) OnState(fn func(CallState)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onStateFn = fn
+	c.onStateFns = append(c.onStateFns, fn)
 }
 
 func (c *call) OnEnded(fn func(EndReason)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onEndedFn = fn
+	c.onEndedFns = append(c.onEndedFns, fn)
 }
 
 func (c *call) simulateResponse(code int, reason string) {
@@ -1678,8 +1684,7 @@ func (c *call) simulateResponse(code int, reason string) {
 				c.state = StateEarlyMedia
 				c.mediaActive = true
 				c.fireOnState(StateEarlyMedia)
-				if c.onMediaFn != nil {
-					fn := c.onMediaFn
+				for _, fn := range c.onMediaFns {
 					c.dispatch(fn)
 				}
 			}
@@ -1691,8 +1696,7 @@ func (c *call) simulateResponse(code int, reason string) {
 			c.startTime = time.Now()
 			c.mediaActive = true
 			c.fireOnState(StateActive)
-			if c.onMediaFn != nil {
-				fn := c.onMediaFn
+			for _, fn := range c.onMediaFns {
 				c.dispatch(fn)
 			}
 		}
@@ -1740,17 +1744,19 @@ func (c *call) simulateReInvite(rawSDP string) {
 	}
 
 	dir := sess.Dir()
-	var holdFn, resumeFn func()
+	var holdFns, resumeFns []func()
 
 	switch {
 	case dir == sdp.DirSendOnly && c.state == StateActive:
 		c.state = StateOnHold
-		holdFn = c.onHoldFn
+		holdFns = make([]func(), len(c.onHoldFns))
+		copy(holdFns, c.onHoldFns)
 		c.fireOnState(StateOnHold)
 		c.signalMediaTimerReset(defaultHoldMediaTimeout)
 	case dir == sdp.DirSendRecv && c.state == StateOnHold:
 		c.state = StateActive
-		resumeFn = c.onResumeFn
+		resumeFns = make([]func(), len(c.onResumeFns))
+		copy(resumeFns, c.onResumeFns)
 		c.fireOnState(StateActive)
 		c.signalMediaTimerReset(c.effectiveMediaTimeout())
 	}
@@ -1759,11 +1765,11 @@ func (c *call) simulateReInvite(rawSDP string) {
 
 	c.mu.Unlock()
 
-	if holdFn != nil {
-		c.dispatch(holdFn)
+	for _, fn := range holdFns {
+		c.dispatch(fn)
 	}
-	if resumeFn != nil {
-		c.dispatch(resumeFn)
+	for _, fn := range resumeFns {
+		c.dispatch(fn)
 	}
 }
 

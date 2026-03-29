@@ -33,14 +33,14 @@ type MockCall struct {
 	transferTo  string
 	headers     map[string][]string
 
-	onDTMFFn       func(string)
-	onHoldFn       func()
-	onResumeFn     func()
-	onMuteFn       func()
-	onUnmuteFn     func()
-	onMediaFn      func()
-	onStateFn      func(CallState)
-	onEndedFn      func(EndReason)
+	onDTMFFns      []func(string)
+	onHoldFns      []func()
+	onResumeFns    []func()
+	onMuteFns      []func()
+	onUnmuteFns    []func()
+	onMediaFns     []func()
+	onStateFns     []func(CallState)
+	onEndedFns     []func(EndReason)
 	onEndedCleanup func(EndReason) // internal: call tracking cleanup
 	onStatePhone   func(CallState) // internal: phone-level OnCallState
 	onEndedPhone   func(EndReason) // internal: phone-level OnCallEnded
@@ -221,12 +221,13 @@ func (c *MockCall) Accept(opts ...AcceptOption) error {
 	c.state = StateActive
 	c.startTime = time.Now()
 	phoneFn := c.onStatePhone
-	fn := c.onStateFn
+	stateFns := make([]func(CallState), len(c.onStateFns))
+	copy(stateFns, c.onStateFns)
 	c.mu.Unlock()
 	if phoneFn != nil {
 		phoneFn(StateActive)
 	}
-	if fn != nil {
+	for _, fn := range stateFns {
 		fn(StateActive)
 	}
 	return nil
@@ -241,9 +242,11 @@ func (c *MockCall) Reject(code int, reason string) error {
 	c.state = StateEnded
 	cleanupFn := c.onEndedCleanup
 	statePhoneFn := c.onStatePhone
-	stateFn := c.onStateFn
+	stateFns := make([]func(CallState), len(c.onStateFns))
+	copy(stateFns, c.onStateFns)
 	endPhoneFn := c.onEndedPhone
-	endFn := c.onEndedFn
+	endFns := make([]func(EndReason), len(c.onEndedFns))
+	copy(endFns, c.onEndedFns)
 	c.mu.Unlock()
 	if cleanupFn != nil {
 		cleanupFn(EndedByRejected)
@@ -251,14 +254,14 @@ func (c *MockCall) Reject(code int, reason string) error {
 	if statePhoneFn != nil {
 		statePhoneFn(StateEnded)
 	}
-	if stateFn != nil {
-		stateFn(StateEnded)
+	for _, fn := range stateFns {
+		fn(StateEnded)
 	}
 	if endPhoneFn != nil {
 		endPhoneFn(EndedByRejected)
 	}
-	if endFn != nil {
-		endFn(EndedByRejected)
+	for _, fn := range endFns {
+		fn(EndedByRejected)
 	}
 	return nil
 }
@@ -278,9 +281,11 @@ func (c *MockCall) End() error {
 	c.state = StateEnded
 	cleanupFn := c.onEndedCleanup
 	statePhoneFn := c.onStatePhone
-	stateFn := c.onStateFn
+	stateFns := make([]func(CallState), len(c.onStateFns))
+	copy(stateFns, c.onStateFns)
 	endPhoneFn := c.onEndedPhone
-	endFn := c.onEndedFn
+	endFns := make([]func(EndReason), len(c.onEndedFns))
+	copy(endFns, c.onEndedFns)
 	c.mu.Unlock()
 	if cleanupFn != nil {
 		cleanupFn(reason)
@@ -288,14 +293,14 @@ func (c *MockCall) End() error {
 	if statePhoneFn != nil {
 		statePhoneFn(StateEnded)
 	}
-	if stateFn != nil {
-		stateFn(StateEnded)
+	for _, fn := range stateFns {
+		fn(StateEnded)
 	}
 	if endPhoneFn != nil {
 		endPhoneFn(reason)
 	}
-	if endFn != nil {
-		endFn(reason)
+	for _, fn := range endFns {
+		fn(reason)
 	}
 	return nil
 }
@@ -308,17 +313,19 @@ func (c *MockCall) Hold() error {
 	}
 	c.state = StateOnHold
 	statePhoneFn := c.onStatePhone
-	stateFn := c.onStateFn
-	holdFn := c.onHoldFn
+	stateFns := make([]func(CallState), len(c.onStateFns))
+	copy(stateFns, c.onStateFns)
+	holdFns := make([]func(), len(c.onHoldFns))
+	copy(holdFns, c.onHoldFns)
 	c.mu.Unlock()
 	if statePhoneFn != nil {
 		statePhoneFn(StateOnHold)
 	}
-	if stateFn != nil {
-		stateFn(StateOnHold)
+	for _, fn := range stateFns {
+		fn(StateOnHold)
 	}
-	if holdFn != nil {
-		holdFn()
+	for _, fn := range holdFns {
+		fn()
 	}
 	return nil
 }
@@ -331,17 +338,19 @@ func (c *MockCall) Resume() error {
 	}
 	c.state = StateActive
 	statePhoneFn := c.onStatePhone
-	stateFn := c.onStateFn
-	resumeFn := c.onResumeFn
+	stateFns := make([]func(CallState), len(c.onStateFns))
+	copy(stateFns, c.onStateFns)
+	resumeFns := make([]func(), len(c.onResumeFns))
+	copy(resumeFns, c.onResumeFns)
 	c.mu.Unlock()
 	if statePhoneFn != nil {
 		statePhoneFn(StateActive)
 	}
-	if stateFn != nil {
-		stateFn(StateActive)
+	for _, fn := range stateFns {
+		fn(StateActive)
 	}
-	if resumeFn != nil {
-		resumeFn()
+	for _, fn := range resumeFns {
+		fn()
 	}
 	return nil
 }
@@ -357,9 +366,10 @@ func (c *MockCall) Mute() error {
 		return ErrAlreadyMuted
 	}
 	c.muted = true
-	fn := c.onMuteFn
+	fns := make([]func(), len(c.onMuteFns))
+	copy(fns, c.onMuteFns)
 	c.mu.Unlock()
-	if fn != nil {
+	for _, fn := range fns {
 		fn()
 	}
 	return nil
@@ -376,9 +386,10 @@ func (c *MockCall) Unmute() error {
 		return ErrNotMuted
 	}
 	c.muted = false
-	fn := c.onUnmuteFn
+	fns := make([]func(), len(c.onUnmuteFns))
+	copy(fns, c.onUnmuteFns)
 	c.mu.Unlock()
-	if fn != nil {
+	for _, fn := range fns {
 		fn()
 	}
 	return nil
@@ -443,49 +454,49 @@ func (c *MockCall) ReplaceAudioWriter(newSrc <-chan []int16) error {
 func (c *MockCall) OnDTMF(fn func(string)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onDTMFFn = fn
+	c.onDTMFFns = append(c.onDTMFFns, fn)
 }
 
 func (c *MockCall) OnHold(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onHoldFn = fn
+	c.onHoldFns = append(c.onHoldFns, fn)
 }
 
 func (c *MockCall) OnResume(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onResumeFn = fn
+	c.onResumeFns = append(c.onResumeFns, fn)
 }
 
 func (c *MockCall) OnMute(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onMuteFn = fn
+	c.onMuteFns = append(c.onMuteFns, fn)
 }
 
 func (c *MockCall) OnUnmute(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onUnmuteFn = fn
+	c.onUnmuteFns = append(c.onUnmuteFns, fn)
 }
 
 func (c *MockCall) OnMedia(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onMediaFn = fn
+	c.onMediaFns = append(c.onMediaFns, fn)
 }
 
 func (c *MockCall) OnState(fn func(CallState)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onStateFn = fn
+	c.onStateFns = append(c.onStateFns, fn)
 }
 
 func (c *MockCall) OnEnded(fn func(EndReason)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onEndedFn = fn
+	c.onEndedFns = append(c.onEndedFns, fn)
 }
 
 // --- Test setters and inspection ---
@@ -580,12 +591,13 @@ func (c *MockCall) LastTransferTarget() string {
 func (c *MockCall) SimulateDTMF(digit string) {
 	c.mu.Lock()
 	phoneFn := c.onDTMFPhone
-	fn := c.onDTMFFn
+	fns := make([]func(string), len(c.onDTMFFns))
+	copy(fns, c.onDTMFFns)
 	c.mu.Unlock()
 	if phoneFn != nil {
 		phoneFn(digit)
 	}
-	if fn != nil {
+	for _, fn := range fns {
 		fn(digit)
 	}
 }

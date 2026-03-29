@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug fixes
+- Reduce un-REGISTER timeout from 3s to 500ms — fixes registration failure on hot-reload where pending un-REGISTER transaction raced with transport teardown
+
 ## v0.5.5
 
 ### Features

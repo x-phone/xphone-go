@@ -22,7 +22,7 @@ import (
 // If the result is loopback (e.g. when host is 127.0.0.1 in Docker setups),
 // it falls back to the outbound interface IP via a public DNS dial.
 func localIPFor(host string) string {
-	conn, err := net.Dial("udp", net.JoinHostPort(host, "5060"))
+	conn, err := net.Dial("udp4", net.JoinHostPort(host, "5060"))
 	if err != nil {
 		return "127.0.0.1"
 	}
@@ -32,12 +32,31 @@ func localIPFor(host string) string {
 		return ip.String()
 	}
 	// Loopback detected — find a non-loopback IP via outbound interface.
-	conn2, err := net.Dial("udp", "8.8.8.8:53")
+	conn2, err := net.Dial("udp4", "8.8.8.8:53")
 	if err != nil {
 		return ip.String()
 	}
 	defer conn2.Close()
 	return conn2.LocalAddr().(*net.UDPAddr).IP.String()
+}
+
+// resolveHostIPv4 resolves a hostname to its first IPv4 address.
+// If the host is already an IPv4 address or resolution fails, returns it unchanged.
+func resolveHostIPv4(host string) string {
+	// Already an IPv4 literal — no resolution needed.
+	if ip := net.ParseIP(host); ip != nil {
+		return host
+	}
+	addrs, err := net.LookupHost(host)
+	if err != nil {
+		return host
+	}
+	for _, addr := range addrs {
+		if ip := net.ParseIP(addr); ip != nil && ip.To4() != nil {
+			return addr
+		}
+	}
+	return host
 }
 
 // resolveLogger returns l if non-nil, otherwise slog.Default().

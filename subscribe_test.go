@@ -391,6 +391,7 @@ func TestDisconnect_StopsSubscriptions(t *testing.T) {
 	tr.RespondWith(200, "OK") // registration
 	tr.RespondWith(200, "OK") // SUBSCRIBE
 	tr.RespondWith(200, "OK") // unsubscribe on Disconnect
+	tr.RespondWith(200, "OK") // un-REGISTER on Disconnect
 
 	p := newPhone(testConfig())
 	p.connectWithTransport(tr)

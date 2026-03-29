@@ -80,6 +80,40 @@ func (r *registry) Stop() error {
 	return nil
 }
 
+// unregisterTimeout is how long to wait for the un-REGISTER response before
+// giving up. Disconnect must not block indefinitely on a failing registrar.
+const unregisterTimeout = 3 * time.Second
+
+// Unregister sends a REGISTER with Expires: 0 to remove our contact from the
+// registrar (RFC 3261 §10.2.2). It waits up to unregisterTimeout for a
+// response. Errors are logged but not returned — the caller should proceed
+// with shutdown regardless.
+func (r *registry) Unregister() {
+	r.mu.Lock()
+	if r.state != PhoneStateRegistered {
+		r.mu.Unlock()
+		return
+	}
+	tr := r.tr
+	r.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), unregisterTimeout)
+	defer cancel()
+
+	code, _, err := tr.SendRequest(ctx, "REGISTER", map[string]string{
+		"Expires": "0",
+	})
+	if err != nil {
+		r.logger.Warn("un-REGISTER failed", "err", err)
+		return
+	}
+	if code != 200 {
+		r.logger.Warn("un-REGISTER rejected", "code", code)
+		return
+	}
+	r.logger.Info("un-REGISTER successful")
+}
+
 // OnRegistered sets the callback for successful registration.
 // If already in Registered state, the callback fires immediately (asynchronously).
 func (r *registry) OnRegistered(fn func()) {

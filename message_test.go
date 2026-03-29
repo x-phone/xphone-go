@@ -14,8 +14,9 @@ func TestSendMessage_Success(t *testing.T) {
 	applyDefaults(&p.cfg)
 
 	tr := testutil.NewMockTransport()
-	// Queue: REGISTER 200, MESSAGE 200.
+	// Queue: REGISTER 200, MESSAGE 200, un-REGISTER 200.
 	tr.RespondSequence(
+		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
 	)
@@ -49,10 +50,11 @@ func TestSendMessage_Rejected(t *testing.T) {
 	applyDefaults(&p.cfg)
 
 	tr := testutil.NewMockTransport()
-	// Queue: REGISTER 200, MESSAGE 403.
+	// Queue: REGISTER 200, MESSAGE 403, un-REGISTER 200.
 	tr.RespondSequence(
 		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 403, Header: "Forbidden"},
+		testutil.Response{Code: 200, Header: "OK"},
 	)
 
 	p.connectWithTransport(tr)
@@ -82,8 +84,9 @@ func TestSendMessageWithType_CustomContentType(t *testing.T) {
 	applyDefaults(&p.cfg)
 
 	tr := testutil.NewMockTransport()
-	// Queue: REGISTER 200, MESSAGE 200.
+	// Queue: REGISTER 200, MESSAGE 200, un-REGISTER 200.
 	tr.RespondSequence(
+		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
 		testutil.Response{Code: 200, Header: "OK"},
 	)
@@ -121,7 +124,8 @@ func TestOnMessage_IncomingMessage(t *testing.T) {
 	})
 
 	tr := testutil.NewMockTransport()
-	tr.RespondWith(200, "OK")
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
 
 	p.connectWithTransport(tr)
 	defer p.Disconnect()
@@ -155,7 +159,8 @@ func TestOnMessage_CallbackSetAfterConnect(t *testing.T) {
 	applyDefaults(&p.cfg)
 
 	tr := testutil.NewMockTransport()
-	tr.RespondWith(200, "OK")
+	tr.RespondWith(200, "OK") // registration
+	tr.RespondWith(200, "OK") // un-REGISTER
 
 	p.connectWithTransport(tr)
 	defer p.Disconnect()

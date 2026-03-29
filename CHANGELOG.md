@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.5.6
+
 ### Bug fixes
 - Force IPv4 (`udp4`) for SIP signaling transport and address resolution — fixes registration failure on dual-stack hosts where Go's resolver picks IPv6 but PBX only listens on IPv4 (#79)
 - Reduce un-REGISTER timeout from 3s to 500ms — fixes registration failure on hot-reload where pending un-REGISTER transaction raced with transport teardown

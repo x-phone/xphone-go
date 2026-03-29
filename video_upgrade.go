@@ -251,7 +251,6 @@ func (c *call) handleReInvite(responder reInviteResponder, rawSDP string) {
 
 		if len(requestFns) > 0 {
 			for _, fn := range requestFns {
-				fn := fn
 				c.dispatch(func() { fn(req) })
 			}
 		} else {

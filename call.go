@@ -975,21 +975,21 @@ func (c *call) fireOnDTMF(digit string) {
 		c.dispatch(func() { fnPhone(digit) })
 	}
 	for _, fn := range fns {
-		fn := fn
 		c.dispatch(func() { fn(digit) })
 	}
 }
 
 // fireOnState dispatches both the phone-level and public OnState callbacks.
-// Must be called with c.mu held. Copies function pointers and dispatches via
+// Must be called with c.mu held. Snapshots the slice and dispatches via
 // the callback goroutine.
 func (c *call) fireOnState(state CallState) {
 	if c.onStatePhone != nil {
 		fn := c.onStatePhone
 		c.dispatch(func() { fn(state) })
 	}
-	for _, fn := range c.onStateFns {
-		fn := fn
+	fns := make([]func(CallState), len(c.onStateFns))
+	copy(fns, c.onStateFns)
+	for _, fn := range fns {
 		c.dispatch(func() { fn(state) })
 	}
 }
@@ -1074,8 +1074,9 @@ func (c *call) fireOnEnded(reason EndReason) {
 		fn := c.onEndedPhone
 		c.dispatch(func() { fn(reason) })
 	}
-	for _, fn := range c.onEndedFns {
-		fn := fn
+	endFns := make([]func(EndReason), len(c.onEndedFns))
+	copy(endFns, c.onEndedFns)
+	for _, fn := range endFns {
 		c.dispatch(func() { fn(reason) })
 	}
 	// Close the dispatch channel — the dispatcher goroutine exits after
@@ -1684,7 +1685,9 @@ func (c *call) simulateResponse(code int, reason string) {
 				c.state = StateEarlyMedia
 				c.mediaActive = true
 				c.fireOnState(StateEarlyMedia)
-				for _, fn := range c.onMediaFns {
+				mediaFns := make([]func(), len(c.onMediaFns))
+				copy(mediaFns, c.onMediaFns)
+				for _, fn := range mediaFns {
 					c.dispatch(fn)
 				}
 			}
@@ -1696,7 +1699,9 @@ func (c *call) simulateResponse(code int, reason string) {
 			c.startTime = time.Now()
 			c.mediaActive = true
 			c.fireOnState(StateActive)
-			for _, fn := range c.onMediaFns {
+			mediaFns := make([]func(), len(c.onMediaFns))
+			copy(mediaFns, c.onMediaFns)
+			for _, fn := range mediaFns {
 				c.dispatch(fn)
 			}
 		}

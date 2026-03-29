@@ -412,7 +412,6 @@ func (p *phone) Disconnect() error {
 
 	// Fire OnUnregistered callbacks.
 	for _, fn := range unregFns {
-		fn := fn
 		go fn()
 	}
 

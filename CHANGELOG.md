@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.5.4
+
 ### Bug fixes
 - `Phone.Disconnect()` now sends REGISTER with `Expires: 0` (un-REGISTER) to the registrar before closing transport, per RFC 3261 §10.2.2 — previously left stale contacts on the PBX (#70)
 - `On*` callback setters on `Call`, `Phone`, and `Server` now append instead of replace — calling `OnEnded` (or any other `On*` method) multiple times registers all callbacks instead of silently dropping earlier ones (#71)

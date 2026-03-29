@@ -120,8 +120,12 @@ func newSipUA(cfg Config, contactIP string) (*sipUA, error) {
 		return nil, fmt.Errorf("xphone: unsupported protocol %q", cfg.Transport)
 	}
 
+	userAgent := cfg.Username
+	if cfg.DisplayName != "" {
+		userAgent = cfg.DisplayName
+	}
 	ua, err := sipgo.NewUA(
-		sipgo.WithUserAgent(cfg.Username),
+		sipgo.WithUserAgent(userAgent),
 		sipgo.WithUserAgentHostname(cfg.Host),
 	)
 	if err != nil {
@@ -142,7 +146,8 @@ func newSipUA(cfg Config, contactIP string) (*sipUA, error) {
 	}
 
 	contactHDR := sip.ContactHeader{
-		Address: sip.Uri{Scheme: "sip", User: cfg.Username, Host: contactIP},
+		DisplayName: cfg.DisplayName,
+		Address:     sip.Uri{Scheme: "sip", User: cfg.Username, Host: contactIP},
 	}
 	dc := sipgo.NewDialogClientCache(client, contactHDR)
 	ds := sipgo.NewDialogServerCache(client, contactHDR)

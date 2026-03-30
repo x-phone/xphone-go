@@ -89,7 +89,7 @@ func startListening(t *testing.T, srv *server) string {
 	default:
 	}
 
-	return srv.cfg.Listen
+	return srv.listenAddr()
 }
 
 // FS1: FakePBX sends INVITE to Server — Server auto-accepts in callback.
@@ -555,4 +555,47 @@ func TestServerFakePBX_FindCallAndCalls(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	assert.Nil(t, srv.FindCall(c.CallID()))
 	assert.Empty(t, srv.Calls())
+}
+
+// FS11: Server accepts inbound call on a pre-created Listener socket.
+func TestServerFakePBX_WithListener(t *testing.T) {
+	pbx := fakepbx.NewFakePBX(t)
+	_, rtpPort := bindRTP(t)
+
+	// Create a UDP socket externally — the server should use it as-is.
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	srv := listenServer(t, pbx, func(cfg *ServerConfig) {
+		cfg.Listen = "" // intentionally blank — Listener should take over
+		cfg.Listener = conn
+	})
+
+	callCh := make(chan Call, 1)
+	srv.OnIncoming(func(c Call) {
+		require.NoError(t, c.Accept())
+		callCh <- c
+	})
+
+	listenAddr := startListening(t, srv)
+
+	// listenAddr should reflect the pre-created socket, not the empty Listen.
+	assert.Equal(t, conn.LocalAddr().String(), listenAddr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err = pbx.SendInvite(ctx, "sip:+15551234567@"+listenAddr,
+		fakepbx.SDP("127.0.0.1", rtpPort, fakepbx.PCMA))
+	require.NoError(t, err)
+
+	var c Call
+	select {
+	case c = <-callCh:
+	case <-ctx.Done():
+		t.Fatal("call never accepted")
+	}
+
+	assert.Equal(t, StateActive, c.State())
+	require.NoError(t, c.End())
 }

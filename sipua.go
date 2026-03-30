@@ -648,6 +648,13 @@ func (s *sipUA) SendRequest(ctx context.Context, method string, headers map[stri
 		req.AppendHeader(&contact)
 	}
 
+	// Add User-Agent header.
+	if s.cfg.DisplayName != "" {
+		req.AppendHeader(sip.NewHeader("User-Agent", s.cfg.DisplayName))
+	} else {
+		req.AppendHeader(sip.NewHeader("User-Agent", "xphone"))
+	}
+
 	// Add caller-provided headers (e.g., Authorization for auth retry).
 	for k, v := range headers {
 		req.AppendHeader(sip.NewHeader(k, v))

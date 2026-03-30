@@ -187,6 +187,18 @@ server.Listen(ctx)
 
 Peers are authenticated by IP/CIDR or SIP digest auth. Per-peer codec and RTP address overrides are supported.
 
+For zero-downtime deploys, use `ServerConfig.Listener` with a pre-bound socket (e.g., with `SO_REUSEPORT`):
+
+```go
+conn, _ := net.ListenPacket("udp4", "0.0.0.0:5080")
+// socket2 can set SO_REUSEPORT before binding
+server := xphone.NewServer(xphone.ServerConfig{
+    Listener: conn,
+    // ...
+})
+server.Listen(ctx)
+```
+
 > **Which mode?** Use **Phone** when you register to a SIP server (most setups). Use **Server** when SIP peers send INVITEs directly to your application (Twilio SIP Trunk, direct PBX routing, peer-to-peer).
 
 ---

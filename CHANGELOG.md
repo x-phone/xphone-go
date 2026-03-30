@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Features
+- `ServerConfig.Listener` accepts a pre-created `net.PacketConn` for the SIP UDP socket — gives callers full control over socket options (e.g. `SO_REUSEPORT`, buffer sizes) and socket lifecycle (e.g. fd passing for zero-downtime deploys)
+
 ## v0.5.7
 
 ### Bug fixes

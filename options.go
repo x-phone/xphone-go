@@ -424,6 +424,13 @@ func WithLogger(l *slog.Logger) PhoneOption {
 type ServerConfig struct {
 	// Listen is the address to bind the SIP listener on (e.g. "0.0.0.0:5080").
 	Listen string
+	// Listener is an optional pre-created UDP socket for the SIP listener.
+	// When set, the server uses this connection instead of creating its own,
+	// giving the caller full control over socket creation (e.g. SO_REUSEPORT,
+	// buffer sizes, fd passing for zero-downtime deploys). The server takes
+	// ownership: it will close the connection when Listen returns. Listen is
+	// ignored when Listener is set.
+	Listener net.PacketConn
 	// RTPPortMin is the minimum RTP port to allocate. 0 means OS-assigned.
 	RTPPortMin int
 	// RTPPortMax is the maximum RTP port to allocate. 0 means OS-assigned.

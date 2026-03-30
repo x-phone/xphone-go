@@ -121,19 +121,31 @@ func (s *server) Listen(ctx context.Context) error {
 	s.registerHandlers()
 
 	listenCtx, listenCancel := context.WithCancel(ctx)
+	defer listenCancel() // Ensure context-watcher goroutine exits on any return path.
 
 	s.mu.Lock()
 	s.cancelListen = listenCancel
 	s.state = ServerStateListening
 	s.mu.Unlock()
 
-	s.logger.Info("server listening", "addr", s.cfg.Listen, "rtp_address", s.localIP)
+	s.logger.Info("server listening", "addr", s.listenAddr(), "rtp_address", s.localIP)
 
 	// Start stale call reaper.
 	go s.runReaper(listenCtx)
 
 	// Block until the listener exits.
-	err := s.srv.ListenAndServe(listenCtx, "udp4", s.cfg.Listen)
+	var err error
+	if s.cfg.Listener != nil {
+		// ServeUDP doesn't accept a context; closing the conn is the only
+		// way to unblock it (same approach sipgo uses in ListenAndServe).
+		go func() {
+			<-listenCtx.Done()
+			s.cfg.Listener.Close()
+		}()
+		err = s.srv.ServeUDP(s.cfg.Listener)
+	} else {
+		err = s.srv.ListenAndServe(listenCtx, "udp4", s.cfg.Listen)
+	}
 
 	// Clean up.
 	s.mu.Lock()
@@ -378,12 +390,21 @@ func (s *server) State() ServerState {
 
 // --- internal ---
 
+// listenAddr returns the effective SIP listen address — from the
+// caller-provided Listener if set, otherwise from the Listen config.
+func (s *server) listenAddr() string {
+	if s.cfg.Listener != nil {
+		return s.cfg.Listener.LocalAddr().String()
+	}
+	return s.cfg.Listen
+}
+
 // resolveLocalIP determines the IP to advertise in SDP.
 func (s *server) resolveLocalIP() string {
 	if s.cfg.RTPAddress != "" {
 		return s.cfg.RTPAddress
 	}
-	host, _, err := net.SplitHostPort(s.cfg.Listen)
+	host, _, err := net.SplitHostPort(s.listenAddr())
 	if err == nil && host != "" && host != "0.0.0.0" && host != "::" {
 		return host
 	}
@@ -419,7 +440,7 @@ func (s *server) setupSipStack() error {
 	}
 
 	contactPort := 0
-	if _, p, err := net.SplitHostPort(s.cfg.Listen); err == nil {
+	if _, p, err := net.SplitHostPort(s.listenAddr()); err == nil {
 		if pn, err := strconv.Atoi(p); err == nil && pn != sip.DefaultUdpPort {
 			contactPort = pn
 		}

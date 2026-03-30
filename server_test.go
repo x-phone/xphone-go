@@ -2,6 +2,7 @@ package xphone
 
 import (
 	"errors"
+	"net"
 	"strings"
 	"testing"
 )
@@ -145,6 +146,31 @@ func TestServer_ResolvePeerAddr(t *testing.T) {
 	}
 }
 
+func TestServer_ListenAddr(t *testing.T) {
+	t.Run("without Listener", func(t *testing.T) {
+		s := &server{cfg: ServerConfig{Listen: "0.0.0.0:5080"}}
+		if got := s.listenAddr(); got != "0.0.0.0:5080" {
+			t.Errorf("listenAddr = %q, want 0.0.0.0:5080", got)
+		}
+	})
+
+	t.Run("with Listener", func(t *testing.T) {
+		conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+
+		s := &server{cfg: ServerConfig{
+			Listen:   "0.0.0.0:5060",
+			Listener: conn,
+		}}
+		if got := s.listenAddr(); got != conn.LocalAddr().String() {
+			t.Errorf("listenAddr = %q, want %q", got, conn.LocalAddr().String())
+		}
+	})
+}
+
 func TestServer_ResolveLocalIP(t *testing.T) {
 	tests := []struct {
 		name string
@@ -171,6 +197,23 @@ func TestServer_ResolveLocalIP(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("Listener overrides Listen", func(t *testing.T) {
+		conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+
+		s := &server{cfg: ServerConfig{
+			Listen:   "0.0.0.0:5060",
+			Listener: conn,
+		}}
+		got := s.resolveLocalIP()
+		if got != "127.0.0.1" {
+			t.Errorf("resolveLocalIP = %q, want 127.0.0.1", got)
+		}
+	})
 }
 
 func TestServer_Callbacks(t *testing.T) {

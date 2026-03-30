@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.5.7
+
+### Bug fixes
+- Add `User-Agent` header to SIP requests — sipgo does not add it automatically; uses `DisplayName` if set, falls back to `"xphone"`
+
 ## v0.5.6
 
 ### Bug fixes

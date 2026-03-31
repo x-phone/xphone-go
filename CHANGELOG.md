@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug fixes
+- `Call.Accept()` no longer blocks up to 32 seconds waiting for ACK — the 200 OK is sent immediately and the RFC 3261 §13.3.1.4 retransmit loop runs in the background, matching the Rust version's non-blocking behavior
+
 ## v0.5.9
 
 ### Features

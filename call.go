@@ -1135,9 +1135,16 @@ func (c *call) Accept(opts ...AcceptOption) error {
 	} else {
 		c.localSDP = c.buildLocalSDP(sdp.DirSendRecv)
 	}
-	if err := c.dlg.Respond(200, "OK", []byte(c.localSDP)); err != nil {
-		c.logger.Error("failed to send 200 OK", "err", err)
-	}
+	// Send 200 OK in a goroutine: sipgo's WriteResponse sends the response
+	// immediately then blocks up to 32s waiting for ACK (RFC 3261 §13.3.1.4
+	// retransmit loop). Running it async lets Accept return right away while
+	// the ACK wait + retransmission continues in the background.
+	sdpBody := []byte(c.localSDP)
+	go func() {
+		if err := c.dlg.Respond(200, "OK", sdpBody); err != nil {
+			c.logger.Error("failed to send 200 OK", "err", err)
+		}
+	}()
 
 	// Set up video if negotiated.
 	if c.hasVideo && c.videoRTPConn != nil {

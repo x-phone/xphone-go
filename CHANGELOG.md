@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.5.9
+
 ### Features
 - `Server.OnOptions(func() int)` — callback to control SIP OPTIONS responses; return a status code (e.g. 200 healthy, 503 draining) for SIP proxy health checks (Kamailio, OpenSIPS). Default: 200 OK.
 

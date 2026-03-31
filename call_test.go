@@ -51,7 +51,10 @@ func TestCall_AcceptSendsSDPAnswer(t *testing.T) {
 	dialog := testutil.NewMockDialog()
 	call := testInboundCall(t, dialog)
 	call.Accept()
-	assert.Equal(t, 200, dialog.LastResponseCode())
+	// Respond runs in a goroutine; wait for it to arrive at the mock.
+	assert.Eventually(t, func() bool {
+		return dialog.LastResponseCode() == 200
+	}, time.Second, 5*time.Millisecond)
 	assert.NotEmpty(t, dialog.LastResponseBody())
 }
 

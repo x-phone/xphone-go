@@ -48,6 +48,7 @@ type Server interface {
 	OnCallEnded(func(call Call, reason EndReason))
 	OnCallDTMF(func(call Call, digit string))
 	OnError(func(err error))
+	OnOptions(func() int)
 	FindCall(callID string) Call
 	Calls() []Call
 	State() ServerState
@@ -78,6 +79,7 @@ type server struct {
 	onCallEndedFns []func(Call, EndReason)
 	onCallDTMFFns  []func(Call, string)
 	onErrorFns     []func(error)
+	onOptionsFn    func() int
 }
 
 // NewServer creates a new Server with the given configuration.
@@ -364,6 +366,16 @@ func (s *server) OnError(fn func(error)) {
 	s.onErrorFns = append(s.onErrorFns, fn)
 }
 
+// OnOptions sets a callback invoked on each SIP OPTIONS request. The callback
+// returns a SIP status code (e.g. 200, 503). It must return quickly — a slow
+// callback delays the response and may cause the SIP proxy to mark the server
+// as down. When no callback is set, the server responds 200 OK.
+func (s *server) OnOptions(fn func() int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onOptionsFn = fn
+}
+
 func (s *server) FindCall(callID string) Call {
 	c := s.findCall(callID)
 	if c == nil {
@@ -389,6 +401,34 @@ func (s *server) State() ServerState {
 }
 
 // --- internal ---
+
+// sipReasonPhrase returns the standard SIP reason phrase for a status code.
+func sipReasonPhrase(code int) string {
+	switch code {
+	case 200:
+		return "OK"
+	case 400:
+		return "Bad Request"
+	case 403:
+		return "Forbidden"
+	case 404:
+		return "Not Found"
+	case 405:
+		return "Method Not Allowed"
+	case 408:
+		return "Request Timeout"
+	case 480:
+		return "Temporarily Unavailable"
+	case 486:
+		return "Busy Here"
+	case 500:
+		return "Internal Server Error"
+	case 503:
+		return "Service Unavailable"
+	default:
+		return "Unknown"
+	}
+}
 
 // listenAddr returns the effective SIP listen address — from the
 // caller-provided Listener if set, otherwise from the Listen config.
@@ -547,7 +587,15 @@ func (s *server) registerHandlers() {
 	})
 
 	s.srv.OnOptions(func(req *sip.Request, tx sip.ServerTransaction) {
-		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+		code := 200
+		s.mu.Lock()
+		fn := s.onOptionsFn
+		s.mu.Unlock()
+		if fn != nil {
+			code = fn()
+		}
+		reason := sipReasonPhrase(code)
+		res := sip.NewResponseFromRequest(req, code, reason, nil)
 		tx.Respond(res)
 	})
 

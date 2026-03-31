@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -598,4 +599,48 @@ func TestServerFakePBX_WithListener(t *testing.T) {
 
 	assert.Equal(t, StateActive, c.State())
 	require.NoError(t, c.End())
+}
+
+// FS12: Default OPTIONS response is 200 OK.
+func TestServerFakePBX_OptionsDefault(t *testing.T) {
+	pbx := fakepbx.NewFakePBX(t)
+	srv := listenServer(t, pbx)
+	listenAddr := startListening(t, srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	res, err := pbx.SendOptions(ctx, "sip:ping@"+listenAddr)
+	require.NoError(t, err)
+	assert.Equal(t, 200, res.StatusCode)
+}
+
+// FS13: OnOptions callback controls OPTIONS response code.
+func TestServerFakePBX_OptionsCallback(t *testing.T) {
+	pbx := fakepbx.NewFakePBX(t)
+	srv := listenServer(t, pbx)
+
+	var draining atomic.Bool
+	srv.OnOptions(func() int {
+		if draining.Load() {
+			return 503
+		}
+		return 200
+	})
+
+	listenAddr := startListening(t, srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Healthy — expect 200.
+	res, err := pbx.SendOptions(ctx, "sip:ping@"+listenAddr)
+	require.NoError(t, err)
+	assert.Equal(t, 200, res.StatusCode)
+
+	// Start draining — expect 503.
+	draining.Store(true)
+	res, err = pbx.SendOptions(ctx, "sip:ping@"+listenAddr)
+	require.NoError(t, err)
+	assert.Equal(t, 503, res.StatusCode)
 }

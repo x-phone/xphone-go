@@ -243,6 +243,11 @@ func TestServer_Callbacks(t *testing.T) {
 		t.Error("OnError not set")
 	}
 
+	srv.OnOptions(func() int { return 503 })
+	if s.onOptionsFn == nil {
+		t.Error("OnOptions not set")
+	}
+
 	// Suppress linter warnings about unused variables.
 	_ = incomingCalled
 	_ = stateCalled

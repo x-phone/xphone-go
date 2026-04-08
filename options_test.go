@@ -19,3 +19,43 @@ func TestWithAuth_DefaultsEmpty(t *testing.T) {
 	assert.Empty(t, opts.AuthUsername)
 	assert.Empty(t, opts.AuthPassword)
 }
+
+func TestResolveAuthCredentials_PerCallOverridesAll(t *testing.T) {
+	cfg := Config{
+		Username:         "reg-user",
+		Password:         "reg-pass",
+		OutboundUsername: "outbound-user",
+		OutboundPassword: "outbound-pass",
+	}
+	opts := DialOptions{
+		AuthUsername: "call-user",
+		AuthPassword: "call-pass",
+	}
+	user, pass := resolveAuthCredentials(opts, cfg)
+	assert.Equal(t, "call-user", user)
+	assert.Equal(t, "call-pass", pass)
+}
+
+func TestResolveAuthCredentials_OutboundOverridesRegistration(t *testing.T) {
+	cfg := Config{
+		Username:         "reg-user",
+		Password:         "reg-pass",
+		OutboundUsername: "outbound-user",
+		OutboundPassword: "outbound-pass",
+	}
+	opts := DialOptions{}
+	user, pass := resolveAuthCredentials(opts, cfg)
+	assert.Equal(t, "outbound-user", user)
+	assert.Equal(t, "outbound-pass", pass)
+}
+
+func TestResolveAuthCredentials_FallsBackToRegistration(t *testing.T) {
+	cfg := Config{
+		Username: "reg-user",
+		Password: "reg-pass",
+	}
+	opts := DialOptions{}
+	user, pass := resolveAuthCredentials(opts, cfg)
+	assert.Equal(t, "reg-user", user)
+	assert.Equal(t, "reg-pass", pass)
+}

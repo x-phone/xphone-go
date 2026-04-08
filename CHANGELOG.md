@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Features
+- `WithAuth(username, password)` dial option — pass per-call SIP credentials for both `Phone` and `Server` outbound calls, overriding any config-level registration credentials (#90)
+
 ## v0.5.10
 
 ### Bug fixes

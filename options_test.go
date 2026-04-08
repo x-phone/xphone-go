@@ -59,3 +59,22 @@ func TestResolveAuthCredentials_FallsBackToRegistration(t *testing.T) {
 	assert.Equal(t, "reg-user", user)
 	assert.Equal(t, "reg-pass", pass)
 }
+
+func TestResolveAuthCredentials_EmptyConfigNoAuth(t *testing.T) {
+	cfg := Config{}
+	opts := DialOptions{}
+	user, pass := resolveAuthCredentials(opts, cfg)
+	assert.Empty(t, user)
+	assert.Empty(t, pass)
+}
+
+func TestResolveAuthCredentials_PerCallOnlyNoConfig(t *testing.T) {
+	cfg := Config{}
+	opts := DialOptions{
+		AuthUsername: "call-user",
+		AuthPassword: "call-pass",
+	}
+	user, pass := resolveAuthCredentials(opts, cfg)
+	assert.Equal(t, "call-user", user)
+	assert.Equal(t, "call-pass", pass)
+}

@@ -169,6 +169,26 @@ func newSipUA(cfg Config, contactIP string) (*sipUA, error) {
 // maxRedirects is the maximum number of 3xx redirect hops before giving up.
 const maxRedirects = 3
 
+// resolveAuthCredentials returns the SIP digest credentials to use for an
+// outbound INVITE. Precedence: per-call WithAuth > config OutboundCredentials > registration credentials.
+func resolveAuthCredentials(opts DialOptions, cfg Config) (string, string) {
+	user := opts.AuthUsername
+	if user == "" {
+		user = cfg.OutboundUsername
+	}
+	if user == "" {
+		user = cfg.Username
+	}
+	pass := opts.AuthPassword
+	if pass == "" {
+		pass = cfg.OutboundPassword
+	}
+	if pass == "" {
+		pass = cfg.Password
+	}
+	return user, pass
+}
+
 // dialWithOpts establishes an outbound SIP dialog with DialOptions.
 // It delegates to dial, passing through video options for SDP construction.
 func (s *sipUA) dialWithOpts(ctx context.Context, target string, opts DialOptions, onResponse func(code int, reason string)) (dialog, error) {
@@ -290,15 +310,8 @@ func (s *sipUA) dialOnce(ctx context.Context, target string, opts DialOptions, o
 		}
 	}()
 
-	// Resolve outbound credentials (fall back to registration credentials).
-	authUser := s.cfg.OutboundUsername
-	if authUser == "" {
-		authUser = s.cfg.Username
-	}
-	authPass := s.cfg.OutboundPassword
-	if authPass == "" {
-		authPass = s.cfg.Password
-	}
+	// Resolve outbound credentials: per-call WithAuth > OutboundCredentials > registration.
+	authUser, authPass := resolveAuthCredentials(opts, s.cfg)
 
 	// WaitAnswer blocks until 200 OK (or failure/cancel).
 	// The OnResponse callback fires for each provisional and final response.

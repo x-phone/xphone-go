@@ -865,6 +865,9 @@ func (s *server) dialOnce(ctx context.Context, target string, from string, rtpAd
 		}
 	}()
 
+	// Resolve per-call auth credentials (Server has no config-level fallback).
+	authUser, authPass := resolveAuthCredentials(opts, Config{})
+
 	err = sess.WaitAnswer(waitCtx, sipgo.AnswerOptions{
 		OnResponse: func(res *sip.Response) error {
 			if onResponse != nil {
@@ -872,6 +875,8 @@ func (s *server) dialOnce(ctx context.Context, target string, from string, rtpAd
 			}
 			return nil
 		},
+		Username: authUser,
+		Password: authPass,
 	})
 	if err != nil {
 		return nil, err

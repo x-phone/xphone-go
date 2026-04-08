@@ -111,6 +111,8 @@ type DialOptions struct {
 	CodecOverride []Codec
 	Video         bool         // enable video in SDP offer
 	VideoCodecs   []VideoCodec // video codec preferences (default: [H264, VP8])
+	AuthUsername  string       // per-call SIP digest username (overrides config)
+	AuthPassword  string       // per-call SIP digest password (overrides config)
 }
 
 func applyDialOptions(opts []DialOption) DialOptions {
@@ -163,6 +165,16 @@ func WithVideo(codecs ...VideoCodec) DialOption {
 		} else {
 			o.VideoCodecs = []VideoCodec{VideoCodecH264, VideoCodecVP8}
 		}
+	}
+}
+
+// WithAuth sets per-call SIP digest credentials for 401/407 proxy
+// authentication challenges. Overrides phone-level WithOutboundCredentials
+// and WithCredentials for this single dial attempt.
+func WithAuth(username, password string) DialOption {
+	return func(o *DialOptions) {
+		o.AuthUsername = username
+		o.AuthPassword = password
 	}
 }
 

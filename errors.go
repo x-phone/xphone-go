@@ -1,6 +1,9 @@
 package xphone
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Sentinel errors returned by Phone and Call methods.
 var (
@@ -51,3 +54,46 @@ var (
 	// ErrPeerRejected is returned when an incoming request fails peer authentication.
 	ErrPeerRejected = errors.New("xphone: peer authentication failed")
 )
+
+// RegistrationFailedError wraps ErrRegistrationFailed with the last observed
+// SIP response on the failing REGISTER transaction. Callers can inspect Code
+// and Reason to distinguish transient failures (5xx, transport error) from
+// permanent ones (401/403 — bad credentials). Unwraps to the sentinel error
+// ErrRegistrationFailed, so errors.Is(err, ErrRegistrationFailed) keeps working.
+//
+// Code and Reason come from the SIP response on the last retry attempt. When
+// the last attempt failed at the transport layer before any response (timeout,
+// network error), Code is 0 and TransportErr carries the transport error.
+type RegistrationFailedError struct {
+	// Code is the SIP status code on the last REGISTER response (e.g. 401, 403).
+	// Zero when no response was received on the last attempt.
+	Code int
+	// Reason is the SIP reason phrase on the last REGISTER response.
+	Reason string
+	// TransportErr is the transport-layer error on the last attempt, if any.
+	// Non-nil only when Code == 0.
+	TransportErr error
+}
+
+func (e *RegistrationFailedError) Error() string {
+	base := ErrRegistrationFailed.Error()
+	switch {
+	case e.TransportErr != nil && e.Code != 0:
+		return fmt.Sprintf("%s: last response %d %q, transport error %v", base, e.Code, e.Reason, e.TransportErr)
+	case e.TransportErr != nil:
+		return fmt.Sprintf("%s: %v", base, e.TransportErr)
+	case e.Reason != "":
+		return fmt.Sprintf("%s: last response %d %s", base, e.Code, e.Reason)
+	default:
+		return fmt.Sprintf("%s: last response %d", base, e.Code)
+	}
+}
+
+// Unwrap lets errors.Is(err, ErrRegistrationFailed) match, and errors.Is on
+// TransportErr match its underlying error when present.
+func (e *RegistrationFailedError) Unwrap() []error {
+	if e.TransportErr != nil {
+		return []error{ErrRegistrationFailed, e.TransportErr}
+	}
+	return []error{ErrRegistrationFailed}
+}

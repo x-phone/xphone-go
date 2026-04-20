@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Bug fixes
+- REGISTER failure now surfaces the last observed SIP response code and reason via a typed `*RegistrationFailedError{Code, Reason, TransportErr}` returned from `Phone.Connect()` and delivered to `Phone.OnError`. The final error log includes `last_code`, `last_reason`, and `last_err` (omitted when nil) — previously the library logged only `registration failed` with no actionable detail, forcing tcpdump-level diagnosis. Per-attempt retries now log at debug level with attempt number, code, and reason. (#96)
+  - `errors.Is(err, ErrRegistrationFailed)` and `errors.Is(err, regErr.TransportErr)` both still match via `Unwrap() []error`.
+  - Minor compatibility note: callers that relied on **direct equality** (`err == ErrRegistrationFailed`) or `errors.Unwrap(err)` returning the sentinel must switch to `errors.Is`. `errors.Is` has been the recommended form since Go 1.13.
+
 ### Breaking changes
 - `WithOutboundProxy` / `Config.OutboundProxy` now routes **all** outbound SIP requests (REGISTER, SUBSCRIBE, MESSAGE, INVITE) through the proxy, not just INVITE. Matches how Kamailio / OpenSIPS / Asterisk outbound-proxy deployments expect a single next-hop for all signaling. Migration: for most deployments no action is needed — the proxy was already the expected next-hop. Callers who genuinely needed the prior "INVITE via proxy, REGISTER direct" split can either drop `OutboundProxy` (all requests go direct to `Host`) or run two `Phone` instances, one for registration and one for outbound calls.
 

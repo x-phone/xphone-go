@@ -153,8 +153,12 @@ func (r *registry) State() PhoneState {
 // Auth challenges (401/407) are handled by the transport layer (sipUA uses DoDigestAuth).
 // Retries up to RegisterMaxRetry times with RegisterRetry delay between attempts.
 // On success, transitions to Registered and fires OnRegistered.
-// On exhausting retries, fires OnError(ErrRegistrationFailed).
+// On exhausting retries, fires OnError with a *RegistrationFailedError carrying
+// the last observed status code / reason / transport error.
 func (r *registry) register(ctx context.Context) error {
+	var lastCode int
+	var lastReason string
+	var lastErr error
 	for attempt := 0; attempt < r.cfg.RegisterMaxRetry; attempt++ {
 		if attempt > 0 {
 			select {
@@ -164,8 +168,10 @@ func (r *registry) register(ctx context.Context) error {
 			}
 		}
 
-		code, _, err := r.tr.SendRequest(ctx, "REGISTER", nil)
+		code, reason, err := r.tr.SendRequest(ctx, "REGISTER", nil)
+		lastCode, lastReason, lastErr = code, reason, err
 		if err != nil {
+			r.logger.Debug("register attempt failed", "attempt", attempt+1, "err", err)
 			continue
 		}
 
@@ -180,6 +186,7 @@ func (r *registry) register(ctx context.Context) error {
 			}
 			return nil
 		}
+		r.logger.Debug("register rejected", "attempt", attempt+1, "code", code, "reason", reason)
 	}
 
 	// All retries exhausted.
@@ -187,11 +194,16 @@ func (r *registry) register(ctx context.Context) error {
 	r.state = PhoneStateRegistrationFailed
 	errFn := r.onError
 	r.mu.Unlock()
-	r.logger.Error("registration failed")
-	if errFn != nil {
-		go errFn(ErrRegistrationFailed)
+	regErr := &RegistrationFailedError{Code: lastCode, Reason: lastReason, TransportErr: lastErr}
+	logAttrs := []any{"last_code", lastCode, "last_reason", lastReason}
+	if lastErr != nil {
+		logAttrs = append(logAttrs, "last_err", lastErr)
 	}
-	return ErrRegistrationFailed
+	r.logger.Error("registration failed", logAttrs...)
+	if errFn != nil {
+		go errFn(regErr)
+	}
+	return regErr
 }
 
 // handleDrop is called by the transport when the connection drops.

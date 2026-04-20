@@ -31,9 +31,13 @@ type Config struct {
 	RegisterRetry    time.Duration
 	RegisterMaxRetry int
 
-	// OutboundProxy is the SIP URI to route outbound INVITEs through (e.g. "sip:proxy.example.com:5060").
-	// When set, the initial INVITE is sent to this address instead of Host.
-	// Registration still goes to Host. In-dialog requests use the route set from Record-Route.
+	// OutboundProxy is the SIP URI to route outbound requests through
+	// (e.g. "sip:proxy.example.com:5060"). When set, REGISTER, SUBSCRIBE,
+	// MESSAGE, and the initial INVITE are all sent to this address; the
+	// Request-URI keeps pointing at Host so registration still targets the
+	// registrar logically. In-dialog requests use the route set from
+	// Record-Route. This matches how Kamailio / OpenSIPS / Asterisk
+	// outbound-proxy deployments expect a single next-hop for all signaling.
 	OutboundProxy string
 	// OutboundUsername is the SIP digest username for outbound INVITE auth (401/407).
 	// Falls back to Username if empty.
@@ -366,9 +370,10 @@ func WithICE(enabled bool) PhoneOption {
 	}
 }
 
-// WithOutboundProxy sets the SIP URI to route outbound INVITEs through.
-// Registration still goes to the configured Host. In-dialog requests
-// (re-INVITE, BYE) use the route set established via Record-Route.
+// WithOutboundProxy sets the SIP URI to route all outbound requests
+// through (REGISTER, SUBSCRIBE, MESSAGE, initial INVITE). In-dialog
+// requests (re-INVITE, BYE) use the route set established via
+// Record-Route. See Config.OutboundProxy for details.
 // Example: "sip:proxy.example.com:5060"
 func WithOutboundProxy(uri string) PhoneOption {
 	return func(c *Config) {

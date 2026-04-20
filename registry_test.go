@@ -2,6 +2,7 @@ package xphone
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -246,4 +247,89 @@ func TestRegistry_NATKeepalivesSentOnInterval(t *testing.T) {
 	time.Sleep(70 * time.Millisecond)
 
 	assert.GreaterOrEqual(t, tr.CountSentKeepalives(), 2)
+}
+
+// Regression: #96 — REGISTER failure must surface last_code + last_reason so
+// operators can diagnose "registration failed" without tcpdump. The typed
+// error also unwraps to ErrRegistrationFailed for backward compatibility.
+func TestRegistry_FailureErrorCarriesLastResponseCodeAndReason(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.RespondSequence(
+		testutil.Response{Code: 401, Header: "Unauthorized"},
+		testutil.Response{Code: 403, Header: "Forbidden"},
+	)
+
+	cfg := testConfig()
+	cfg.RegisterMaxRetry = 2
+
+	r := newRegistry(tr, cfg)
+	errFired := make(chan error, 1)
+	r.OnError(func(err error) { errFired <- err })
+	r.Start(context.Background())
+
+	select {
+	case err := <-errFired:
+		assert.ErrorIs(t, err, ErrRegistrationFailed)
+		var regErr *RegistrationFailedError
+		require.True(t, errors.As(err, &regErr), "error must be *RegistrationFailedError")
+		assert.Equal(t, 403, regErr.Code, "Code should be the last response code")
+		assert.Equal(t, "Forbidden", regErr.Reason)
+		assert.Nil(t, regErr.TransportErr)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("OnError never fired")
+	}
+}
+
+// When the last retry fails at the transport layer, Code is 0 and
+// TransportErr carries the underlying error.
+func TestRegistry_FailureErrorCarriesTransportError(t *testing.T) {
+	tr := testutil.NewMockTransport()
+	tr.FailNext(99)
+
+	cfg := testConfig()
+	cfg.RegisterMaxRetry = 2
+
+	r := newRegistry(tr, cfg)
+	errFired := make(chan error, 1)
+	r.OnError(func(err error) { errFired <- err })
+	r.Start(context.Background())
+
+	select {
+	case err := <-errFired:
+		assert.ErrorIs(t, err, ErrRegistrationFailed)
+		var regErr *RegistrationFailedError
+		require.True(t, errors.As(err, &regErr))
+		assert.Equal(t, 0, regErr.Code)
+		assert.Empty(t, regErr.Reason)
+		require.NotNil(t, regErr.TransportErr)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("OnError never fired")
+	}
+}
+
+func TestRegistrationFailedError_ErrorString(t *testing.T) {
+	e1 := &RegistrationFailedError{Code: 403, Reason: "Forbidden"}
+	assert.Contains(t, e1.Error(), "403")
+	assert.Contains(t, e1.Error(), "Forbidden")
+	assert.Contains(t, e1.Error(), "registration failed")
+
+	e2 := &RegistrationFailedError{TransportErr: errors.New("conn refused")}
+	assert.Contains(t, e2.Error(), "conn refused")
+	assert.Contains(t, e2.Error(), "registration failed")
+
+	// Empty reason shouldn't produce a trailing space.
+	e3 := &RegistrationFailedError{Code: 500}
+	assert.Equal(t, "xphone: registration failed: last response 500", e3.Error())
+}
+
+// errors.Is must match the underlying TransportErr through the multi-error
+// Unwrap chain — not just ErrRegistrationFailed. This lets callers
+// distinguish transient network failures (net.OpError, context.DeadlineExceeded)
+// from permanent rejections.
+func TestRegistrationFailedError_ErrorsIsMatchesTransportErr(t *testing.T) {
+	netErr := errors.New("dial tcp: connection refused")
+	regErr := &RegistrationFailedError{TransportErr: netErr}
+
+	assert.ErrorIs(t, regErr, ErrRegistrationFailed)
+	assert.ErrorIs(t, regErr, netErr)
 }

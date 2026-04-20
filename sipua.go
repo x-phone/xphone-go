@@ -170,11 +170,16 @@ func newSipUA(cfg Config, contactIP string) (*sipUA, error) {
 const maxRedirects = 3
 
 // resolveAuthCredentials returns the SIP digest credentials to use for an
-// outbound INVITE. Precedence: per-call WithAuth > config OutboundCredentials > registration credentials.
+// outbound INVITE. Precedence for username: per-call WithAuth >
+// cfg.OutboundUsername > cfg.AuthUsername > cfg.Username. Password chain:
+// per-call WithAuth > cfg.OutboundPassword > cfg.Password.
 func resolveAuthCredentials(opts DialOptions, cfg Config) (string, string) {
 	user := opts.AuthUsername
 	if user == "" {
 		user = cfg.OutboundUsername
+	}
+	if user == "" {
+		user = cfg.AuthUsername
 	}
 	if user == "" {
 		user = cfg.Username
@@ -187,6 +192,16 @@ func resolveAuthCredentials(opts DialOptions, cfg Config) (string, string) {
 		pass = cfg.Password
 	}
 	return user, pass
+}
+
+// resolveRegisterAuthUsername returns the digest username for REGISTER and
+// other non-INVITE requests. Falls back to cfg.Username when AuthUsername
+// is unset. The counterpart for INVITE is resolveAuthCredentials.
+func resolveRegisterAuthUsername(cfg Config) string {
+	if cfg.AuthUsername != "" {
+		return cfg.AuthUsername
+	}
+	return cfg.Username
 }
 
 // dialWithOpts establishes an outbound SIP dialog with DialOptions.
@@ -620,7 +635,7 @@ func (s *sipUA) doWithAuth(ctx context.Context, req *sip.Request, opts ...sipgo.
 	}
 	if res.StatusCode == 401 || res.StatusCode == 407 {
 		authRes, err := s.client.DoDigestAuth(ctx, req, res, sipgo.DigestAuth{
-			Username: s.cfg.Username,
+			Username: resolveRegisterAuthUsername(s.cfg),
 			Password: s.cfg.Password,
 		})
 		if err != nil {

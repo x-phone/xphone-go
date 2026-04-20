@@ -309,6 +309,7 @@ func pcmToFloat32(frame []int16) []float32 {
 - Outbound proxy routing (`WithOutboundProxy`) — single next-hop for all signaling (REGISTER, SUBSCRIBE, MESSAGE, INVITE)
 - Separate outbound credentials (`WithOutboundCredentials`)
 - Separate digest auth identity (`WithAuthUsername`) — for PBXes like 3CX where the Authentication ID differs from the extension
+- RFC 3581 rport (`WithNAT`) — for phones behind NAT; PBX replies come back to the NAT-mapped source port
 - Custom headers on outbound INVITEs (`WithHeader`, `DialOptions.CustomHeaders`)
 - `Server.DialURI` — dial arbitrary SIP URIs without pre-configured peers
 - Transfer failure surfaced via `EndedByTransferFailed` end reason
@@ -468,6 +469,7 @@ phone := xphone.New(
     xphone.WithOutboundProxy("sip:proxy.example.com:5060"),   // single next-hop for all SIP signaling
     xphone.WithOutboundCredentials("trunk-user", "trunk-pass"), // separate INVITE auth
     xphone.WithAuthUsername("auth-id"),                         // 3CX-style: digest username != SIP AOR
+    xphone.WithNAT(),                                           // enable rport (RFC 3581) when behind NAT
     xphone.WithLogger(slog.Default()),
 )
 ```

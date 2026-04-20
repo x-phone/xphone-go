@@ -466,7 +466,11 @@ func (s *server) setupSipStack() error {
 		return fmt.Errorf("xphone: server create UA: %w", err)
 	}
 
-	client, err := sipgo.NewClient(ua, sipgo.WithClientHostname(s.localIP))
+	clientOpts := []sipgo.ClientOption{sipgo.WithClientHostname(s.localIP)}
+	if s.cfg.NAT {
+		clientOpts = append(clientOpts, sipgo.WithClientNAT())
+	}
+	client, err := sipgo.NewClient(ua, clientOpts...)
 	if err != nil {
 		ua.Close()
 		return fmt.Errorf("xphone: server create client: %w", err)

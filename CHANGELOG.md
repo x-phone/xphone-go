@@ -5,6 +5,9 @@
 ### Breaking changes
 - `WithOutboundProxy` / `Config.OutboundProxy` now routes **all** outbound SIP requests (REGISTER, SUBSCRIBE, MESSAGE, INVITE) through the proxy, not just INVITE. Matches how Kamailio / OpenSIPS / Asterisk outbound-proxy deployments expect a single next-hop for all signaling. Migration: for most deployments no action is needed — the proxy was already the expected next-hop. Callers who genuinely needed the prior "INVITE via proxy, REGISTER direct" split can either drop `OutboundProxy` (all requests go direct to `Host`) or run two `Phone` instances, one for registration and one for outbound calls.
 
+### Features
+- `WithNAT()` PhoneOption (plus `Config.NAT` / `ServerConfig.NAT`) — enables RFC 3581 rport on outgoing UDP SIP requests so peers reply to the NAT-mapped source IP:port rather than the sent-by Via address. Required for phones/servers behind NAT (dev environments, containerized deployments) where the PBX would otherwise reply to an unreachable port.
+
 ## v0.5.12
 
 ### Features

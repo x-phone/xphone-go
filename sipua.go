@@ -135,7 +135,11 @@ func newSipUA(cfg Config, contactIP string) (*sipUA, error) {
 		return nil, fmt.Errorf("xphone: create UA: %w", err)
 	}
 
-	client, err := sipgo.NewClient(ua, sipgo.WithClientHostname(contactIP))
+	clientOpts := []sipgo.ClientOption{sipgo.WithClientHostname(contactIP)}
+	if cfg.NAT && strings.EqualFold(cfg.Transport, "udp") {
+		clientOpts = append(clientOpts, sipgo.WithClientNAT())
+	}
+	client, err := sipgo.NewClient(ua, clientOpts...)
 	if err != nil {
 		ua.Close()
 		return nil, fmt.Errorf("xphone: create client: %w", err)

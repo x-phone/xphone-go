@@ -837,3 +837,30 @@ func TestFakePBX_OutboundProxy_RoutesRegister(t *testing.T) {
 	assert.Equal(t, registrarHost, last.Recipient.Host,
 		"Request-URI host must point at registrar, not proxy")
 }
+
+// F21: WithNAT enables RFC 3581 rport on outgoing Via. Models a phone behind
+// NAT that needs the PBX to reply to the NAT-mapped source IP:port rather
+// than the sent-by address.
+func TestFakePBX_Register_NAT_AddsRportToVia(t *testing.T) {
+	pbx := fakepbx.NewFakePBX(t, fakepbx.WithAuth("1001", "test"))
+	cfg := pbxConfig(t, pbx)
+	cfg.NAT = true
+	connectWithConfig(t, cfg)
+
+	assert.GreaterOrEqual(t, pbx.RegisterCount(), 1)
+	via := pbx.LastRegister().Via()
+	require.NotNil(t, via, "REGISTER must have a Via header")
+	assert.True(t, via.Params.Has("rport"), "Via must carry rport when NAT is enabled")
+}
+
+// F22: NAT off (default) — Via must NOT carry rport, preserving existing
+// behavior for deployments without NAT traversal needs.
+func TestFakePBX_Register_NATDisabled_OmitsRport(t *testing.T) {
+	pbx := fakepbx.NewFakePBX(t, fakepbx.WithAuth("1001", "test"))
+	connectPBX(t, pbx)
+
+	assert.GreaterOrEqual(t, pbx.RegisterCount(), 1)
+	via := pbx.LastRegister().Via()
+	require.NotNil(t, via)
+	assert.False(t, via.Params.Has("rport"), "Via must NOT carry rport when NAT is disabled")
+}

@@ -125,3 +125,9 @@ func TestResolveRegisterAuthUsername_BothEmpty(t *testing.T) {
 	cfg := Config{}
 	assert.Empty(t, resolveRegisterAuthUsername(cfg))
 }
+
+func TestWithNAT_SetsConfig(t *testing.T) {
+	cfg := Config{}
+	WithNAT()(&cfg)
+	assert.True(t, cfg.NAT)
+}

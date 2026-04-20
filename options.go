@@ -47,6 +47,13 @@ type Config struct {
 	OutboundPassword string
 
 	NATKeepaliveInterval time.Duration
+	// NAT enables RFC 3581 rport on outgoing SIP requests. rport (response
+	// port) instructs the server to send SIP responses back to the source
+	// IP:port the request arrived on rather than the sent-by address in
+	// the Via header. Required when the phone sits behind NAT (most dev
+	// environments, containerized deployments) and the PBX would otherwise
+	// reply to an unreachable port. Applies only to UDP transports.
+	NAT bool
 
 	StunServer string
 	SRTP       bool
@@ -406,6 +413,16 @@ func WithAuthUsername(username string) PhoneOption {
 	}
 }
 
+// WithNAT enables RFC 3581 rport on outgoing SIP requests. See Config.NAT.
+// Use this when the phone sits behind NAT and the PBX must reply to the
+// source IP:port of the request (the NAT-mapped address) rather than the
+// sent-by address in the Via header.
+func WithNAT() PhoneOption {
+	return func(c *Config) {
+		c.NAT = true
+	}
+}
+
 // WithSRTP enables SRTP (Secure RTP) for media encryption.
 // When enabled, SDP offers use RTP/SAVP with AES_CM_128_HMAC_SHA1_80.
 func WithSRTP() PhoneOption {
@@ -475,6 +492,8 @@ type ServerConfig struct {
 	RTPAddress string
 	// SRTP enables SRTP media encryption (RTP/SAVP with AES_CM_128_HMAC_SHA1_80).
 	SRTP bool
+	// NAT enables RFC 3581 rport on outgoing SIP requests. See Config.NAT.
+	NAT bool
 	// CodecPrefs sets the codec preference order. Default: [PCMU].
 	CodecPrefs []Codec
 	// JitterBuffer sets the jitter buffer depth. Default: 50ms.

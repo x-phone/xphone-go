@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.5.12
+
 ### Features
 - `Config.AuthUsername` and `WithAuthUsername(username)` — default digest Authorization username used across REGISTER, SUBSCRIBE, MESSAGE, and outbound INVITE, separate from the SIP AOR carried in From/To/Contact. Needed for PBXes where the authentication identity differs from the extension (e.g. 3CX trunks with a distinct Authentication ID). More specific overrides still win (`OutboundUsername` for INVITE, per-call `WithAuth` for `Dial`). Falls back to `Username` when unset; behavior unchanged for existing setups.
 

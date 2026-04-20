@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.6.0
+
 ### Bug fixes
 - REGISTER failure now surfaces the last observed SIP response code and reason via a typed `*RegistrationFailedError{Code, Reason, TransportErr}` returned from `Phone.Connect()` and delivered to `Phone.OnError`. The final error log includes `last_code`, `last_reason`, and `last_err` (omitted when nil) — previously the library logged only `registration failed` with no actionable detail, forcing tcpdump-level diagnosis. Per-attempt retries now log at debug level with attempt number, code, and reason. (#96)
   - `errors.Is(err, ErrRegistrationFailed)` and `errors.Is(err, regErr.TransportErr)` both still match via `Unwrap() []error`.

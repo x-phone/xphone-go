@@ -18,6 +18,15 @@ type Config struct {
 	Transport string
 	TLSConfig *tls.Config
 
+	// AuthUsername is the default digest Authorization username. Applies to
+	// REGISTER, SUBSCRIBE, MESSAGE, and outbound INVITE when no more specific
+	// override is set (OutboundUsername for INVITE, per-call WithAuth for Dial).
+	// When empty, Username is used. Set this when the PBX's auth identity
+	// differs from the SIP AOR — for example, 3CX trunks where the
+	// Authentication ID is not the extension. The SIP From/To/Contact headers
+	// always use Username regardless.
+	AuthUsername string
+
 	RegisterExpiry   time.Duration
 	RegisterRetry    time.Duration
 	RegisterMaxRetry int
@@ -380,6 +389,15 @@ func WithOutboundCredentials(username, password string) PhoneOption {
 	return func(c *Config) {
 		c.OutboundUsername = username
 		c.OutboundPassword = password
+	}
+}
+
+// WithAuthUsername sets Config.AuthUsername — the default digest Authorization
+// username applied to REGISTER, SUBSCRIBE, MESSAGE, and outbound INVITE when
+// no more specific override is set. See the field doc for precedence details.
+func WithAuthUsername(username string) PhoneOption {
+	return func(c *Config) {
+		c.AuthUsername = username
 	}
 }
 

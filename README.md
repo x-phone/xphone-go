@@ -308,6 +308,7 @@ func pcmToFloat32(frame []int16) []float32 {
 - `ReplaceAudioWriter` — atomic audio source swap (e.g., music on hold)
 - Outbound proxy routing (`WithOutboundProxy`)
 - Separate outbound credentials (`WithOutboundCredentials`)
+- Separate digest auth identity (`WithAuthUsername`) — for PBXes like 3CX where the Authentication ID differs from the extension
 - Custom headers on outbound INVITEs (`WithHeader`, `DialOptions.CustomHeaders`)
 - `Server.DialURI` — dial arbitrary SIP URIs without pre-configured peers
 - Transfer failure surfaced via `EndedByTransferFailed` end reason
@@ -466,6 +467,7 @@ phone := xphone.New(
     xphone.WithTurnCredentials("user", "pass"),
     xphone.WithOutboundProxy("sip:proxy.example.com:5060"),   // route INVITEs via proxy
     xphone.WithOutboundCredentials("trunk-user", "trunk-pass"), // separate INVITE auth
+    xphone.WithAuthUsername("auth-id"),                         // 3CX-style: digest username != SIP AOR
     xphone.WithLogger(slog.Default()),
 )
 ```

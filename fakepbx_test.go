@@ -776,3 +776,39 @@ func TestFakePBX_OutboundProxy(t *testing.T) {
 
 	c.End()
 }
+
+// F20: AuthUsername splits digest identity from the SIP AOR. The PBX expects
+// digest username "auth-id" while the phone presents SIP identity "1001" in
+// From/To/Contact headers. Models 3CX-style trunks where the Authentication
+// ID is distinct from the extension number.
+func TestFakePBX_Register_AuthUsernameSplitIdentity(t *testing.T) {
+	pbx := fakepbx.NewFakePBX(t, fakepbx.WithAuth("auth-id", "secret"))
+	cfg := pbxConfig(t, pbx)
+	cfg.Username = "1001"
+	cfg.Password = "secret"
+	cfg.AuthUsername = "auth-id"
+	p := connectWithConfig(t, cfg)
+
+	assert.Equal(t, PhoneStateRegistered, p.State())
+	assert.GreaterOrEqual(t, pbx.RegisterCount(), 1)
+
+	last := pbx.LastRegister()
+	require.NotNil(t, last, "PBX should have recorded at least one REGISTER")
+
+	// SIP identity headers carry Username, not AuthUsername.
+	from := last.From()
+	require.NotNil(t, from)
+	assert.Equal(t, "1001", from.Address.User, "From must carry Username")
+	to := last.To()
+	require.NotNil(t, to)
+	assert.Equal(t, "1001", to.Address.User, "To must carry Username")
+	contact := last.Contact()
+	require.NotNil(t, contact)
+	assert.Equal(t, "1001", contact.Address.User, "Contact must carry Username")
+
+	// Authorization header carries AuthUsername for the digest challenge.
+	authHdr := last.GetHeader("Authorization")
+	require.NotNil(t, authHdr, "REGISTER retry must include Authorization header")
+	assert.Contains(t, authHdr.Value(), `username="auth-id"`,
+		"digest username must use AuthUsername, not Username")
+}

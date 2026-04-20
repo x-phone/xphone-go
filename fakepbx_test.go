@@ -812,3 +812,28 @@ func TestFakePBX_Register_AuthUsernameSplitIdentity(t *testing.T) {
 	assert.Contains(t, authHdr.Value(), `username="auth-id"`,
 		"digest username must use AuthUsername, not Username")
 }
+
+// F23: OutboundProxy routes REGISTER through the proxy, not directly to the
+// registrar. Matches how Kamailio/OpenSIPS/Asterisk expect a single next-hop
+// for all signaling. The proxy sees the REGISTER; the registrar does not.
+func TestFakePBX_OutboundProxy_RoutesRegister(t *testing.T) {
+	// Registrar with auth — would challenge if REGISTER reached it directly.
+	registrar := fakepbx.NewFakePBX(t, fakepbx.WithAuth("1001", "test"))
+	// Proxy with no auth — accepts REGISTER unconditionally.
+	proxy := fakepbx.NewFakePBX(t)
+
+	cfg := pbxConfig(t, registrar)
+	cfg.OutboundProxy = "sip:" + proxy.Addr()
+	connectWithConfig(t, cfg)
+
+	assert.GreaterOrEqual(t, proxy.RegisterCount(), 1, "proxy should receive REGISTER")
+	assert.Equal(t, 0, registrar.RegisterCount(), "registrar should NOT receive REGISTER directly")
+
+	// The Request-URI on the REGISTER still targets the registrar host —
+	// only the next-hop transport is the proxy.
+	last := proxy.LastRegister()
+	require.NotNil(t, last)
+	registrarHost, _, _ := net.SplitHostPort(registrar.Addr())
+	assert.Equal(t, registrarHost, last.Recipient.Host,
+		"Request-URI host must point at registrar, not proxy")
+}

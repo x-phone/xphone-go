@@ -204,6 +204,23 @@ func resolveRegisterAuthUsername(cfg Config) string {
 	return cfg.Username
 }
 
+// outboundProxyRouteHeader returns a loose-routing Route header pointing at
+// the configured outbound proxy, or nil when no proxy is configured. Per
+// RFC 3261 §8.1.2 this forces requests through the proxy while keeping the
+// Request-URI pointing at its logical target. ;lr is enforced here as a
+// safety net — WithOutboundProxy normalises it, but callers setting
+// Config.OutboundProxy directly still get a compliant Route.
+func (s *sipUA) outboundProxyRouteHeader() sip.Header {
+	uri := s.cfg.OutboundProxy
+	if uri == "" {
+		return nil
+	}
+	if !hasURIParam(uri, "lr") {
+		uri += ";lr"
+	}
+	return sip.NewHeader("Route", "<"+uri+">")
+}
+
 // dialWithOpts establishes an outbound SIP dialog with DialOptions.
 // It delegates to dial, passing through video options for SDP construction.
 func (s *sipUA) dialWithOpts(ctx context.Context, target string, opts DialOptions, onResponse func(code int, reason string)) (dialog, error) {
@@ -688,6 +705,14 @@ func (s *sipUA) SendRequest(ctx context.Context, method string, headers map[stri
 		req.AppendHeader(sip.NewHeader(k, v))
 	}
 
+	// Prepend the outbound-proxy Route so it is the topmost Route header —
+	// sipgo picks the first Route for next-hop selection, so prepending
+	// guarantees the proxy wins even if a caller supplies their own Route
+	// via `headers`.
+	if h := s.outboundProxyRouteHeader(); h != nil {
+		req.PrependHeader(h)
+	}
+
 	// Determine request build options.
 	var opts []sipgo.ClientRequestOption
 	if method == "REGISTER" {
@@ -743,6 +768,11 @@ func (s *sipUA) buildOutboundRequest(method sip.RequestMethod, uri string, heade
 
 	for k, v := range headers {
 		req.AppendHeader(sip.NewHeader(k, v))
+	}
+
+	// Prepend the outbound-proxy Route so it is the topmost Route header.
+	if h := s.outboundProxyRouteHeader(); h != nil {
+		req.PrependHeader(h)
 	}
 	return req
 }

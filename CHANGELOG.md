@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.6.2
+
 ### Bug fixes
 - `WithRTPAddress` no longer rewrites the SIP Contact/Via host when `Config.NAT` is also set. Previously the override replaced both the SDP `c=` line (media) and the Contact URI (signaling), but the SIP client's bound UDP port is ephemeral — advertising a reachable-looking Contact host while the signaling port is not publishable caused the PBX to target an unpublished port and drop inbound INVITEs (Docker-bridge local dev, Kubernetes NAT). With the fix, Contact/Via fall back to the real bind interface IP when `Config.NAT` is set, so rport (RFC 3581) + REGISTER keepalive continue to drive the PBX's NAT learning. Deployments without `Config.NAT` (direct public VPS) are unaffected. (#109)
 

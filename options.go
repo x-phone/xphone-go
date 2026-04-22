@@ -512,8 +512,10 @@ type ServerConfig struct {
 	RTPPortMin int
 	// RTPPortMax is the maximum RTP port to allocate. 0 means OS-assigned.
 	RTPPortMax int
-	// RTPAddress is the public IP to advertise in SDP when listening on 0.0.0.0.
-	// If empty, the listen address or auto-detected local IP is used.
+	// RTPAddress is the IPv4 literal to advertise in SDP when listening on
+	// 0.0.0.0. If empty, the listen address or auto-detected local IP is
+	// used. Non-IPv4 values (IPv6, hostnames, whitespace, CRLF) are rejected
+	// at newServer() with a log warning and treated as unset.
 	RTPAddress string
 	// SRTP enables SRTP media encryption (RTP/SAVP with AES_CM_128_HMAC_SHA1_80).
 	SRTP bool
@@ -547,9 +549,11 @@ type PeerConfig struct {
 	Port int
 	// Auth enables SIP digest authentication for this peer.
 	Auth *PeerAuthConfig
-	// RTPAddress overrides the server-level RTPAddress for this peer.
-	// Use when this peer needs to see a different IP in SDP (e.g. different
-	// network interface). Empty means use the server-level setting.
+	// RTPAddress overrides the server-level RTPAddress for this peer. Must be
+	// an IPv4 literal. Use when this peer needs to see a different IP in SDP
+	// (e.g. different network interface). Empty or non-IPv4 values fall back
+	// to the server-level setting (non-IPv4 values are warned about at
+	// newServer() and treated as unset).
 	RTPAddress string
 	// Codecs restricts the codecs offered/accepted for this peer.
 	// Empty means accept any codec from the server-level CodecPrefs.

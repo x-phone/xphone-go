@@ -52,8 +52,9 @@ type phone struct {
 	logger      *slog.Logger
 	tr          sipTransport
 	reg         *registry
-	localIP     string // cached localIPFor(cfg.Host), or STUN-mapped IP after Connect
-	hostIP      string // real local interface IP (pre-STUN, for ICE host candidate)
+	localIP     string // advertised IP — SDP c=, default SIP Contact/Via. Override, STUN, or localIPFor(cfg.Host).
+	hostIP      string // ICE host candidate IP (= override when set, else localIPFor(cfg.Host))
+	interfaceIP string // real bind interface IP — fallback for SIP Contact when cfg.NAT is set with an RTPAddress override, so rport + REGISTER keepalive can drive NAT learning.
 	codecPrefs  []int  // cached codecPrefsToInts(cfg.CodecPrefs), set at construction
 	state       PhoneState
 	incomingFns []func(Call)
@@ -98,6 +99,21 @@ func codecPrefsToInts(codecs []Codec) []int {
 	return pts
 }
 
+// resolveContactIP returns the IP to advertise in SIP Contact/Via. By default
+// this is p.localIP (which already accounts for STUN discovery and RTPAddress
+// override). Carve-out for Docker-bridge and similar setups: when cfg.NAT is
+// set AND an RTPAddress override is active, Contact/Via fall back to the
+// real bind interface IP so rport (RFC 3581) + REGISTER keepalive can drive
+// the PBX's NAT learning. Rewriting Contact to a reachable-looking host
+// while the SIP port is ephemeral (sipgo binds a random UDP port) would
+// trick the PBX into targeting an unpublished port. See #109.
+func (p *phone) resolveContactIP() string {
+	if p.cfg.NAT && effectiveRTPAddress(p.cfg.RTPAddress) != "" {
+		return p.interfaceIP
+	}
+	return p.localIP
+}
+
 // effectiveRTPAddress returns s if it parses as an IPv4 literal, else "".
 // The stack's media path is IPv4-only (udp4 sockets, SDP "IN IP4"), so IPv6
 // literals and non-IP strings (hostnames, whitespace, CRLF injection) are
@@ -114,13 +130,15 @@ func effectiveRTPAddress(s string) string {
 }
 
 func newPhone(cfg Config) *phone {
-	hostIP := localIPFor(cfg.Host)
-	localIP := hostIP
+	interfaceIP := localIPFor(cfg.Host)
+	localIP := interfaceIP
+	hostIP := interfaceIP
 	// When RTPAddress is a valid IPv4 literal, use it for BOTH the advertised
-	// IP (SDP c=, SIP Contact) AND the ICE host candidate — otherwise ICE
-	// would emit a high-priority host candidate at the auto-detected IP and
-	// a lower-priority srflx at the override, leading peers to probe the
-	// unroutable address first.
+	// IP (SDP c=) AND the ICE host candidate — otherwise ICE would emit a
+	// high-priority host candidate at the auto-detected IP and a lower-priority
+	// srflx at the override, leading peers to probe the unroutable address
+	// first. interfaceIP stays at the real bind IP so Contact can fall back
+	// to it when cfg.NAT is set (see Connect).
 	if override := effectiveRTPAddress(cfg.RTPAddress); override != "" {
 		localIP = override
 		hostIP = override
@@ -130,13 +148,14 @@ func newPhone(cfg Config) *phone {
 		logger.Warn("xphone: WithRTPAddress ignored, not an IPv4 literal", "value", cfg.RTPAddress)
 	}
 	return &phone{
-		cfg:        cfg,
-		logger:     logger,
-		localIP:    localIP,
-		hostIP:     hostIP,
-		codecPrefs: codecPrefsToInts(cfg.CodecPrefs),
-		state:      PhoneStateDisconnected,
-		calls:      make(map[string]*call),
+		cfg:         cfg,
+		logger:      logger,
+		localIP:     localIP,
+		hostIP:      hostIP,
+		interfaceIP: interfaceIP,
+		codecPrefs:  codecPrefsToInts(cfg.CodecPrefs),
+		state:       PhoneStateDisconnected,
+		calls:       make(map[string]*call),
 	}
 }
 
@@ -349,7 +368,11 @@ func (p *phone) Connect(ctx context.Context) error {
 		}
 	}
 
-	contactIP := p.localIP
+	contactIP := p.resolveContactIP()
+	if contactIP != p.localIP {
+		p.logger.Debug("NAT mode with RTPAddress: keeping Contact/Via at interface IP for rport NAT learning",
+			"interface_ip", p.interfaceIP, "rtp_address", p.cfg.RTPAddress)
+	}
 	p.mu.Unlock()
 
 	tr, err := newSipUA(p.cfg, contactIP)

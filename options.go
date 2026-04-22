@@ -58,14 +58,21 @@ type Config struct {
 	StunServer string
 	SRTP       bool
 
-	// RTPAddress is the IPv4 literal to advertise in SIP Contact headers, the
-	// SDP c= line, and the ICE host candidate. When set to a valid IPv4, it
-	// overrides auto-detection (localIPFor) and skips STUN discovery entirely.
+	// RTPAddress is the IPv4 literal to advertise as the media endpoint
+	// (SDP c= line and ICE host candidate). When set, it overrides
+	// auto-detection (localIPFor) and skips STUN discovery.
+	//
+	// It also overrides SIP Contact/Via by default — EXCEPT when cfg.NAT is
+	// also set, in which case Contact/Via are left at the bind interface IP
+	// so rport (RFC 3581) + REGISTER keepalive can drive the PBX's NAT
+	// learning for inbound signaling. This matters in Docker-bridge setups
+	// where the host-mapped port range covers RTP but the SIP client's
+	// ephemeral UDP port is not publishable — advertising the host LAN IP
+	// in Contact would cause the PBX to target an unreachable port.
+	//
 	// Non-IPv4 values (IPv6, hostnames, garbage) are rejected at construction
-	// with a log warning and treated as unset. Useful for local dev against a
-	// LAN PBX where the auto-detected interface isn't routable from the peer
-	// (Docker container IP, VPN interface, multi-homed host, WSL2 vEthernet).
-	// Parallel to ServerConfig.RTPAddress on the trunk side.
+	// with a log warning and treated as unset. Parallel to ServerConfig.RTPAddress
+	// on the trunk side.
 	RTPAddress string
 
 	// TurnServer is the TURN server address (host:port) for relay allocation.
@@ -352,15 +359,19 @@ func WithNATKeepalive(d time.Duration) PhoneOption {
 	}
 }
 
-// WithRTPAddress sets the IPv4 literal to advertise in SIP Contact headers,
-// the SDP c= line, and the ICE host candidate. Overrides auto-detection and
-// skips STUN discovery. Mirrors ServerConfig.RTPAddress on the Server side.
+// WithRTPAddress sets the IPv4 literal to advertise as the media endpoint
+// (SDP c= line and ICE host candidate). Overrides auto-detection and skips
+// STUN discovery. Mirrors ServerConfig.RTPAddress on the Server side.
+//
+// By default the override also applies to SIP Contact/Via. Use WithNAT
+// alongside this option to gate the signaling half of the override on rport
+// (RFC 3581) + REGISTER keepalive — required in Docker-bridge local dev
+// where the host-mapped port range covers RTP but the SIP client's
+// ephemeral UDP port is not publishable. See Config.RTPAddress for details.
+//
 // Non-IPv4 values (IPv6, hostnames, whitespace) are rejected with a log
-// warning and treated as unset. Use this when the kernel's outbound interface
-// lookup picks an IP that isn't routable from the peer (Docker container IP,
-// VPN tunnel, multi-homed host, WSL2 vEthernet). Example:
-// WithRTPAddress("10.27.1.137") on a Mac with Docker port-forwarding the RTP
-// range back to the container.
+// warning and treated as unset. Example: WithRTPAddress("10.27.1.137") on a
+// Mac with Docker port-forwarding the RTP range back to the container.
 func WithRTPAddress(ip string) PhoneOption {
 	return func(c *Config) {
 		c.RTPAddress = ip

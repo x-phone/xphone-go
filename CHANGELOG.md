@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.6.1
+
 ### Features
 - `WithRTPAddress(ip)` PhoneOption (plus `Config.RTPAddress`) — overrides the IPv4 literal advertised in SIP Contact headers, the SDP `c=` line, and the ICE host candidate. Takes precedence over STUN discovery and `localIPFor()` auto-detection. Mirrors the existing `ServerConfig.RTPAddress` on the trunk side. Required for local dev against a LAN PBX when the kernel's outbound interface lookup picks an IP that isn't routable from the peer — Docker container IP, VPN tunnel, multi-homed host, or WSL2 vEthernet. (#105)
 

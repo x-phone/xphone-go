@@ -326,6 +326,35 @@ func TestServer_ResolveRTPAddressForPeer(t *testing.T) {
 	}
 }
 
+func TestServer_ResolveRTPAddressForPeer_InvalidPeerOverrideFallsBack(t *testing.T) {
+	// Invalid peer-level RTPAddress must not be propagated — it falls back
+	// to the server-level IP so we never advertise an unparseable string.
+	s := &server{localIP: "203.0.113.1"}
+	cases := []string{
+		"example.com",
+		"10.0.0.1\r\nBad-Header: x",
+		"2001:db8::1",
+		" 10.0.0.1 ",
+		"garbage",
+	}
+	for _, input := range cases {
+		t.Run(input, func(t *testing.T) {
+			peer := &PeerConfig{Name: "bad", RTPAddress: input}
+			if got := s.resolveRTPAddressForPeer(peer); got != "203.0.113.1" {
+				t.Errorf("invalid peer RTPAddress %q should fall back to server localIP, got %q", input, got)
+			}
+		})
+	}
+}
+
+func TestNewServer_InvalidRTPAddressIgnored(t *testing.T) {
+	// Non-IPv4 ServerConfig.RTPAddress must not flow into resolveLocalIP.
+	s := &server{cfg: ServerConfig{RTPAddress: "example.com", Listen: "0.0.0.0:5080"}}
+	if got := s.resolveLocalIP(); got == "example.com" {
+		t.Errorf("invalid RTPAddress %q must not be returned from resolveLocalIP", got)
+	}
+}
+
 func TestServer_PeerCodecsConfig(t *testing.T) {
 	srv := NewServer(ServerConfig{
 		CodecPrefs: []Codec{CodecPCMU, CodecPCMA, CodecG722},

@@ -131,3 +131,9 @@ func TestWithNAT_SetsConfig(t *testing.T) {
 	WithNAT()(&cfg)
 	assert.True(t, cfg.NAT)
 }
+
+func TestWithRTPAddress_SetsConfig(t *testing.T) {
+	cfg := Config{}
+	WithRTPAddress("10.27.1.137")(&cfg)
+	assert.Equal(t, "10.27.1.137", cfg.RTPAddress)
+}

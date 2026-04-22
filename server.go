@@ -89,9 +89,19 @@ func NewServer(cfg ServerConfig) Server {
 }
 
 func newServer(cfg ServerConfig) *server {
+	logger := resolveLogger(cfg.Logger)
+	if cfg.RTPAddress != "" && effectiveRTPAddress(cfg.RTPAddress) == "" {
+		logger.Warn("xphone: ServerConfig.RTPAddress ignored, not an IPv4 literal", "value", cfg.RTPAddress)
+	}
+	for i := range cfg.Peers {
+		peer := &cfg.Peers[i]
+		if peer.RTPAddress != "" && effectiveRTPAddress(peer.RTPAddress) == "" {
+			logger.Warn("xphone: PeerConfig.RTPAddress ignored, not an IPv4 literal", "peer", peer.Name, "value", peer.RTPAddress)
+		}
+	}
 	return &server{
 		cfg:           cfg,
-		logger:        resolveLogger(cfg.Logger),
+		logger:        logger,
 		codecPrefs:    codecPrefsToInts(cfg.CodecPrefs),
 		peerMatchers:  buildPeerMatchers(cfg.Peers),
 		state:         ServerStateStopped,
@@ -441,8 +451,8 @@ func (s *server) listenAddr() string {
 
 // resolveLocalIP determines the IP to advertise in SDP.
 func (s *server) resolveLocalIP() string {
-	if s.cfg.RTPAddress != "" {
-		return s.cfg.RTPAddress
+	if override := effectiveRTPAddress(s.cfg.RTPAddress); override != "" {
+		return override
 	}
 	host, _, err := net.SplitHostPort(s.listenAddr())
 	if err == nil && host != "" && host != "0.0.0.0" && host != "::" {
@@ -940,10 +950,14 @@ func (s *server) findPeer(name string) *PeerConfig {
 }
 
 // resolveRTPAddressForPeer returns the IP to use in SDP for a given peer.
-// Prefers peer-level RTPAddress, falls back to server-level.
+// Prefers peer-level RTPAddress (if a valid IPv4 literal), falls back to
+// server-level. Invalid peer overrides are ignored — they were warned about
+// at newServer().
 func (s *server) resolveRTPAddressForPeer(p *PeerConfig) string {
-	if p != nil && p.RTPAddress != "" {
-		return p.RTPAddress
+	if p != nil {
+		if override := effectiveRTPAddress(p.RTPAddress); override != "" {
+			return override
+		}
 	}
 	return s.localIP
 }

@@ -58,6 +58,16 @@ type Config struct {
 	StunServer string
 	SRTP       bool
 
+	// RTPAddress is the IPv4 literal to advertise in SIP Contact headers, the
+	// SDP c= line, and the ICE host candidate. When set to a valid IPv4, it
+	// overrides auto-detection (localIPFor) and skips STUN discovery entirely.
+	// Non-IPv4 values (IPv6, hostnames, garbage) are rejected at construction
+	// with a log warning and treated as unset. Useful for local dev against a
+	// LAN PBX where the auto-detected interface isn't routable from the peer
+	// (Docker container IP, VPN interface, multi-homed host, WSL2 vEthernet).
+	// Parallel to ServerConfig.RTPAddress on the trunk side.
+	RTPAddress string
+
 	// TurnServer is the TURN server address (host:port) for relay allocation.
 	// When set with TurnUsername/TurnPassword, the phone allocates a TURN relay
 	// during call setup for symmetric NAT traversal.
@@ -342,6 +352,21 @@ func WithNATKeepalive(d time.Duration) PhoneOption {
 	}
 }
 
+// WithRTPAddress sets the IPv4 literal to advertise in SIP Contact headers,
+// the SDP c= line, and the ICE host candidate. Overrides auto-detection and
+// skips STUN discovery. Mirrors ServerConfig.RTPAddress on the Server side.
+// Non-IPv4 values (IPv6, hostnames, whitespace) are rejected with a log
+// warning and treated as unset. Use this when the kernel's outbound interface
+// lookup picks an IP that isn't routable from the peer (Docker container IP,
+// VPN tunnel, multi-homed host, WSL2 vEthernet). Example:
+// WithRTPAddress("10.27.1.137") on a Mac with Docker port-forwarding the RTP
+// range back to the container.
+func WithRTPAddress(ip string) PhoneOption {
+	return func(c *Config) {
+		c.RTPAddress = ip
+	}
+}
+
 // WithStunServer sets the STUN server for NAT-mapped address discovery.
 // Format: "host:port" (e.g. "stun.l.google.com:19302").
 // When set, the phone queries the STUN server during Connect() to discover
@@ -487,8 +512,10 @@ type ServerConfig struct {
 	RTPPortMin int
 	// RTPPortMax is the maximum RTP port to allocate. 0 means OS-assigned.
 	RTPPortMax int
-	// RTPAddress is the public IP to advertise in SDP when listening on 0.0.0.0.
-	// If empty, the listen address or auto-detected local IP is used.
+	// RTPAddress is the IPv4 literal to advertise in SDP when listening on
+	// 0.0.0.0. If empty, the listen address or auto-detected local IP is
+	// used. Non-IPv4 values (IPv6, hostnames, whitespace, CRLF) are rejected
+	// at newServer() with a log warning and treated as unset.
 	RTPAddress string
 	// SRTP enables SRTP media encryption (RTP/SAVP with AES_CM_128_HMAC_SHA1_80).
 	SRTP bool
@@ -522,9 +549,11 @@ type PeerConfig struct {
 	Port int
 	// Auth enables SIP digest authentication for this peer.
 	Auth *PeerAuthConfig
-	// RTPAddress overrides the server-level RTPAddress for this peer.
-	// Use when this peer needs to see a different IP in SDP (e.g. different
-	// network interface). Empty means use the server-level setting.
+	// RTPAddress overrides the server-level RTPAddress for this peer. Must be
+	// an IPv4 literal. Use when this peer needs to see a different IP in SDP
+	// (e.g. different network interface). Empty or non-IPv4 values fall back
+	// to the server-level setting (non-IPv4 values are warned about at
+	// newServer() and treated as unset).
 	RTPAddress string
 	// Codecs restricts the codecs offered/accepted for this peer.
 	// Empty means accept any codec from the server-level CodecPrefs.

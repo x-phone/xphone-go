@@ -124,6 +124,21 @@ func TestNew_WithRTPPorts(t *testing.T) {
 	assert.Equal(t, 20000, ph.cfg.RTPPortMax)
 }
 
+func TestNew_WithRTPAddress_OverridesLocalIP(t *testing.T) {
+	p := New(WithRTPAddress("10.27.1.137"))
+	ph := p.(*phone)
+	assert.Equal(t, "10.27.1.137", ph.cfg.RTPAddress)
+	assert.Equal(t, "10.27.1.137", ph.localIP,
+		"RTPAddress override should flow into phone.localIP (SDP c= / SIP Contact)")
+}
+
+func TestNew_WithoutRTPAddress_UsesAutoDetect(t *testing.T) {
+	p := New()
+	ph := p.(*phone)
+	assert.Empty(t, ph.cfg.RTPAddress)
+	assert.NotEmpty(t, ph.localIP, "localIP should fall back to localIPFor(host)")
+}
+
 func TestNew_WithCodecs(t *testing.T) {
 	p := New(WithCodecs(CodecPCMU, CodecPCMA, CodecG722))
 	ph := p.(*phone)

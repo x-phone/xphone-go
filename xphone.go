@@ -100,10 +100,14 @@ func codecPrefsToInts(codecs []Codec) []int {
 
 func newPhone(cfg Config) *phone {
 	hostIP := localIPFor(cfg.Host)
+	localIP := hostIP
+	if cfg.RTPAddress != "" {
+		localIP = cfg.RTPAddress
+	}
 	return &phone{
 		cfg:        cfg,
 		logger:     resolveLogger(cfg.Logger),
-		localIP:    hostIP,
+		localIP:    localIP,
 		hostIP:     hostIP,
 		codecPrefs: codecPrefsToInts(cfg.CodecPrefs),
 		state:      PhoneStateDisconnected,
@@ -309,7 +313,8 @@ func (p *phone) Connect(ctx context.Context) error {
 	// STUN discovery: if configured, try to discover our NAT-mapped IP.
 	// On success, override the localIP used for Contact headers and SDP.
 	// On failure, log a warning and keep the existing localIPFor() result.
-	if p.cfg.StunServer != "" {
+	// Skipped when cfg.RTPAddress is set — explicit override wins over discovery.
+	if p.cfg.StunServer != "" && p.cfg.RTPAddress == "" {
 		ip, _, err := stun.MappedAddr(p.cfg.StunServer, stun.DefaultTimeout)
 		if err != nil {
 			p.logger.Warn("STUN discovery failed, using local IP", "err", err, "fallback", p.localIP)

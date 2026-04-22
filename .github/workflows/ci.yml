@@ -8,7 +8,9 @@ on:
 
 jobs:
   changelog:
-    if: github.event_name == 'pull_request'
+    # Release PRs are exempt: their job is to move content out of
+    # `## Unreleased` into a new `## vX.Y.Z` section, not add new entries.
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

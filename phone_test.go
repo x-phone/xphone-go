@@ -132,11 +132,71 @@ func TestNew_WithRTPAddress_OverridesLocalIP(t *testing.T) {
 		"RTPAddress override should flow into phone.localIP (SDP c= / SIP Contact)")
 }
 
+func TestNew_WithRTPAddress_AlignsHostIPForICE(t *testing.T) {
+	// When RTPAddress is set, phone.hostIP must also be aligned — otherwise
+	// ICE emits a high-priority host candidate at the auto-detected IP and
+	// a lower-priority srflx at the override, causing peers to probe the
+	// unroutable address first.
+	p := New(WithRTPAddress("10.27.1.137"))
+	ph := p.(*phone)
+	assert.Equal(t, "10.27.1.137", ph.hostIP,
+		"RTPAddress override should also align phone.hostIP (ICE host candidate)")
+	assert.Equal(t, ph.localIP, ph.hostIP,
+		"localIP and hostIP should match when RTPAddress is set, so ICE emits a single host candidate")
+}
+
+func TestNew_WithRTPAddress_RejectsInvalidInput(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"hostname", "example.com"},
+		{"crlf injection", "10.0.0.1\r\nBad-Header: injected"},
+		{"ipv6", "2001:db8::1"},
+		{"garbage", "not-an-ip"},
+		{"whitespace", " 10.0.0.1 "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New(WithRTPAddress(tc.input))
+			ph := p.(*phone)
+			// Invalid input is preserved on Config (for observability) but
+			// never propagated into localIP / hostIP.
+			assert.Equal(t, tc.input, ph.cfg.RTPAddress)
+			assert.NotEqual(t, tc.input, ph.localIP,
+				"invalid RTPAddress must not flow into advertised IP")
+			assert.NotEqual(t, tc.input, ph.hostIP,
+				"invalid RTPAddress must not flow into ICE host candidate")
+		})
+	}
+}
+
 func TestNew_WithoutRTPAddress_UsesAutoDetect(t *testing.T) {
 	p := New()
 	ph := p.(*phone)
 	assert.Empty(t, ph.cfg.RTPAddress)
 	assert.NotEmpty(t, ph.localIP, "localIP should fall back to localIPFor(host)")
+}
+
+func TestEffectiveRTPAddress(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"10.27.1.137", "10.27.1.137"},
+		{"0.0.0.0", "0.0.0.0"},     // syntactically valid IPv4, caller's responsibility
+		{"127.0.0.1", "127.0.0.1"}, // loopback is valid syntax
+		{"2001:db8::1", ""},        // IPv6 rejected — stack is IPv4-only
+		{"example.com", ""},
+		{"10.0.0.1\r\nX-Hdr: x", ""},
+		{" 10.0.0.1", ""},
+		{"10.0.0.1 ", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			assert.Equal(t, tc.want, effectiveRTPAddress(tc.in))
+		})
+	}
 }
 
 func TestNew_WithCodecs(t *testing.T) {

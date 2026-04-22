@@ -58,12 +58,14 @@ type Config struct {
 	StunServer string
 	SRTP       bool
 
-	// RTPAddress is the IP to advertise in SIP Contact headers and the SDP c=
-	// line. When set, it overrides the auto-detected local IP (localIPFor) and
-	// STUN-discovered IP — useful for local dev against a LAN PBX where the
-	// auto-detected interface isn't routable from the PBX (Docker container IP,
-	// VPN interface, multi-homed host, WSL2 vEthernet). Parallel to
-	// ServerConfig.RTPAddress on the trunk side.
+	// RTPAddress is the IPv4 literal to advertise in SIP Contact headers, the
+	// SDP c= line, and the ICE host candidate. When set to a valid IPv4, it
+	// overrides auto-detection (localIPFor) and skips STUN discovery entirely.
+	// Non-IPv4 values (IPv6, hostnames, garbage) are rejected at construction
+	// with a log warning and treated as unset. Useful for local dev against a
+	// LAN PBX where the auto-detected interface isn't routable from the peer
+	// (Docker container IP, VPN interface, multi-homed host, WSL2 vEthernet).
+	// Parallel to ServerConfig.RTPAddress on the trunk side.
 	RTPAddress string
 
 	// TurnServer is the TURN server address (host:port) for relay allocation.
@@ -350,13 +352,15 @@ func WithNATKeepalive(d time.Duration) PhoneOption {
 	}
 }
 
-// WithRTPAddress sets the IP to advertise in SIP Contact headers and the SDP
-// c= line, overriding auto-detection and STUN discovery. Mirrors
-// ServerConfig.RTPAddress on the Server side. Use this when the kernel's
-// outbound interface lookup picks an IP that isn't routable from the peer
-// (Docker container IP, VPN tunnel, multi-homed host, WSL2 vEthernet).
-// Example: WithRTPAddress("10.27.1.137") on a Mac with Docker port-forwarding
-// the RTP range back to the container.
+// WithRTPAddress sets the IPv4 literal to advertise in SIP Contact headers,
+// the SDP c= line, and the ICE host candidate. Overrides auto-detection and
+// skips STUN discovery. Mirrors ServerConfig.RTPAddress on the Server side.
+// Non-IPv4 values (IPv6, hostnames, whitespace) are rejected with a log
+// warning and treated as unset. Use this when the kernel's outbound interface
+// lookup picks an IP that isn't routable from the peer (Docker container IP,
+// VPN tunnel, multi-homed host, WSL2 vEthernet). Example:
+// WithRTPAddress("10.27.1.137") on a Mac with Docker port-forwarding the RTP
+// range back to the container.
 func WithRTPAddress(ip string) PhoneOption {
 	return func(c *Config) {
 		c.RTPAddress = ip

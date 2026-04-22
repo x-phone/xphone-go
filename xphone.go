@@ -98,15 +98,40 @@ func codecPrefsToInts(codecs []Codec) []int {
 	return pts
 }
 
+// effectiveRTPAddress returns s if it parses as an IPv4 literal, else "".
+// The stack's media path is IPv4-only (udp4 sockets, SDP "IN IP4"), so IPv6
+// literals and non-IP strings (hostnames, whitespace, CRLF injection) are
+// rejected rather than propagated into SIP Contact / SDP.
+func effectiveRTPAddress(s string) string {
+	if s == "" {
+		return ""
+	}
+	ip := net.ParseIP(s)
+	if ip == nil || ip.To4() == nil {
+		return ""
+	}
+	return s
+}
+
 func newPhone(cfg Config) *phone {
 	hostIP := localIPFor(cfg.Host)
 	localIP := hostIP
-	if cfg.RTPAddress != "" {
-		localIP = cfg.RTPAddress
+	// When RTPAddress is a valid IPv4 literal, use it for BOTH the advertised
+	// IP (SDP c=, SIP Contact) AND the ICE host candidate — otherwise ICE
+	// would emit a high-priority host candidate at the auto-detected IP and
+	// a lower-priority srflx at the override, leading peers to probe the
+	// unroutable address first.
+	if override := effectiveRTPAddress(cfg.RTPAddress); override != "" {
+		localIP = override
+		hostIP = override
+	}
+	logger := resolveLogger(cfg.Logger)
+	if cfg.RTPAddress != "" && effectiveRTPAddress(cfg.RTPAddress) == "" {
+		logger.Warn("xphone: WithRTPAddress ignored, not an IPv4 literal", "value", cfg.RTPAddress)
 	}
 	return &phone{
 		cfg:        cfg,
-		logger:     resolveLogger(cfg.Logger),
+		logger:     logger,
 		localIP:    localIP,
 		hostIP:     hostIP,
 		codecPrefs: codecPrefsToInts(cfg.CodecPrefs),
@@ -313,8 +338,8 @@ func (p *phone) Connect(ctx context.Context) error {
 	// STUN discovery: if configured, try to discover our NAT-mapped IP.
 	// On success, override the localIP used for Contact headers and SDP.
 	// On failure, log a warning and keep the existing localIPFor() result.
-	// Skipped when cfg.RTPAddress is set — explicit override wins over discovery.
-	if p.cfg.StunServer != "" && p.cfg.RTPAddress == "" {
+	// Skipped when a valid cfg.RTPAddress is set — explicit override wins.
+	if p.cfg.StunServer != "" && effectiveRTPAddress(p.cfg.RTPAddress) == "" {
 		ip, _, err := stun.MappedAddr(p.cfg.StunServer, stun.DefaultTimeout)
 		if err != nil {
 			p.logger.Warn("STUN discovery failed, using local IP", "err", err, "fallback", p.localIP)

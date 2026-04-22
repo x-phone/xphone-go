@@ -3,7 +3,10 @@
 ## Unreleased
 
 ### Features
-- `WithRTPAddress(ip)` PhoneOption (plus `Config.RTPAddress`) — overrides the IPv4 literal advertised in SIP Contact headers, the SDP `c=` line, and the ICE host candidate. Takes precedence over STUN discovery and `localIPFor()` auto-detection. Mirrors the existing `ServerConfig.RTPAddress` on the trunk side. Required for local dev against a LAN PBX when the kernel's outbound interface lookup picks an IP that isn't routable from the peer — Docker container IP, VPN tunnel, multi-homed host, or WSL2 vEthernet. Non-IPv4 input (IPv6, hostnames, whitespace, CRLF) is rejected with a log warning and treated as unset, preventing header/SDP injection. (#105)
+- `WithRTPAddress(ip)` PhoneOption (plus `Config.RTPAddress`) — overrides the IPv4 literal advertised in SIP Contact headers, the SDP `c=` line, and the ICE host candidate. Takes precedence over STUN discovery and `localIPFor()` auto-detection. Mirrors the existing `ServerConfig.RTPAddress` on the trunk side. Required for local dev against a LAN PBX when the kernel's outbound interface lookup picks an IP that isn't routable from the peer — Docker container IP, VPN tunnel, multi-homed host, or WSL2 vEthernet. (#105)
+
+### Bug fixes
+- `Config.RTPAddress`, `ServerConfig.RTPAddress`, and `PeerConfig.RTPAddress` now validate their input as IPv4 literals at construction. Non-IPv4 values (IPv6, hostnames, whitespace, embedded CRLF) are rejected with a log warning and treated as unset. Previously, unvalidated strings flowed verbatim into SDP `c=` lines and SIP Contact headers, exposing a CRLF header-injection surface. Applies symmetrically to both Phone and Server configs.
 
 ## v0.6.0
 

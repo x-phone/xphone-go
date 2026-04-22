@@ -129,7 +129,20 @@ func TestNew_WithRTPAddress_OverridesLocalIP(t *testing.T) {
 	ph := p.(*phone)
 	assert.Equal(t, "10.27.1.137", ph.cfg.RTPAddress)
 	assert.Equal(t, "10.27.1.137", ph.localIP,
-		"RTPAddress override should flow into phone.localIP (SDP c= / SIP Contact)")
+		"RTPAddress override should flow into phone.localIP (SDP c=, default Contact)")
+}
+
+func TestNew_WithRTPAddress_PopulatesInterfaceIP(t *testing.T) {
+	// interfaceIP must always hold the real bind IP, even when the override
+	// is active — it's the fallback for NAT-mode Contact (see #109).
+	// Using TEST-NET-3 (RFC 5737) so the override is guaranteed not to
+	// collide with any host interface IP under test.
+	const rfc5737Override = "203.0.113.137"
+	p := New(WithRTPAddress(rfc5737Override))
+	ph := p.(*phone)
+	assert.NotEmpty(t, ph.interfaceIP, "interfaceIP must be populated from localIPFor()")
+	assert.NotEqual(t, rfc5737Override, ph.interfaceIP,
+		"interfaceIP must not be overwritten by RTPAddress — otherwise NAT-mode Contact fallback has nowhere to fall back to")
 }
 
 func TestNew_WithRTPAddress_AlignsHostIPForICE(t *testing.T) {
@@ -176,6 +189,76 @@ func TestNew_WithoutRTPAddress_UsesAutoDetect(t *testing.T) {
 	ph := p.(*phone)
 	assert.Empty(t, ph.cfg.RTPAddress)
 	assert.NotEmpty(t, ph.localIP, "localIP should fall back to localIPFor(host)")
+}
+
+func TestPhone_ResolveContactIP(t *testing.T) {
+	cases := []struct {
+		name         string
+		nat          bool
+		rtpAddress   string
+		localIP      string
+		interfaceIP  string
+		wantContact  string
+		wantCarveOut bool // true when contactIP != localIP (NAT fallback triggered)
+	}{
+		{
+			name:         "no override, no NAT: localIP",
+			localIP:      "192.168.1.50",
+			interfaceIP:  "192.168.1.50",
+			wantContact:  "192.168.1.50",
+			wantCarveOut: false,
+		},
+		{
+			name:         "override without NAT: localIP (override)",
+			rtpAddress:   "10.27.1.137",
+			localIP:      "10.27.1.137",
+			interfaceIP:  "172.17.0.3",
+			wantContact:  "10.27.1.137",
+			wantCarveOut: false,
+		},
+		{
+			name:         "NAT without override: localIP (unchanged)",
+			nat:          true,
+			localIP:      "172.17.0.3",
+			interfaceIP:  "172.17.0.3",
+			wantContact:  "172.17.0.3",
+			wantCarveOut: false,
+		},
+		{
+			name:         "NAT with override: interfaceIP (#109 carve-out)",
+			nat:          true,
+			rtpAddress:   "10.27.1.137",
+			localIP:      "10.27.1.137",
+			interfaceIP:  "172.17.0.3",
+			wantContact:  "172.17.0.3",
+			wantCarveOut: true,
+		},
+		{
+			name:         "NAT with invalid override: localIP (no carve-out, invalid treated as unset)",
+			nat:          true,
+			rtpAddress:   "not-an-ip",
+			localIP:      "172.17.0.3",
+			interfaceIP:  "172.17.0.3",
+			wantContact:  "172.17.0.3",
+			wantCarveOut: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &phone{
+				cfg:         Config{NAT: tc.nat, RTPAddress: tc.rtpAddress},
+				localIP:     tc.localIP,
+				interfaceIP: tc.interfaceIP,
+			}
+			got := p.resolveContactIP()
+			assert.Equal(t, tc.wantContact, got)
+			if tc.wantCarveOut {
+				assert.NotEqual(t, p.localIP, got, "carve-out should divert contactIP from localIP")
+			} else {
+				assert.Equal(t, p.localIP, got, "no carve-out should pass localIP through unchanged")
+			}
+		})
+	}
 }
 
 func TestEffectiveRTPAddress(t *testing.T) {

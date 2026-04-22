@@ -58,6 +58,14 @@ type Config struct {
 	StunServer string
 	SRTP       bool
 
+	// RTPAddress is the IP to advertise in SIP Contact headers and the SDP c=
+	// line. When set, it overrides the auto-detected local IP (localIPFor) and
+	// STUN-discovered IP — useful for local dev against a LAN PBX where the
+	// auto-detected interface isn't routable from the PBX (Docker container IP,
+	// VPN interface, multi-homed host, WSL2 vEthernet). Parallel to
+	// ServerConfig.RTPAddress on the trunk side.
+	RTPAddress string
+
 	// TurnServer is the TURN server address (host:port) for relay allocation.
 	// When set with TurnUsername/TurnPassword, the phone allocates a TURN relay
 	// during call setup for symmetric NAT traversal.
@@ -339,6 +347,19 @@ func WithMediaTimeout(d time.Duration) PhoneOption {
 func WithNATKeepalive(d time.Duration) PhoneOption {
 	return func(c *Config) {
 		c.NATKeepaliveInterval = d
+	}
+}
+
+// WithRTPAddress sets the IP to advertise in SIP Contact headers and the SDP
+// c= line, overriding auto-detection and STUN discovery. Mirrors
+// ServerConfig.RTPAddress on the Server side. Use this when the kernel's
+// outbound interface lookup picks an IP that isn't routable from the peer
+// (Docker container IP, VPN tunnel, multi-homed host, WSL2 vEthernet).
+// Example: WithRTPAddress("10.27.1.137") on a Mac with Docker port-forwarding
+// the RTP range back to the container.
+func WithRTPAddress(ip string) PhoneOption {
+	return func(c *Config) {
+		c.RTPAddress = ip
 	}
 }
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Internal
+- CI: exempt `release/*` branches from the CHANGELOG-updated check. Release PRs move content out of `## Unreleased` into a new versioned section rather than adding entries, so the check was a guaranteed false-positive on every release PR.
+
 ## v0.6.2
 
 ### Bug fixes

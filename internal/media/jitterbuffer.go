@@ -124,6 +124,6 @@ func (jb *JitterBuffer) Flush() []*rtp.Packet {
 		pkts[i] = e.pkt
 	}
 	jb.entries = nil
-	jb.seen = make(map[uint16]bool)
+	clear(jb.seen)
 	return pkts
 }

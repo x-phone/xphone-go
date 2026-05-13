@@ -1,6 +1,7 @@
 package media
 
 import (
+	"math/rand"
 	"testing"
 	"time"
 
@@ -105,4 +106,82 @@ func TestJitterBuffer_Empty(t *testing.T) {
 	// Pop with nothing pushed.
 	pkt := jb.Pop()
 	assert.Nil(t, pkt)
+}
+
+// TestJitterBuffer_PopOrderAfterShuffledPush verifies that Pop returns
+// packets in sequence order regardless of arrival order — i.e., that
+// Push maintains the sorted invariant rather than relying on a Pop-time
+// sort.
+func TestJitterBuffer_PopOrderAfterShuffledPush(t *testing.T) {
+	// 50ms depth + 100ms sleep gives a 50ms margin so the test stays
+	// reliable on loaded CI runners.
+	jb := NewJitterBuffer(50 * time.Millisecond)
+
+	rng := rand.New(rand.NewSource(42))
+	const n = 64
+	seqs := make([]uint16, n)
+	for i := range seqs {
+		seqs[i] = uint16(1000 + i)
+	}
+	rng.Shuffle(n, func(i, j int) { seqs[i], seqs[j] = seqs[j], seqs[i] })
+
+	for _, s := range seqs {
+		jb.Push(&rtp.Packet{Header: rtp.Header{SequenceNumber: s}})
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	for i := uint16(0); i < n; i++ {
+		pkt := jb.Pop()
+		require.NotNil(t, pkt, "expected packet at index %d", i)
+		assert.Equal(t, 1000+i, pkt.SequenceNumber)
+	}
+	assert.Nil(t, jb.Pop(), "buffer should be empty after draining")
+}
+
+// TestJitterBuffer_OutOfOrderInsertNearWrap covers inserting late-arriving
+// packets whose sequence numbers straddle the 16-bit wrap boundary —
+// the regime where a naive total-order comparator would misorder them.
+func TestJitterBuffer_OutOfOrderInsertNearWrap(t *testing.T) {
+	jb := NewJitterBuffer(10 * time.Millisecond)
+
+	// Arrive: 65535, 65533, 0, 65534, 1 (across the wrap, shuffled).
+	for _, s := range []uint16{65535, 65533, 0, 65534, 1} {
+		jb.Push(&rtp.Packet{Header: rtp.Header{SequenceNumber: s}})
+	}
+
+	pkts := jb.Flush()
+	require.Len(t, pkts, 5)
+	assert.Equal(t, uint16(65533), pkts[0].SequenceNumber)
+	assert.Equal(t, uint16(65534), pkts[1].SequenceNumber)
+	assert.Equal(t, uint16(65535), pkts[2].SequenceNumber)
+	assert.Equal(t, uint16(0), pkts[3].SequenceNumber)
+	assert.Equal(t, uint16(1), pkts[4].SequenceNumber)
+}
+
+// BenchmarkJitterBuffer_PushPopEmpty measures the per-call cost when the
+// buffer never holds more than one entry (depth=0 drains immediately).
+// Lower bound on Pop cost; the production hot path is
+// BenchmarkJitterBuffer_PopWithBacklog.
+func BenchmarkJitterBuffer_PushPopEmpty(b *testing.B) {
+	jb := NewJitterBuffer(0)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		jb.Push(&rtp.Packet{Header: rtp.Header{SequenceNumber: uint16(i)}})
+		_ = jb.Pop()
+	}
+}
+
+// BenchmarkJitterBuffer_PopWithBacklog models the dominant production
+// pattern: the 5ms drainJB ticker fires while the buffer holds a handful
+// of packets that are not yet depth-aged. Previously this paid a full
+// sort.Slice on every tick; now Pop is O(1) and returns immediately.
+func BenchmarkJitterBuffer_PopWithBacklog(b *testing.B) {
+	jb := NewJitterBuffer(time.Hour) // depth large enough that Pop never drains
+	for i := 0; i < 8; i++ {
+		jb.Push(&rtp.Packet{Header: rtp.Header{SequenceNumber: uint16(i)}})
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = jb.Pop()
+	}
 }

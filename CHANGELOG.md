@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.6.4
+
+### Features
+- B2BUA media-redirect methods on the concrete `*call` (not the `Call` interface; reach them via type assertion): `SendReInvite(sdpOffer []byte) error` sends a re-INVITE with caller-supplied SDP (e.g. pointing the leg's media at a foreign RTP endpoint to bridge two legs into direct media), leaving `state`/`localSDP` unchanged so the caller can restore later; `SuspendMediaTimeout()` extends the RTP-inactivity watchdog to the hold timeout while media is intentionally redirected away from this endpoint; `RestoreMediaTimeout()` returns the watchdog to the configured timeout once media returns. All additive and backward-compatible. Known limitation: a Session-Timer refresh or inbound re-INVITE during the redirect window re-sends this endpoint's own SDP and undoes the redirect.
+
 ## v0.6.3
 
 ### Bug fixes

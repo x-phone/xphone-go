@@ -1279,6 +1279,47 @@ func (c *call) Resume() error {
 	return nil
 }
 
+// SendReInvite sends a re-INVITE carrying the given raw SDP offer. Unlike
+// Hold/Resume — which always emit this endpoint's own SDP via buildLocalSDP —
+// this lets a B2BUA point the leg's media at a foreign endpoint, e.g. to bridge
+// two legs into direct media (customer <-> collector) so RTP bypasses this app.
+// The caller owns SDP construction; the call's stored localSDP and state are left
+// unchanged, so a follow-up Hold/Resume or a re-INVITE with the original localSDP
+// restores media to this endpoint. Not part of the Call interface (advanced/B2BUA
+// use); reach it via a type assertion on the concrete call.
+func (c *call) SendReInvite(sdpOffer []byte) error {
+	c.mu.Lock()
+	state := c.state
+	c.mu.Unlock()
+	if state != StateActive && state != StateOnHold {
+		return ErrInvalidState
+	}
+	return c.dlg.SendReInvite(sdpOffer)
+}
+
+// SuspendMediaTimeout extends the RTP inactivity watchdog to the (longer) hold
+// timeout. Use it when this leg's media has been intentionally redirected to a
+// third party via SendReInvite (B2BUA media bypass): no RTP is expected at this
+// endpoint, so the normal inactivity watchdog would otherwise tear the leg down.
+// Pair with RestoreMediaTimeout once media returns. Safe on an active call;
+// no-op if the media session has not started.
+func (c *call) SuspendMediaTimeout() {
+	// Hold c.mu like every other signalMediaTimerReset caller (Hold/Resume/
+	// refresh) — it guards c.mediaTimerReset and c.mediaTimeout against the media
+	// goroutine and concurrent re-INVITE handling.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.signalMediaTimerReset(defaultHoldMediaTimeout)
+}
+
+// RestoreMediaTimeout returns the RTP inactivity watchdog to the normal
+// (configured) timeout after a SuspendMediaTimeout.
+func (c *call) RestoreMediaTimeout() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.signalMediaTimerReset(c.effectiveMediaTimeout())
+}
+
 func (c *call) Mute() error {
 	c.mu.Lock()
 	if c.state != StateActive {

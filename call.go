@@ -1320,6 +1320,22 @@ func (c *call) RestoreMediaTimeout() {
 	c.signalMediaTimerReset(c.effectiveMediaTimeout())
 }
 
+// SetDtmfMode overrides this call's DTMF mode, independent of the phone's
+// registration-wide DtmfMode config and unaffecting any other call. Useful
+// for a B2BUA leg that must send DTMF differently than the inbound leg it's
+// bridging (e.g. relaying to a far end that only detects SIP INFO while the
+// near end keeps sending/receiving RFC 4733).
+// The mode gates both directions on this leg: SendDTMF picks RTP
+// telephone-event vs SIP INFO accordingly, and inbound DTMF recognition is
+// gated the same way — e.g. switching to DtmfSipInfo also stops this leg
+// from recognizing inbound RFC 4733. Not part of the Call interface
+// (advanced/B2BUA use); reach it via a type assertion on the concrete call.
+func (c *call) SetDtmfMode(mode DtmfMode) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.dtmfMode = mode
+}
+
 func (c *call) Mute() error {
 	c.mu.Lock()
 	if c.state != StateActive {

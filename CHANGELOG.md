@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Features
+- `SetDtmfMode(mode DtmfMode)` on the concrete `*call` (not the `Call` interface; reach it via type assertion) overrides a single call's DTMF mode independent of the phone's registration-wide `DtmfMode` config and without affecting any other call. Covers B2BUA legs that must send DTMF differently than the leg they're bridging (e.g. relaying to a far end that only detects SIP INFO while the near end keeps sending/receiving RFC 4733). The mode gates both directions on that leg: `SendDTMF` picks RTP telephone-event vs SIP INFO accordingly, and inbound DTMF recognition follows the same mode.
+
 ## v0.6.4
 
 ### Features

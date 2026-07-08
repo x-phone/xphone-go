@@ -814,6 +814,32 @@ func TestCall_SendDTMF_SipInfoMode_InvalidDigitReturnsError(t *testing.T) {
 	assert.ErrorIs(t, c.SendDTMF("X"), ErrInvalidDTMFDigit)
 }
 
+// --- Per-call DTMF mode override ---
+
+func TestCall_SetDtmfMode_SendUsesNewMode(t *testing.T) {
+	dlg := testutil.NewMockDialog()
+	c := testOutboundCall(t, dlg)
+	require.Equal(t, DtmfRfc4733, c.dtmfMode, "default mode before override")
+
+	c.SetDtmfMode(DtmfSipInfo)
+	c.state = StateActive
+
+	err := c.SendDTMF("5")
+	require.NoError(t, err)
+	assert.True(t, dlg.InfoSent(), "expected SIP INFO after SetDtmfMode(DtmfSipInfo)")
+	assert.Equal(t, "5", dlg.LastInfoDigit())
+}
+
+func TestCall_SetDtmfMode_DoesNotAffectOtherCalls(t *testing.T) {
+	collector := testOutboundCall(t, testutil.NewMockDialog())
+	other := testOutboundCall(t, testutil.NewMockDialog())
+
+	collector.SetDtmfMode(DtmfSipInfo)
+
+	assert.Equal(t, DtmfSipInfo, collector.dtmfMode)
+	assert.Equal(t, DtmfRfc4733, other.dtmfMode, "unrelated call must keep its own mode")
+}
+
 // --- Session timers ---
 
 func TestCall_SessionTimer_SendsRefreshReInvite(t *testing.T) {

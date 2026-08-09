@@ -19,7 +19,7 @@ import (
 func stubLookup(t *testing.T, table map[string][]string) {
 	t.Helper()
 	orig := lookupHostFn
-	lookupHostFn = func(host string) ([]string, error) {
+	lookupHostFn = func(_ context.Context, host string) ([]string, error) {
 		if addrs, ok := table[host]; ok {
 			return addrs, nil
 		}
@@ -40,7 +40,7 @@ func TestPeerDialCandidates_HostThenHostsDedupedCIDRSkipped(t *testing.T) {
 			"10.0.0.2",      // duplicate within Hosts
 		},
 	}
-	got := s.peerDialCandidates(p)
+	got := s.peerDialCandidates(context.Background(), p)
 	assert.Equal(t, []string{"10.0.0.1:5060", "10.0.0.2:5060"}, got)
 }
 
@@ -50,7 +50,7 @@ func TestPeerDialCandidates_HostnameExpandsToAllIPv4s(t *testing.T) {
 	})
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "sip.example.com", Port: 5080}
-	got := s.peerDialCandidates(p)
+	got := s.peerDialCandidates(context.Background(), p)
 	// All IPv4 A records in DNS order; the IPv6 record is filtered out.
 	assert.Equal(t, []string{"198.51.100.1:5080", "198.51.100.2:5080"}, got)
 }
@@ -59,7 +59,7 @@ func TestPeerDialCandidates_LookupFailureKeepsHostnameVerbatim(t *testing.T) {
 	stubLookup(t, map[string][]string{}) // every lookup errors
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "unresolvable.example.com", Port: 5060}
-	got := s.peerDialCandidates(p)
+	got := s.peerDialCandidates(context.Background(), p)
 	assert.Equal(t, []string{"unresolvable.example.com:5060"}, got)
 }
 
@@ -69,7 +69,7 @@ func TestPeerDialCandidates_OnlyIPv6RecordsKeepsHostname(t *testing.T) {
 	})
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "v6only.example.com", Port: 5060}
-	got := s.peerDialCandidates(p)
+	got := s.peerDialCandidates(context.Background(), p)
 	assert.Equal(t, []string{"v6only.example.com:5060"}, got)
 }
 
@@ -79,7 +79,7 @@ func TestPeerDialCandidates_MixedLiteralAndHostnameDedupsAcross(t *testing.T) {
 	})
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "10.0.0.1", Port: 5060, Hosts: []string{"trunk.example.com"}}
-	got := s.peerDialCandidates(p)
+	got := s.peerDialCandidates(context.Background(), p)
 	// 10.0.0.1 appears once even though the hostname also resolves to it.
 	assert.Equal(t, []string{"10.0.0.1:5060", "10.0.0.9:5060"}, got)
 }
@@ -282,6 +282,24 @@ func TestServerDial_OverallTimeoutStopsFailover(t *testing.T) {
 	_, err := s.Dial(context.Background(), "trunk", "15551230100", "", WithDialTimeout(60*time.Millisecond))
 	require.Error(t, err)
 	assert.Equal(t, 1, attempts, "overall dial timeout must not be spent walking more candidates")
+}
+
+func TestServerDial_NoFailoverAfterCalleeAnswered(t *testing.T) {
+	// codex-review regression: a hop that got a 200 OK and then failed
+	// (e.g. the ACK send errored) must NOT fail over — the callee already
+	// accepted; a second INVITE would ring another endpoint for the same call.
+	s := failoverTestServer(t, ServerConfig{})
+	var attempts int
+	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+		attempts++
+		onResponse(100, "Trying")
+		onResponse(200, "OK")
+		return nil, errors.New("xphone: server ack: write udp: connection refused")
+	}
+
+	_, err := s.Dial(context.Background(), "trunk", "15551230100", "")
+	require.Error(t, err)
+	assert.Equal(t, 1, attempts, "post-2xx failure must stop failover, not duplicate the call")
 }
 
 func TestServerDial_OnlySuccessfulHopResponsesReachTheCall(t *testing.T) {

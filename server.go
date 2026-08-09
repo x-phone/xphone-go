@@ -231,7 +231,7 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 	}
 	defer dialCancel()
 
-	candidates := s.peerDialCandidates(peerCfg)
+	candidates := s.peerDialCandidates(dialCtx, peerCfg)
 	if len(candidates) == 0 {
 		// No usable host at all — preserve the historical single-shot path
 		// (and its error) rather than inventing a new failure mode.
@@ -292,6 +292,12 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 		lastErr = err
 		if dialCtx.Err() != nil {
 			// Overall dial timeout or caller cancellation — not a hop failure.
+			break
+		}
+		if sawSuccessResponse(responses[hopStart:]) {
+			// The callee answered 2xx and something failed after (e.g. the
+			// ACK send). The call is accepted on their side — re-INVITEing
+			// another address would ring a second endpoint for the same call.
 			break
 		}
 		if !retryableDialError(err) {

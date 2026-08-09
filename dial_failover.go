@@ -1,6 +1,7 @@
 package xphone
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -14,8 +15,12 @@ import (
 // hostnames to their full IPv4 A-record sets instead of first-match-wins.
 // Full RFC 3263 NAPTR/SRV resolution is deliberately out of scope here.
 
-// lookupHostFn is indirected so tests can stub DNS resolution.
-var lookupHostFn = net.LookupHost
+// lookupHostFn is indirected so tests can stub DNS resolution. It is
+// context-aware so a slow or dead DNS server cannot stall Dial past the
+// caller's cancellation or WithDialTimeout deadline.
+var lookupHostFn = func(ctx context.Context, host string) ([]string, error) {
+	return net.DefaultResolver.LookupHost(ctx, host)
+}
 
 // dialSetupError marks a Dial failure local to this server — RTP port
 // allocation, SRTP key generation — that no alternate peer address can fix.
@@ -30,7 +35,8 @@ func (e *dialSetupError) Unwrap() error { return e.err }
 // hostnames expanded to every IPv4 A record they resolve to (order preserved).
 // A hostname that fails to resolve, or resolves to no IPv4, is kept verbatim
 // so sipgo's own resolution can still try it — matching prior behavior.
-func (s *server) peerDialCandidates(p *PeerConfig) []string {
+// ctx bounds the DNS lookups (the dial context in production).
+func (s *server) peerDialCandidates(ctx context.Context, p *PeerConfig) []string {
 	seenHost := make(map[string]bool)
 	var hosts []string
 	addHost := func(h string) {
@@ -60,7 +66,7 @@ func (s *server) peerDialCandidates(p *PeerConfig) []string {
 			addOut(net.JoinHostPort(h, port))
 			continue
 		}
-		addrs, err := lookupHostFn(h)
+		addrs, err := lookupHostFn(ctx, h)
 		if err != nil {
 			addOut(net.JoinHostPort(h, port))
 			continue
@@ -107,4 +113,17 @@ func retryableDialError(err error) bool {
 
 func retryableStatusCode(code int) bool {
 	return code == 408 || (code >= 500 && code < 600)
+}
+
+// sawSuccessResponse reports whether a hop observed any 2xx final response.
+// Once a callee has answered, failover must stop no matter what error follows
+// (e.g. an ACK send failure) — re-INVITEing another address would ring a
+// second endpoint for a call the first one already accepted.
+func sawSuccessResponse(responses []sipResponseEntry) bool {
+	for _, r := range responses {
+		if r.code >= 200 && r.code < 300 {
+			return true
+		}
+	}
+	return false
 }

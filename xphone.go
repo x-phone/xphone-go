@@ -376,6 +376,9 @@ func (p *phone) runRegistration(ctx context.Context, gen uint64) error {
 	p.mu.Unlock()
 
 	// Auto-start MWI subscription if configured and registration succeeded.
+	// Assignments are generation+state guarded: if Disconnect/Unregister
+	// raced in after Registered was published, storing a fresh service
+	// against the torn-down transport would leak it — stop it instead.
 	if err == nil && voicemailURI != "" {
 		sub := newMWISubscriber(tr, voicemailURI, p.logger)
 		if len(voicemailFns) > 0 {
@@ -387,8 +390,13 @@ func (p *phone) runRegistration(ctx context.Context, gen uint64) error {
 		}
 		sub.start()
 		p.mu.Lock()
-		p.mwi = sub
-		p.mu.Unlock()
+		if p.lifecycleGen == gen && p.state == PhoneStateRegistered {
+			p.mwi = sub
+			p.mu.Unlock()
+		} else {
+			p.mu.Unlock()
+			sub.stop()
+		}
 	}
 
 	// Start subscription manager for Watch/SubscribeEvent.
@@ -396,8 +404,13 @@ func (p *phone) runRegistration(ctx context.Context, gen uint64) error {
 		sm := newSubscriptionManager(tr, p.cfg.Host, p.logger)
 		sm.start()
 		p.mu.Lock()
-		p.subMgr = sm
-		p.mu.Unlock()
+		if p.lifecycleGen == gen && p.state == PhoneStateRegistered {
+			p.subMgr = sm
+			p.mu.Unlock()
+		} else {
+			p.mu.Unlock()
+			sm.stop()
+		}
 	}
 
 	if err != nil {
@@ -672,7 +685,7 @@ func (p *phone) Unregister(ctx context.Context) error {
 		mwi.stop()
 	}
 	if reg != nil {
-		reg.Unregister()
+		reg.UnregisterCtx(ctx)
 		reg.Stop()
 	}
 

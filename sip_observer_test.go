@@ -185,6 +185,33 @@ func TestDialogObserve_ReInviteEmitsInviteThenAck(t *testing.T) {
 	}
 }
 
+func TestDialogObserve_OutboundTimestampedAtSendInitiation(t *testing.T) {
+	// A monotonic fake clock: send-initiation reads t=1; the mock's Do advances
+	// it to simulate time passing while awaiting the response. The observed
+	// outbound request must carry the earlier (send-initiation) timestamp, so a
+	// response observed later sorts after it.
+	var tick int64
+	orig := observerNow
+	observerNow = func() time.Time { tick++; return time.Unix(tick, 0).UTC() }
+	defer func() { observerNow = orig }()
+
+	var got SIPMessage
+	mock := &observerMockSession{advanceClock: func() { observerNow() }} // burn ticks during Do
+	d := &dialogBase{
+		sess:     mock,
+		invite:   buildRequest(sip.INVITE),
+		response: sip.NewResponseFromRequest(buildRequest(sip.INVITE), 200, "OK", nil),
+		observer: func(m SIPMessage) { got = m },
+	}
+
+	require.NoError(t, d.SendRefer("sip:carol@example.com"))
+
+	// sentAt was read first (tick=1). Do burned a tick (tick=2). A later
+	// observation would be tick>=3. The request must hold the send-time stamp.
+	assert.Equal(t, time.Unix(1, 0).UTC(), got.Timestamp)
+	assert.True(t, got.Timestamp.Before(observerNow()), "outbound stamp must precede a later clock read")
+}
+
 func TestDialogObserve_NilObserverNoPanic(t *testing.T) {
 	d := &dialogBase{
 		sess:   &observerMockSession{},
@@ -199,7 +226,8 @@ func TestDialogObserve_NilObserverNoPanic(t *testing.T) {
 // library so the observer tests can prove the snapshot is taken after the
 // identifiers exist — guarding the "observed before headers populated" bug.
 type observerMockSession struct {
-	ok bool
+	ok           bool
+	advanceClock func() // optional: called inside Do to simulate elapsed time
 }
 
 func (m *observerMockSession) stampDialogHeaders(req *sip.Request) {
@@ -221,6 +249,9 @@ func (m *observerMockSession) stampDialogHeaders(req *sip.Request) {
 func (m *observerMockSession) Bye(ctx context.Context) error { return nil }
 func (m *observerMockSession) Do(ctx context.Context, req *sip.Request) (*sip.Response, error) {
 	m.stampDialogHeaders(req)
+	if m.advanceClock != nil {
+		m.advanceClock()
+	}
 	return sip.NewResponseFromRequest(req, 200, "OK", nil), nil
 }
 func (m *observerMockSession) WriteRequest(req *sip.Request) error {

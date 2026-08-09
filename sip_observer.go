@@ -55,7 +55,13 @@ type SIPMessage struct {
 // Outbound events reflect send attempts: the message is snapshotted after
 // sipgo has populated its dialog headers, and is delivered even if the
 // underlying transport write returns an error — a debugger wants failed
-// attempts to remain visible, not hidden.
+// attempts to remain visible, not hidden. For in-dialog request/response
+// methods (re-INVITE, REFER, INFO), sipgo's send call blocks until the final
+// response, so the outbound event is delivered to the observer after that
+// response. Its Timestamp is nonetheless captured at send-initiation, so
+// ordering the stream by Timestamp reconstructs the true wire timeline.
+// Consumers that need strict real-time delivery order should buffer briefly
+// and sort by Timestamp.
 //
 // The observer is called synchronously on the transport/TU goroutine. It MUST
 // NOT block or panic; offload anything expensive (I/O, WebSocket fan-out) to a

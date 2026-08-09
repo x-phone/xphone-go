@@ -43,6 +43,17 @@ func (d *dialogBase) observe(msg sip.Message) {
 	emitSIP(d.observer, msg, SIPOutbound)
 }
 
+// observeAt is observe with an explicit timestamp. Request/response send
+// helpers capture the send-initiation time before sipgo's blocking Do so the
+// outbound event's Timestamp precedes the inbound response it elicits, even
+// though the snapshot itself is taken after Do populates the dialog headers.
+func (d *dialogBase) observeAt(msg sip.Message, t time.Time) {
+	if d.observer == nil || msg == nil {
+		return
+	}
+	d.observer(buildSIPMessage(msg, SIPOutbound, t))
+}
+
 // remoteTarget returns the URI for in-dialog requests (re-INVITE, REFER, INFO).
 // Per RFC 3261 §12.2.1.1, this is the remote party's Contact address:
 // UAC → Contact from the INVITE response; UAS → Contact from the incoming INVITE.
@@ -74,11 +85,13 @@ func (d *dialogBase) SendReInvite(sdpBody []byte) error {
 		req.AppendHeader(sip.NewHeader("Content-Type", contentTypeSDP))
 	}
 	req.SetBody(sdpBody)
+	// Timestamp at send-initiation (before Do blocks awaiting the response) but
+	// snapshot after Do, which populates the dialog headers (From/To/Call-ID/
+	// CSeq/Via) in place. This keeps the outbound event correlatable AND
+	// earlier on the timeline than the response it triggers.
+	sentAt := observerNow()
 	res, err := d.sess.Do(ctx, req)
-	// Observe after Do: sipgo populates the dialog headers (From/To/Call-ID/
-	// CSeq/Via) in place inside Do, so snapshotting earlier would miss the
-	// identifiers needed to correlate the message to its call.
-	d.observe(req)
+	d.observeAt(req, sentAt)
 	if err != nil {
 		return err
 	}
@@ -102,8 +115,9 @@ func (d *dialogBase) SendRefer(target string) error {
 	defer cancel()
 	req := sip.NewRequest(sip.REFER, d.remoteTarget())
 	req.AppendHeader(sip.NewHeader("Refer-To", target))
+	sentAt := observerNow()
 	_, err := d.sess.Do(ctx, req)
-	d.observe(req) // populated in place by Do
+	d.observeAt(req, sentAt) // populated in place by Do; timestamped at send
 	return err
 }
 
@@ -117,8 +131,9 @@ func (d *dialogBase) SendInfoDTMF(digit string, duration int) error {
 	req := sip.NewRequest(sip.INFO, d.remoteTarget())
 	req.AppendHeader(sip.NewHeader("Content-Type", contentTypeDTMFRelay))
 	req.SetBody([]byte(body))
+	sentAt := observerNow()
 	_, err = d.sess.Do(ctx, req)
-	d.observe(req) // populated in place by Do
+	d.observeAt(req, sentAt) // populated in place by Do; timestamped at send
 	return err
 }
 

@@ -476,6 +476,15 @@ func (s *server) setupSipStack() error {
 		return fmt.Errorf("xphone: server create UA: %w", err)
 	}
 
+	// Inbound observation: transport fires OnMessage for every received
+	// request and response. Outbound is observed at our own send sites — see
+	// the SIPObserver type for coverage.
+	if s.cfg.SIPObserver != nil {
+		ua.TransportLayer().OnMessage(func(m sip.Message) {
+			emitSIP(s.cfg.SIPObserver, m, SIPInbound)
+		})
+	}
+
 	clientOpts := []sipgo.ClientOption{sipgo.WithClientHostname(s.localIP)}
 	if s.cfg.NAT {
 		clientOpts = append(clientOpts, sipgo.WithClientNAT())
@@ -711,7 +720,7 @@ func (s *server) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	if callID != "" {
 		if c := s.findCall(callID); c != nil {
 			responder := &sipgoDialogUAS{
-				dialogBase: dialogBase{sess: sess, invite: req},
+				dialogBase: dialogBase{sess: sess, invite: req, observer: s.cfg.SIPObserver},
 			}
 			c.handleReInvite(responder, sdpBody)
 			waitDialogConfirmed(sess, tx)
@@ -732,7 +741,7 @@ func (s *server) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	}
 
 	dlg := &sipgoDialogUAS{
-		dialogBase: dialogBase{sess: sess, invite: req},
+		dialogBase: dialogBase{sess: sess, invite: req, observer: s.cfg.SIPObserver},
 	}
 
 	go func() {
@@ -906,6 +915,7 @@ func (s *server) dialOnce(ctx context.Context, target string, from string, rtpAd
 			sess:     sess,
 			invite:   sess.InviteRequest,
 			response: sess.InviteResponse,
+			observer: s.cfg.SIPObserver,
 		},
 		cancelFn:     waitCancel,
 		rtpConn:      rtpConn,

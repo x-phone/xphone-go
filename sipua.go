@@ -135,6 +135,15 @@ func newSipUA(cfg Config, contactIP string) (*sipUA, error) {
 		return nil, fmt.Errorf("xphone: create UA: %w", err)
 	}
 
+	// Inbound observation: the transport layer fires OnMessage for every
+	// received request and response (sipgo has no write-side hook, so outbound
+	// is observed at our own send sites — see the SIPObserver type).
+	if cfg.SIPObserver != nil {
+		ua.TransportLayer().OnMessage(func(m sip.Message) {
+			emitSIP(cfg.SIPObserver, m, SIPInbound)
+		})
+	}
+
 	clientOpts := []sipgo.ClientOption{sipgo.WithClientHostname(contactIP)}
 	if cfg.NAT && strings.EqualFold(cfg.Transport, "udp") {
 		clientOpts = append(clientOpts, sipgo.WithClientNAT())
@@ -389,6 +398,7 @@ func (s *sipUA) dialOnce(ctx context.Context, target string, opts DialOptions, o
 			sess:     sess,
 			invite:   sess.InviteRequest,
 			response: sess.InviteResponse,
+			observer: s.cfg.SIPObserver,
 		},
 		cancelFn:     waitCancel,
 		rtpConn:      rtpConn,
@@ -429,7 +439,7 @@ func (s *sipUA) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	s.mu.Unlock()
 	if reInvFn != nil && callID != "" {
 		responder := &sipgoDialogUAS{
-			dialogBase: dialogBase{sess: sess, invite: req},
+			dialogBase: dialogBase{sess: sess, invite: req, observer: s.cfg.SIPObserver},
 		}
 		if reInvFn(callID, responder, sdpBody) {
 			waitDialogConfirmed(sess, tx)
@@ -450,7 +460,7 @@ func (s *sipUA) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	}
 
 	dlg := &sipgoDialogUAS{
-		dialogBase: dialogBase{sess: sess, invite: req},
+		dialogBase: dialogBase{sess: sess, invite: req, observer: s.cfg.SIPObserver},
 	}
 
 	s.mu.Lock()

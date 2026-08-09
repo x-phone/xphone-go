@@ -35,6 +35,23 @@ type dialogBase struct {
 	invite   *sip.Request  // immutable after construction
 	response *sip.Response // immutable after construction
 	onNotify func(int)
+	observer SIPObserver // optional; receives outbound in-dialog requests we build
+}
+
+// observe delivers an outbound message we constructed to the observer, if any.
+func (d *dialogBase) observe(msg sip.Message) {
+	emitSIP(d.observer, msg, SIPOutbound)
+}
+
+// observeAt is observe with an explicit timestamp. Request/response send
+// helpers capture the send-initiation time before sipgo's blocking Do so the
+// outbound event's Timestamp precedes the inbound response it elicits, even
+// though the snapshot itself is taken after Do populates the dialog headers.
+func (d *dialogBase) observeAt(msg sip.Message, t time.Time) {
+	if d.observer == nil || msg == nil {
+		return
+	}
+	d.observer(buildSIPMessage(msg, SIPOutbound, t))
 }
 
 // remoteTarget returns the URI for in-dialog requests (re-INVITE, REFER, INFO).
@@ -68,7 +85,13 @@ func (d *dialogBase) SendReInvite(sdpBody []byte) error {
 		req.AppendHeader(sip.NewHeader("Content-Type", contentTypeSDP))
 	}
 	req.SetBody(sdpBody)
+	// Timestamp at send-initiation (before Do blocks awaiting the response) but
+	// snapshot after Do, which populates the dialog headers (From/To/Call-ID/
+	// CSeq/Via) in place. This keeps the outbound event correlatable AND
+	// earlier on the timeline than the response it triggers.
+	sentAt := observerNow()
 	res, err := d.sess.Do(ctx, req)
+	d.observeAt(req, sentAt)
 	if err != nil {
 		return err
 	}
@@ -79,8 +102,10 @@ func (d *dialogBase) SendReInvite(sdpBody []byte) error {
 	// Do() terminates the client transaction on return, but the ACK for a
 	// 2xx INVITE is sent directly by the TU, not via a transaction.
 	ack := sip.NewRequest(sip.ACK, d.remoteTarget())
-	if err := d.sess.WriteRequest(ack); err != nil {
-		return fmt.Errorf("send ACK: %w", err)
+	ackErr := d.sess.WriteRequest(ack)
+	d.observe(ack) // populated in place by WriteRequest
+	if ackErr != nil {
+		return fmt.Errorf("send ACK: %w", ackErr)
 	}
 	return nil
 }
@@ -90,7 +115,9 @@ func (d *dialogBase) SendRefer(target string) error {
 	defer cancel()
 	req := sip.NewRequest(sip.REFER, d.remoteTarget())
 	req.AppendHeader(sip.NewHeader("Refer-To", target))
+	sentAt := observerNow()
 	_, err := d.sess.Do(ctx, req)
+	d.observeAt(req, sentAt) // populated in place by Do; timestamped at send
 	return err
 }
 
@@ -104,7 +131,9 @@ func (d *dialogBase) SendInfoDTMF(digit string, duration int) error {
 	req := sip.NewRequest(sip.INFO, d.remoteTarget())
 	req.AppendHeader(sip.NewHeader("Content-Type", contentTypeDTMFRelay))
 	req.SetBody([]byte(body))
+	sentAt := observerNow()
 	_, err = d.sess.Do(ctx, req)
+	d.observeAt(req, sentAt) // populated in place by Do; timestamped at send
 	return err
 }
 

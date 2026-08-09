@@ -102,6 +102,11 @@ type Config struct {
 	// Helps PBXes identify the device (e.g., "MyApp/1.0").
 	DisplayName string
 
+	// SIPObserver, when set, receives a structured copy of SIP messages the
+	// phone sends and receives. See WithSIPObserver and the SIPObserver type
+	// for coverage and threading guarantees.
+	SIPObserver SIPObserver
+
 	Logger *slog.Logger
 }
 
@@ -366,6 +371,17 @@ func WithNATKeepalive(d time.Duration) PhoneOption {
 	}
 }
 
+// WithSIPObserver registers a callback that receives a structured, redacted
+// copy of SIP messages the phone sends and receives — useful for debugging
+// panels, monitoring dashboards, and signaling visibility. Credential headers
+// are masked before delivery. See the SIPObserver type for coverage limits and
+// the requirement that the callback not block. Passing nil is a no-op.
+func WithSIPObserver(obs SIPObserver) PhoneOption {
+	return func(c *Config) {
+		c.SIPObserver = obs
+	}
+}
+
 // WithRTPAddress sets the IPv4 literal to advertise as the media endpoint
 // (SDP c= line and ICE host candidate). Overrides auto-detection and skips
 // STUN discovery. Mirrors ServerConfig.RTPAddress on the Server side.
@@ -551,6 +567,10 @@ type ServerConfig struct {
 	DtmfMode DtmfMode
 	// Peers is the list of trusted SIP peers that can send/receive calls.
 	Peers []PeerConfig
+	// SIPObserver, when set, receives a structured copy of SIP messages the
+	// server sends and receives. See the SIPObserver type for coverage and
+	// threading guarantees.
+	SIPObserver SIPObserver
 	// Logger sets the structured logger. Default: slog.Default().
 	Logger *slog.Logger
 }

@@ -5,6 +5,7 @@ package xphone
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,6 +74,62 @@ func connectPhone(t *testing.T, ext, password string) Phone {
 func TestIntegration_Register(t *testing.T) {
 	p := connectPhone(t, "1001", "test")
 	assert.Equal(t, PhoneStateRegistered, p.State())
+}
+
+// E1b: The SIP observer captures inbound signaling on a real transport, and
+// never leaks digest credentials. Registration alone produces inbound
+// responses (a 401 challenge and/or a 200 OK to REGISTER).
+func TestIntegration_SIPObserver(t *testing.T) {
+	var mu sync.Mutex
+	var seen []SIPMessage
+
+	cfg := integrationConfig("1001", "test")
+	cfg.SIPObserver = func(m SIPMessage) {
+		mu.Lock()
+		seen = append(seen, m)
+		mu.Unlock()
+	}
+
+	p := newPhone(cfg)
+	registered := make(chan struct{}, 1)
+	p.OnRegistered(func() {
+		select {
+		case registered <- struct{}{}:
+		default:
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, p.Connect(ctx))
+	select {
+	case <-registered:
+	case <-ctx.Done():
+		t.Fatal("registration timeout")
+	}
+	t.Cleanup(func() { p.Disconnect() })
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, seen, "observer captured no SIP messages")
+
+	var sawInbound, sawRegisterResponse bool
+	for _, m := range seen {
+		if m.Direction == SIPInbound {
+			sawInbound = true
+		}
+		if m.IsResponse && m.Method == "REGISTER" {
+			sawRegisterResponse = true
+		}
+		// The observer must never carry raw digest credentials.
+		if v, ok := m.Headers["Authorization"]; ok {
+			assert.Equal(t, redactedValue, v, "Authorization leaked to observer")
+		}
+		if v, ok := m.Headers["Proxy-Authorization"]; ok {
+			assert.Equal(t, redactedValue, v, "Proxy-Authorization leaked to observer")
+		}
+	}
+	assert.True(t, sawInbound, "no inbound message observed")
+	assert.True(t, sawRegisterResponse, "no REGISTER response observed")
 }
 
 // E2: Dial 1001 → 1002 (two xphone instances).

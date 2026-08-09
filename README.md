@@ -44,6 +44,7 @@ months across live SIP trunks and enterprise PBXes.
 | **B2BUA building blocks** | media redirect via re-INVITE, media-timeout suspend/restore, per-leg DTMF modes → [details](#b2bua-building-blocks) | production-proven, pre-1.0 API |
 | **Video** | H.264/VP8, mid-call upgrade, PLI/FIR keyframes | newer, less mileage |
 | **Messaging & presence** | SIP MESSAGE, SUBSCRIBE/NOTIFY, MWI, BLF, presence | newer, less mileage |
+| **Observability** | structured SIP message observer (`WithSIPObserver`), credential-redacted, inbound + in-dialog outbound | new |
 | **Testing** | MockPhone/MockCall, [fakepbx](https://github.com/x-phone/fakepbx) in-process SIP server | stable |
 
 ## Status — Beta
@@ -388,6 +389,27 @@ func pcmToFloat32(frame []int16) []float32 {
 ### Testing — stable
 
 - MockPhone and MockCall — full interface mocks for unit testing
+
+### Observability — new
+
+- `WithSIPObserver` streams a structured, redacted copy of SIP messages the
+  stack sends and receives — for debugging panels, monitoring dashboards, and
+  signaling visibility. Inbound is captured in full at the transport layer;
+  outbound covers the in-dialog requests xphone-go builds (re-INVITE, ACK,
+  REFER, INFO). `Authorization`/`Proxy-Authorization` values are masked before
+  the callback sees them. The callback runs synchronously on the transport
+  goroutine — don't block; offload to a buffered channel.
+
+```go
+phone := xphone.New(
+    xphone.WithSIPObserver(func(m xphone.SIPMessage) {
+        log.Printf("[%s] %s %d call=%s", m.Direction, m.Method, m.StatusCode, m.CallID)
+    }),
+    xphone.WithCredentials("1001", "secret", "pbx.example.com"),
+)
+```
+
+Also available on `Server` via the `SIPObserver` field of `ServerConfig`.
 
 ---
 

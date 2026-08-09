@@ -81,10 +81,12 @@ type server struct {
 	onErrorFns     []func(error)
 	onOptionsFn    func() int
 
-	// dialOnceFn sends a single INVITE to a single target.
+	// dialOnceFn sends a single INVITE to a single target. dest, when
+	// non-empty, overrides the transport next-hop (ip:port) while the
+	// Request-URI keeps the target's host — see dialCandidate.
 	// Production: s.dialOnce, set in newServer.
 	// Tests: stubbed so the failover loop in Dial is testable without a network.
-	dialOnceFn func(ctx context.Context, target string, from string, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(code int, reason string)) (dialog, error)
+	dialOnceFn func(ctx context.Context, target string, dest string, from string, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(code int, reason string)) (dialog, error)
 }
 
 // NewServer creates a new Server with the given configuration.
@@ -232,17 +234,17 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 	defer dialCancel()
 
 	failover := s.cfg.OutboundFailover
-	var candidates []string
+	var candidates []dialCandidate
 	if failover.Disabled {
-		// Legacy single-shot target, no DNS expansion: a hostname stays a
-		// hostname in the Request-URI (TLS SNI / domain routing intact).
-		candidates = []string{s.resolvePeerAddr(peerCfg)}
+		// Legacy single-shot target, no DNS expansion and no destination
+		// override — exactly the pre-failover request.
+		candidates = []dialCandidate{{uriHost: s.resolvePeerAddr(peerCfg)}}
 	} else {
 		candidates = s.peerDialCandidates(dialCtx, peerCfg)
 		if len(candidates) == 0 {
 			// No usable host at all — preserve the historical single-shot
 			// path (and its error) rather than inventing a new failure mode.
-			candidates = []string{s.resolvePeerAddr(peerCfg)}
+			candidates = []dialCandidate{{uriHost: s.resolvePeerAddr(peerCfg)}}
 		}
 		if failover.MaxAttempts > 0 && failover.MaxAttempts < len(candidates) {
 			candidates = candidates[:failover.MaxAttempts]
@@ -258,10 +260,10 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 
 	var responses []sipResponseEntry
 	var lastErr error
-	for i, addr := range candidates {
-		target := fmt.Sprintf("sip:%s@%s", to, addr)
+	for i, cand := range candidates {
+		target := fmt.Sprintf("sip:%s@%s", to, cand.uriHost)
 		s.logger.Info("server dialing", "peer", peer, "to", to, "from", from,
-			"target", target, "attempt", i+1, "candidates", len(candidates))
+			"target", target, "dest", cand.dest, "attempt", i+1, "candidates", len(candidates))
 
 		// Per-hop silence guard: only armed when there is a fallback to go to.
 		// The first SIP response of any kind (even 100 Trying) disarms it —
@@ -287,7 +289,7 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 			})
 		}
 		hopStart := len(responses)
-		dlg, err := s.dialOnceFn(hopCtx, target, from, rtpAddr, peerCodecs, dialOpts, func(code int, reason string) {
+		dlg, err := s.dialOnceFn(hopCtx, target, cand.dest, from, rtpAddr, peerCodecs, dialOpts, func(code int, reason string) {
 			if silenceTimer != nil {
 				silenceTimer.Stop()
 			}
@@ -360,7 +362,7 @@ func (s *server) DialURI(ctx context.Context, uri string, from string, opts ...D
 
 	var responses []sipResponseEntry
 
-	dlg, err := s.dialOnce(dialCtx, uri, from, s.localIP, nil, dialOpts, func(code int, reason string) {
+	dlg, err := s.dialOnce(dialCtx, uri, "", from, s.localIP, nil, dialOpts, func(code int, reason string) {
 		responses = append(responses, sipResponseEntry{code, reason})
 	})
 	if err != nil {
@@ -905,7 +907,7 @@ func (s *server) handleDialogInvite(dlg dialog, from, to, sdpBody, peerName stri
 // dialOnce sends a single INVITE to a peer target.
 // rtpAddr is the IP to advertise in SDP (per-peer or server-level).
 // peerCodecs overrides server-level codec prefs (nil means use server defaults).
-func (s *server) dialOnce(ctx context.Context, target string, from string, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(code int, reason string)) (dialog, error) {
+func (s *server) dialOnce(ctx context.Context, target string, dest string, from string, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(code int, reason string)) (dialog, error) {
 	recipient := parseSIPTarget(target, rtpAddr, 5060)
 
 	// Build SDP offer.
@@ -950,7 +952,23 @@ func (s *server) dialOnce(ctx context.Context, target string, from string, rtpAd
 		extraHeaders = append(extraHeaders, fromHeader)
 	}
 
-	sess, err := s.dc.Invite(ctx, recipient, []byte(sdpOffer), extraHeaders...)
+	// Build the INVITE ourselves (mirroring sipgo's DialogUA.Invite) so the
+	// failover path can pin the transport next-hop with SetDestination while
+	// the Request-URI keeps the configured host.
+	inviteReq := sip.NewRequest(sip.INVITE, recipient)
+	inviteReq.SetBody([]byte(sdpOffer))
+	if recipient.UriParams != nil {
+		if tran, _ := recipient.UriParams.Get("transport"); tran != "" {
+			inviteReq.SetTransport(tran)
+		}
+	}
+	for _, h := range extraHeaders {
+		inviteReq.AppendHeader(h)
+	}
+	if dest != "" {
+		inviteReq.SetDestination(dest)
+	}
+	sess, err := s.dc.WriteInvite(ctx, inviteReq)
 	if err != nil {
 		rtpConn.Close()
 		return nil, fmt.Errorf("xphone: server invite: %w", err)

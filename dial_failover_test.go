@@ -43,7 +43,7 @@ func TestPeerDialCandidates_HostThenHostsDedupedCIDRSkipped(t *testing.T) {
 		},
 	}
 	got := s.peerDialCandidates(context.Background(), p)
-	assert.Equal(t, []string{"10.0.0.1:5060", "10.0.0.2:5060"}, got)
+	assert.Equal(t, []dialCandidate{{uriHost: "10.0.0.1:5060"}, {uriHost: "10.0.0.2:5060"}}, got)
 }
 
 func TestPeerDialCandidates_HostnameExpandsToAllIPv4s(t *testing.T) {
@@ -54,7 +54,11 @@ func TestPeerDialCandidates_HostnameExpandsToAllIPv4s(t *testing.T) {
 	p := &PeerConfig{Host: "sip.example.com", Port: 5080}
 	got := s.peerDialCandidates(context.Background(), p)
 	// All IPv4 A records in DNS order; the IPv6 record is filtered out.
-	assert.Equal(t, []string{"198.51.100.1:5080", "198.51.100.2:5080"}, got)
+	// The Request-URI keeps the hostname; only the transport dest varies.
+	assert.Equal(t, []dialCandidate{
+		{uriHost: "sip.example.com:5080", dest: "198.51.100.1:5080"},
+		{uriHost: "sip.example.com:5080", dest: "198.51.100.2:5080"},
+	}, got)
 }
 
 func TestPeerDialCandidates_LookupFailureKeepsHostnameVerbatim(t *testing.T) {
@@ -62,7 +66,7 @@ func TestPeerDialCandidates_LookupFailureKeepsHostnameVerbatim(t *testing.T) {
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "unresolvable.example.com", Port: 5060}
 	got := s.peerDialCandidates(context.Background(), p)
-	assert.Equal(t, []string{"unresolvable.example.com:5060"}, got)
+	assert.Equal(t, []dialCandidate{{uriHost: "unresolvable.example.com:5060"}}, got)
 }
 
 func TestPeerDialCandidates_OnlyIPv6RecordsKeepsHostname(t *testing.T) {
@@ -72,7 +76,7 @@ func TestPeerDialCandidates_OnlyIPv6RecordsKeepsHostname(t *testing.T) {
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "v6only.example.com", Port: 5060}
 	got := s.peerDialCandidates(context.Background(), p)
-	assert.Equal(t, []string{"v6only.example.com:5060"}, got)
+	assert.Equal(t, []dialCandidate{{uriHost: "v6only.example.com:5060"}}, got)
 }
 
 func TestPeerDialCandidates_MixedLiteralAndHostnameDedupsAcross(t *testing.T) {
@@ -82,8 +86,12 @@ func TestPeerDialCandidates_MixedLiteralAndHostnameDedupsAcross(t *testing.T) {
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "10.0.0.1", Port: 5060, Hosts: []string{"trunk.example.com"}}
 	got := s.peerDialCandidates(context.Background(), p)
-	// 10.0.0.1 appears once even though the hostname also resolves to it.
-	assert.Equal(t, []string{"10.0.0.1:5060", "10.0.0.9:5060"}, got)
+	// The 10.0.0.1 wire target appears once even though the hostname also
+	// resolves to it; the hostname's second A record keeps the domain URI.
+	assert.Equal(t, []dialCandidate{
+		{uriHost: "10.0.0.1:5060"},
+		{uriHost: "trunk.example.com:5060", dest: "10.0.0.9:5060"},
+	}, got)
 }
 
 func TestPeerDialCandidates_HostsEntryWithEmbeddedPort(t *testing.T) {
@@ -95,7 +103,11 @@ func TestPeerDialCandidates_HostsEntryWithEmbeddedPort(t *testing.T) {
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "10.0.0.1", Port: 5060, Hosts: []string{"10.0.0.2:5070", "alt.example.com:5090"}}
 	got := s.peerDialCandidates(context.Background(), p)
-	assert.Equal(t, []string{"10.0.0.1:5060", "10.0.0.2:5070", "198.51.100.7:5090"}, got)
+	assert.Equal(t, []dialCandidate{
+		{uriHost: "10.0.0.1:5060"},
+		{uriHost: "10.0.0.2:5070"},
+		{uriHost: "alt.example.com:5090", dest: "198.51.100.7:5090"},
+	}, got)
 }
 
 // --- retryableDialError ---
@@ -161,7 +173,7 @@ func failoverTestServer(t *testing.T, cfg ServerConfig) *server {
 func TestServerDial_FailsOverOnTransportError(t *testing.T) {
 	s := failoverTestServer(t, ServerConfig{})
 	var targets []string
-	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		targets = append(targets, target)
 		if len(targets) < 2 {
 			return nil, errors.New("dial udp: no route to host")
@@ -176,10 +188,39 @@ func TestServerDial_FailsOverOnTransportError(t *testing.T) {
 	assert.Equal(t, []string{"sip:15551230100@10.0.0.1:5060", "sip:15551230100@10.0.0.2:5060"}, targets)
 }
 
+func TestServerDial_HostnamePeerKeepsDomainInRequestURI(t *testing.T) {
+	// codex-review regression: for hostname peers the Request-URI must keep
+	// the SIP domain on every attempt (tenant routing, TLS SNI, URI policy);
+	// only the transport destination walks the A records.
+	stubLookup(t, map[string][]string{
+		"trunk.example.com": {"10.0.0.1", "10.0.0.2"},
+	})
+	s := failoverTestServer(t, ServerConfig{
+		Peers: []PeerConfig{{Name: "trunk", Host: "trunk.example.com", Port: 5060}},
+	})
+	var targets, dests []string
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+		targets = append(targets, target)
+		dests = append(dests, dest)
+		if len(targets) < 2 {
+			return nil, errors.New("dial udp: no route to host")
+		}
+		return testutil.NewMockDialog(), nil
+	}
+
+	_, err := s.Dial(context.Background(), "trunk", "15551230100", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"sip:15551230100@trunk.example.com:5060",
+		"sip:15551230100@trunk.example.com:5060",
+	}, targets, "Request-URI must keep the domain on every attempt")
+	assert.Equal(t, []string{"10.0.0.1:5060", "10.0.0.2:5060"}, dests)
+}
+
 func TestServerDial_FailsOverOn503(t *testing.T) {
 	s := failoverTestServer(t, ServerConfig{})
 	var attempts int
-	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		attempts++
 		if attempts == 1 {
 			onResponse(503, "Service Unavailable")
@@ -196,7 +237,7 @@ func TestServerDial_FailsOverOn503(t *testing.T) {
 func TestServerDial_StopsOnNonRetryableResponse(t *testing.T) {
 	s := failoverTestServer(t, ServerConfig{})
 	var attempts int
-	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		attempts++
 		onResponse(486, "Busy Here")
 		return nil, dialogResponseErr(486)
@@ -210,7 +251,7 @@ func TestServerDial_StopsOnNonRetryableResponse(t *testing.T) {
 func TestServerDial_DisabledUsesSingleCandidate(t *testing.T) {
 	s := failoverTestServer(t, ServerConfig{OutboundFailover: OutboundFailoverConfig{Disabled: true}})
 	var attempts int
-	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		attempts++
 		return nil, errors.New("transport down")
 	}
@@ -237,7 +278,7 @@ func TestServerDial_DisabledKeepsHostnameVerbatim(t *testing.T) {
 		Peers:            []PeerConfig{{Name: "trunk", Host: "sip.example.com", Port: 5060}},
 	})
 	var target string
-	s.dialOnceFn = func(ctx context.Context, tgt, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, tgt, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		target = tgt
 		return testutil.NewMockDialog(), nil
 	}
@@ -251,7 +292,7 @@ func TestServerDial_DisabledKeepsHostnameVerbatim(t *testing.T) {
 func TestServerDial_MaxAttemptsCapsCandidates(t *testing.T) {
 	s := failoverTestServer(t, ServerConfig{OutboundFailover: OutboundFailoverConfig{MaxAttempts: 2}})
 	var attempts int
-	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		attempts++
 		return nil, errors.New("transport down")
 	}
@@ -264,7 +305,7 @@ func TestServerDial_MaxAttemptsCapsCandidates(t *testing.T) {
 func TestServerDial_StopsOnLocalSetupError(t *testing.T) {
 	s := failoverTestServer(t, ServerConfig{})
 	var attempts int
-	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		attempts++
 		return nil, &dialSetupError{errors.New("no free RTP ports")}
 	}
@@ -277,7 +318,7 @@ func TestServerDial_StopsOnLocalSetupError(t *testing.T) {
 func TestServerDial_SilentHopTimesOutAndFailsOver(t *testing.T) {
 	s := failoverTestServer(t, ServerConfig{OutboundFailover: OutboundFailoverConfig{PerHopTimeout: 50 * time.Millisecond}})
 	var attempts int
-	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		attempts++
 		if attempts == 1 {
 			<-ctx.Done() // completely silent hop: park until the per-hop guard fires
@@ -296,7 +337,7 @@ func TestServerDial_SilentHopTimesOutAndFailsOver(t *testing.T) {
 func TestServerDial_ResponsiveHopDisarmsSilenceTimer(t *testing.T) {
 	s := failoverTestServer(t, ServerConfig{OutboundFailover: OutboundFailoverConfig{PerHopTimeout: 40 * time.Millisecond}})
 	var attempts int
-	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		attempts++
 		onResponse(180, "Ringing") // disarms the silence guard
 		select {
@@ -318,7 +359,7 @@ func TestServerDial_LastCandidateNotCutOffBySilenceTimer(t *testing.T) {
 	// caller's timeout, not abandoned at PerHopTimeout.
 	s := failoverTestServer(t, ServerConfig{OutboundFailover: OutboundFailoverConfig{PerHopTimeout: 30 * time.Millisecond}})
 	var attempts int
-	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		attempts++
 		if attempts < 3 {
 			<-ctx.Done() // hops 1 and 2: silent, abandoned by the guard
@@ -341,7 +382,7 @@ func TestServerDial_LastCandidateNotCutOffBySilenceTimer(t *testing.T) {
 func TestServerDial_OverallTimeoutStopsFailover(t *testing.T) {
 	s := failoverTestServer(t, ServerConfig{OutboundFailover: OutboundFailoverConfig{PerHopTimeout: time.Minute}})
 	var attempts int
-	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		attempts++
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -358,7 +399,7 @@ func TestServerDial_NoFailoverAfterCalleeAnswered(t *testing.T) {
 	// accepted; a second INVITE would ring another endpoint for the same call.
 	s := failoverTestServer(t, ServerConfig{})
 	var attempts int
-	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		attempts++
 		onResponse(100, "Trying")
 		onResponse(200, "OK")
@@ -415,7 +456,7 @@ func TestServerDial_RealTransportSilentHopFailover(t *testing.T) {
 func TestServerDial_OnlySuccessfulHopResponsesReachTheCall(t *testing.T) {
 	s := failoverTestServer(t, ServerConfig{})
 	var attempts int
-	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
 		attempts++
 		if attempts == 1 {
 			onResponse(503, "Service Unavailable")

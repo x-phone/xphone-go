@@ -215,11 +215,13 @@ server.Listen(ctx)
 Peers are authenticated by IP/CIDR or SIP digest auth. Per-peer codec and RTP address overrides are supported.
 
 Outbound `Dial` fails over across a peer's addresses (new): `Host` plus the
-non-CIDR `Hosts` entries, with hostnames expanded to all their IPv4 A records.
-A dead or silent address is abandoned after `OutboundFailover.PerHopTimeout`
-(default 5s, disarmed by any provisional response) and the next one is tried;
-408/5xx answers also fail over, while busy/decline/auth answers end the dial.
-Set `OutboundFailover: xphone.OutboundFailoverConfig{Disabled: true}` for the
+non-CIDR `Hosts` entries, with hostnames expanded to all their IPv4 A records
+— the Request-URI keeps your configured domain; only the transport next-hop
+walks the records. A dead or silent address is abandoned after
+`OutboundFailover.PerHopTimeout` (default 5s, disarmed by any provisional
+response) and the next one is tried; 408/5xx answers also fail over, while
+busy/decline/auth answers end the dial. Set
+`OutboundFailover: xphone.OutboundFailoverConfig{Disabled: true}` for the
 old single-attempt behavior.
 
 For zero-downtime deploys, use `ServerConfig.Listener` with a pre-bound socket (e.g., with `SO_REUSEPORT`):

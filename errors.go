@@ -27,6 +27,10 @@ var (
 	ErrTLSConfigRequired = errors.New("xphone: TLS transport requires TLSConfig")
 	// ErrInvalidDTMFDigit is returned when SendDTMF receives a digit outside 0-9, *, #, A-D.
 	ErrInvalidDTMFDigit = errors.New("xphone: invalid DTMF digit")
+	// ErrDTMFNotNegotiated is returned by SendDTMF in DtmfRfc4733 mode when the
+	// remote did not negotiate telephone-event (101) — sending RTP DTMF would go
+	// into the void. DtmfBoth falls back to SIP INFO instead of returning this.
+	ErrDTMFNotNegotiated = errors.New("xphone: RFC 4733 telephone-event not negotiated by remote")
 	// ErrAlreadyMuted is returned when Mute is called on an already-muted call.
 	ErrAlreadyMuted = errors.New("xphone: already muted")
 	// ErrNotMuted is returned when Unmute is called on a call that is not muted.

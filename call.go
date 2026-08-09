@@ -197,6 +197,7 @@ type call struct {
 	audioStream    *mediaStream
 	videoStream    *mediaStream
 	dtmfMode       DtmfMode
+	dtmfRTPOk      bool // remote negotiated telephone-event (101); see negotiateAudioCodec
 	hasVideo       bool
 	videoCodecType VideoCodec
 
@@ -807,7 +808,14 @@ func (c *call) negotiateAudioCodec(sess *sdp.Session) {
 	if pt := sdp.NegotiateCodec(c.resolveCodecPrefs(), remoteCodecs); pt >= 0 {
 		c.codec = Codec(pt)
 	}
-	c.logger.Debug("codec negotiated", "id", c.id, "codec", int(c.codec), "local_prefs", c.resolveCodecPrefs(), "remote_codecs", remoteCodecs)
+	c.dtmfRTPOk = false
+	for _, pt := range remoteCodecs {
+		if pt == DTMFPayloadType {
+			c.dtmfRTPOk = true
+			break
+		}
+	}
+	c.logger.Debug("codec negotiated", "id", c.id, "codec", int(c.codec), "local_prefs", c.resolveCodecPrefs(), "remote_codecs", remoteCodecs, "dtmf_rtp", c.dtmfRTPOk)
 }
 
 // buildICEParams creates ICE SDP parameters and initializes the ICE agent.
@@ -1420,6 +1428,7 @@ func (c *call) SendDTMF(digit string) error {
 		return ErrInvalidDTMFDigit
 	}
 	mode := c.dtmfMode
+	dtmfRTPOk := c.dtmfRTPOk
 	sentRTP := c.sentRTP
 	conn := c.rtpConn
 	addr := c.remoteAddr
@@ -1428,6 +1437,19 @@ func (c *call) SendDTMF(digit string) error {
 
 	if mode == DtmfSipInfo {
 		return c.dlg.SendInfoDTMF(digit, defaultInfoDTMFDuration)
+	}
+
+	// RTP modes require the remote to have negotiated telephone-event (101).
+	// Previously an unnegotiated digit was marshalled and sent into the void —
+	// "digits don't work with this one carrier" with zero signal. Now:
+	// DtmfBoth degrades to SIP INFO (real redundancy, matching its name);
+	// DtmfRfc4733 fails loudly with a typed error.
+	if !dtmfRTPOk {
+		if mode == DtmfBoth {
+			c.logger.Debug("DTMF falling back to SIP INFO (telephone-event not negotiated)", "id", c.id, "digit", digit)
+			return c.dlg.SendInfoDTMF(digit, defaultInfoDTMFDuration)
+		}
+		return ErrDTMFNotNegotiated
 	}
 
 	// DtmfRfc4733 and DtmfBoth both send via RTP.

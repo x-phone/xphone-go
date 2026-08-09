@@ -21,6 +21,7 @@ func activeCall(t *testing.T) *call {
 	c := newInboundCall(testutil.NewMockDialog())
 	t.Cleanup(c.cleanup)
 	c.sentRTP = make(chan *rtp.Packet, 256)
+	c.dtmfRTPOk = true // default prefs include telephone-event; a negotiated call has it
 	c.Accept()
 	c.startMedia()
 	return c
@@ -33,6 +34,7 @@ func activeCallWithCodec(t *testing.T, codec Codec) *call {
 	t.Cleanup(c.cleanup)
 	c.sentRTP = make(chan *rtp.Packet, 256)
 	c.codec = codec
+	c.dtmfRTPOk = true
 	c.Accept()
 	c.startMedia()
 	return c

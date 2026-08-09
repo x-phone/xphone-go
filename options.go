@@ -113,7 +113,9 @@ const (
 	DtmfRfc4733 DtmfMode = iota
 	// DtmfSipInfo sends and receives DTMF via SIP INFO with application/dtmf-relay body (RFC 2976).
 	DtmfSipInfo
-	// DtmfBoth sends DTMF via RFC 4733 RTP; also accepts incoming SIP INFO DTMF.
+	// DtmfBoth sends DTMF via RFC 4733 RTP when the remote negotiated
+	// telephone-event, falling back to SIP INFO when it didn't; accepts
+	// incoming DTMF via either transport.
 	DtmfBoth
 )
 

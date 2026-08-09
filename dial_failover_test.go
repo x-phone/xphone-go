@@ -143,6 +143,15 @@ func TestPeerDialCandidates_HostsEntryWithEmbeddedPort(t *testing.T) {
 	}, got)
 }
 
+func TestPeerDialCandidates_BracketedIPv6NoDoubleBrackets(t *testing.T) {
+	// agy-review: "[2001:db8::1]" without a port must not become
+	// "[[2001:db8::1]]:5060".
+	s := newServer(ServerConfig{})
+	p := &PeerConfig{Host: "[2001:db8::1]", Port: 5060}
+	got := drainCandidates(t, s, p)
+	assert.Equal(t, []dialCandidate{{uriHost: "[2001:db8::1]:5060"}}, got)
+}
+
 // --- retryableDialError ---
 
 func dialogResponseErr(code int) error {

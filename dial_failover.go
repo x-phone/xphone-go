@@ -74,6 +74,10 @@ func (s *server) newDialCandidateIter(p *PeerConfig) *dialCandidateIter {
 		host, port := h, defaultPort
 		if sh, sp, err := net.SplitHostPort(h); err == nil {
 			host, port = sh, sp
+		} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			// Bracketed IPv6 literal without a port: unwrap so JoinHostPort
+			// doesn't double-bracket it later.
+			host = host[1 : len(host)-1]
 		}
 		it.entries = append(it.entries, hostPortEntry{host, port})
 	}

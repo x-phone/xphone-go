@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/emiago/sipgo/sip"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/x-phone/fakepbx"
 	"github.com/x-phone/xphone-go/testutil"
 )
 
@@ -366,6 +368,48 @@ func TestServerDial_NoFailoverAfterCalleeAnswered(t *testing.T) {
 	_, err := s.Dial(context.Background(), "trunk", "15551230100", "")
 	require.Error(t, err)
 	assert.Equal(t, 1, attempts, "post-2xx failure must stop failover, not duplicate the call")
+}
+
+// TestServerDial_RealTransportSilentHopFailover exercises the failover path
+// through sipgo's REAL WaitAnswer, not the dialOnceFn stub. codex-review
+// regression: for a completely silent hop, sipgo honors RFC 3261 §9.1 and
+// blocks until a provisional or Timer B (~32s) on a plain context cancel —
+// the per-hop guard must use sipgo's WaitAnswerForceCancelErr cancel cause
+// to abandon the transaction promptly. A stub cannot catch that.
+func TestServerDial_RealTransportSilentHopFailover(t *testing.T) {
+	skipUnderRace(t)
+	// A UDP socket that swallows every packet: the silent first hop.
+	silent, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { silent.Close() })
+	silentAddr := silent.LocalAddr().String()
+
+	// A fakepbx that answers: the healthy second hop.
+	pbx := fakepbx.NewFakePBX(t)
+	_, rtpPort := bindRTP(t)
+	pbx.OnInvite(func(inv *fakepbx.Invite) {
+		inv.Trying()
+		inv.Answer(fakepbx.SDP("127.0.0.1", rtpPort, fakepbx.PCMA))
+	})
+
+	srv := listenServer(t, pbx, func(cfg *ServerConfig) {
+		cfg.Peers[0].Hosts = []string{silentAddr, pbx.Addr()}
+		cfg.Peers[0].Host = ""
+		cfg.OutboundFailover.PerHopTimeout = 500 * time.Millisecond
+	})
+	startListening(t, srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	c, err := srv.Dial(ctx, "test-peer", "9999", "+15559876543")
+	elapsed := time.Since(start)
+	require.NoError(t, err, "failover through the real transport failed")
+	assert.Equal(t, StateActive, c.State())
+	assert.Less(t, elapsed, 5*time.Second,
+		"silent hop held Dial for %v — force-cancel cause not honored (Timer B leak)", elapsed)
+	c.End()
 }
 
 func TestServerDial_OnlySuccessfulHopResponsesReachTheCall(t *testing.T) {

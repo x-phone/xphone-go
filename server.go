@@ -266,18 +266,25 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 		// Per-hop silence guard: only armed when there is a fallback to go to.
 		// The first SIP response of any kind (even 100 Trying) disarms it —
 		// a responsive hop is never cut off mid-ring.
-		hopCtx, hopCancel := context.WithCancel(dialCtx)
+		hopCtx, hopCancel := context.WithCancelCause(dialCtx)
 		// Deferred (not called inline on success): the established dialog's
 		// wait context descends from hopCtx, and today it lives exactly until
 		// Dial returns (dialCancel is deferred). The per-hop defer preserves
 		// that lifetime; the explicit hopCancel below releases failed hops
 		// early. Candidate lists are tiny, so stacked defers are fine.
-		defer hopCancel()
+		defer hopCancel(nil)
 		var silenceTimer *time.Timer
 		if i < len(candidates)-1 && failover.PerHopTimeout > 0 {
 			// Armed only while a fallback remains: the last candidate answers
 			// to the caller's own timeout, not the per-hop silence guard.
-			silenceTimer = time.AfterFunc(failover.PerHopTimeout, hopCancel)
+			// The cancel cause matters: on a completely silent hop, sipgo's
+			// WaitAnswer honors RFC 3261 §9.1 and blocks until a provisional
+			// or Timer B (~32s) before it can CANCEL — unless the context is
+			// canceled with WaitAnswerForceCancelErr, its documented escape
+			// hatch for exactly this abandon-the-transaction case.
+			silenceTimer = time.AfterFunc(failover.PerHopTimeout, func() {
+				hopCancel(sipgo.WaitAnswerForceCancelErr)
+			})
 		}
 		hopStart := len(responses)
 		dlg, err := s.dialOnceFn(hopCtx, target, from, rtpAddr, peerCodecs, dialOpts, func(code int, reason string) {
@@ -294,7 +301,7 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 			// hop's 5xx must not corrupt the successful call's state.
 			return s.setupOutboundCall(dlg, responses[hopStart:], opts...)
 		}
-		hopCancel()
+		hopCancel(nil)
 		lastErr = err
 		if dialCtx.Err() != nil {
 			// Overall dial timeout or caller cancellation — not a hop failure.

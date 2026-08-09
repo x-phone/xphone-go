@@ -556,9 +556,16 @@ func (p *phone) Prepare(ctx context.Context) error {
 		return ErrInvalidState
 	}
 	if p.state != PhoneStateDisconnected {
-		// Transport already up — idempotent no-op.
+		// Idempotent no-op only when a transport is actually attached.
+		// During another caller's in-flight setup (Connect/Register mid-
+		// prepareTransport: state Registering, tr still nil) be explicit
+		// rather than reporting readiness that doesn't exist yet.
+		attached := p.tr != nil
 		p.mu.Unlock()
-		return nil
+		if attached {
+			return nil
+		}
+		return ErrInvalidState
 	}
 	// The unexported preparing flag is the in-progress marker: the phone
 	// keeps reporting Disconnected until the transport is fully attached, so

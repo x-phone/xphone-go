@@ -107,6 +107,12 @@ type Config struct {
 	// for coverage and threading guarantees.
 	SIPObserver SIPObserver
 
+	// Registrarless allows Dial and SendMessage from PhoneStatePrepared —
+	// transport bound, no REGISTER — for IP-authed trunks, P2P endpoints,
+	// and static routes that have no registrar (#101). Without it, those
+	// operations require PhoneStateRegistered exactly as before.
+	Registrarless bool
+
 	Logger *slog.Logger
 }
 
@@ -368,6 +374,16 @@ func WithMediaTimeout(d time.Duration) PhoneOption {
 func WithNATKeepalive(d time.Duration) PhoneOption {
 	return func(c *Config) {
 		c.NATKeepaliveInterval = d
+	}
+}
+
+// WithRegistrarless allows Dial and SendMessage from PhoneStatePrepared —
+// after Prepare(), without any REGISTER. For IP-authed trunks, peer-to-peer
+// endpoints, and static SIP routes that have no registrar. Operations tied to
+// a registration (subscriptions, BLF, MWI) still require Registered.
+func WithRegistrarless() PhoneOption {
+	return func(c *Config) {
+		c.Registrarless = true
 	}
 }
 

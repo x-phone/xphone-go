@@ -23,6 +23,10 @@ const (
 	PhoneStateRegistered
 	PhoneStateUnregistering
 	PhoneStateRegistrationFailed
+	// PhoneStatePrepared: transport bound and the advertised address resolved,
+	// but no REGISTER performed. Reached via Prepare(), or via Unregister()
+	// from Registered. Appended so existing values keep their numbers (#101).
+	PhoneStatePrepared
 )
 
 // EndReason describes why a call ended.

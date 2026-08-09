@@ -39,77 +39,110 @@ type dialCandidate struct {
 	dest    string // transport next-hop (ip:port); "" lets sipgo resolve the URI
 }
 
-// peerDialCandidates returns the ordered, deduplicated failover candidates
-// for a peer: Host first, then each non-CIDR Hosts entry, with hostnames
-// expanded to every IPv4 A record they resolve to (order preserved). The
+// dialCandidateIter walks a peer's failover candidates LAZILY: Host first,
+// then each non-CIDR Hosts entry, with hostnames expanded to every IPv4 A
+// record they resolve to (order preserved). Laziness matters: a hostname is
+// only resolved when its turn comes, so a hung DNS lookup for a fallback
+// entry can never delay dialing an already-known primary address. The
 // Request-URI keeps the configured hostname; only the transport destination
 // varies per A record. A hostname that fails to resolve, or resolves to no
 // IPv4, yields one candidate with no destination override so sipgo's own
-// resolution can still try it — matching prior behavior.
-// ctx bounds the DNS lookups (the dial context in production).
-func (s *server) peerDialCandidates(ctx context.Context, p *PeerConfig) []dialCandidate {
-	seenHost := make(map[string]bool)
-	var hosts []string
-	addHost := func(h string) {
-		if h != "" && !seenHost[h] {
-			seenHost[h] = true
-			hosts = append(hosts, h)
-		}
-	}
-	addHost(p.Host)
-	for _, h := range p.Hosts {
-		if !strings.Contains(h, "/") { // skip CIDR ranges — inbound-auth only
-			addHost(h)
-		}
-	}
+// resolution can still try it — matching prior behavior. Candidates are
+// deduplicated on the effective wire address (dest when set, else uriHost):
+// an IP listed literally and reached again via a hostname's A record is the
+// same wire target.
+type dialCandidateIter struct {
+	entries  []hostPortEntry // config entries not yet resolved/emitted
+	queue    []dialCandidate // expanded candidates awaiting emission
+	seenWire map[string]bool
+}
 
+type hostPortEntry struct{ host, port string }
+
+func (s *server) newDialCandidateIter(p *PeerConfig) *dialCandidateIter {
 	defaultPort := fmt.Sprintf("%d", p.Port)
-	// Dedup on the effective transport address (dest when set, else the URI
-	// host): an IP listed literally and reached again via a hostname's A
-	// record is the same wire target — dialing it twice buys nothing.
-	seenWire := make(map[string]bool)
-	var out []dialCandidate
-	addOut := func(c dialCandidate) {
-		wire := c.dest
-		if wire == "" {
-			wire = c.uriHost
+	seenRaw := make(map[string]bool)
+	it := &dialCandidateIter{seenWire: make(map[string]bool)}
+	add := func(h string) {
+		if h == "" || seenRaw[h] {
+			return
 		}
-		if !seenWire[wire] {
-			seenWire[wire] = true
-			out = append(out, c)
-		}
-	}
-	for _, h := range hosts {
-		// A Hosts entry may carry its own port ("10.0.0.2:5070"); split it off
-		// so we never produce host:port:port. Plain hosts and bare IPv6
-		// literals make SplitHostPort error, which leaves the defaults.
+		seenRaw[h] = true
+		// An entry may carry its own port ("10.0.0.2:5070"); split it off so
+		// we never produce host:port:port. Plain hosts and bare IPv6 literals
+		// make SplitHostPort error, which leaves the defaults.
 		host, port := h, defaultPort
 		if sh, sp, err := net.SplitHostPort(h); err == nil {
 			host, port = sh, sp
 		}
-		if ip := net.ParseIP(host); ip != nil {
+		it.entries = append(it.entries, hostPortEntry{host, port})
+	}
+	add(p.Host)
+	for _, h := range p.Hosts {
+		if !strings.Contains(h, "/") { // skip CIDR ranges — inbound-auth only
+			add(h)
+		}
+	}
+	return it
+}
+
+// push queues a candidate unless its wire address was already used.
+func (it *dialCandidateIter) push(c dialCandidate) {
+	wire := c.dest
+	if wire == "" {
+		wire = c.uriHost
+	}
+	if !it.seenWire[wire] {
+		it.seenWire[wire] = true
+		it.queue = append(it.queue, c)
+	}
+}
+
+// next returns the following candidate, resolving hostnames on demand.
+// ctx bounds the DNS lookup (the dial context in production).
+func (it *dialCandidateIter) next(ctx context.Context) (dialCandidate, bool) {
+	for {
+		if len(it.queue) > 0 {
+			c := it.queue[0]
+			it.queue = it.queue[1:]
+			return c, true
+		}
+		if len(it.entries) == 0 {
+			return dialCandidate{}, false
+		}
+		e := it.entries[0]
+		it.entries = it.entries[1:]
+		if ip := net.ParseIP(e.host); ip != nil {
 			// IP-literal config: the URI host is the IP, as it always was.
-			addOut(dialCandidate{uriHost: net.JoinHostPort(host, port)})
+			it.push(dialCandidate{uriHost: net.JoinHostPort(e.host, e.port)})
 			continue
 		}
-		uriHost := net.JoinHostPort(host, port)
-		addrs, err := lookupHostFn(ctx, host)
+		uriHost := net.JoinHostPort(e.host, e.port)
+		addrs, err := lookupHostFn(ctx, e.host)
 		if err != nil {
-			addOut(dialCandidate{uriHost: uriHost})
+			it.push(dialCandidate{uriHost: uriHost})
 			continue
 		}
 		expanded := false
 		for _, addr := range addrs {
 			if ip := net.ParseIP(addr); ip != nil && ip.To4() != nil {
-				addOut(dialCandidate{uriHost: uriHost, dest: net.JoinHostPort(addr, port)})
+				it.push(dialCandidate{uriHost: uriHost, dest: net.JoinHostPort(addr, e.port)})
 				expanded = true
 			}
 		}
 		if !expanded {
-			addOut(dialCandidate{uriHost: uriHost})
+			it.push(dialCandidate{uriHost: uriHost})
 		}
 	}
-	return out
+}
+
+// hasMore reports whether another candidate may follow. It can overestimate —
+// a pending hostname might resolve entirely to already-dialed wire addresses,
+// in which case a hop abandoned by the silence guard turns out to have been
+// the last one. That corner trades against never letting a fallback's dead
+// DNS block the primary; the guard's error is still surfaced to the caller.
+func (it *dialCandidateIter) hasMore() bool {
+	return len(it.queue) > 0 || len(it.entries) > 0
 }
 
 // retryableDialError reports whether a failed dial attempt justifies trying

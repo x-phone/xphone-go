@@ -30,6 +30,20 @@ func stubLookup(t *testing.T, table map[string][]string) {
 	t.Cleanup(func() { lookupHostFn = orig })
 }
 
+// drainCandidates collects every candidate the lazy iterator yields.
+func drainCandidates(t *testing.T, s *server, p *PeerConfig) []dialCandidate {
+	t.Helper()
+	it := s.newDialCandidateIter(p)
+	var out []dialCandidate
+	for {
+		c, ok := it.next(context.Background())
+		if !ok {
+			return out
+		}
+		out = append(out, c)
+	}
+}
+
 func TestPeerDialCandidates_HostThenHostsDedupedCIDRSkipped(t *testing.T) {
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{
@@ -42,7 +56,7 @@ func TestPeerDialCandidates_HostThenHostsDedupedCIDRSkipped(t *testing.T) {
 			"10.0.0.2",      // duplicate within Hosts
 		},
 	}
-	got := s.peerDialCandidates(context.Background(), p)
+	got := drainCandidates(t, s, p)
 	assert.Equal(t, []dialCandidate{{uriHost: "10.0.0.1:5060"}, {uriHost: "10.0.0.2:5060"}}, got)
 }
 
@@ -52,7 +66,7 @@ func TestPeerDialCandidates_HostnameExpandsToAllIPv4s(t *testing.T) {
 	})
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "sip.example.com", Port: 5080}
-	got := s.peerDialCandidates(context.Background(), p)
+	got := drainCandidates(t, s, p)
 	// All IPv4 A records in DNS order; the IPv6 record is filtered out.
 	// The Request-URI keeps the hostname; only the transport dest varies.
 	assert.Equal(t, []dialCandidate{
@@ -65,7 +79,7 @@ func TestPeerDialCandidates_LookupFailureKeepsHostnameVerbatim(t *testing.T) {
 	stubLookup(t, map[string][]string{}) // every lookup errors
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "unresolvable.example.com", Port: 5060}
-	got := s.peerDialCandidates(context.Background(), p)
+	got := drainCandidates(t, s, p)
 	assert.Equal(t, []dialCandidate{{uriHost: "unresolvable.example.com:5060"}}, got)
 }
 
@@ -75,7 +89,7 @@ func TestPeerDialCandidates_OnlyIPv6RecordsKeepsHostname(t *testing.T) {
 	})
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "v6only.example.com", Port: 5060}
-	got := s.peerDialCandidates(context.Background(), p)
+	got := drainCandidates(t, s, p)
 	assert.Equal(t, []dialCandidate{{uriHost: "v6only.example.com:5060"}}, got)
 }
 
@@ -85,7 +99,7 @@ func TestPeerDialCandidates_MixedLiteralAndHostnameDedupsAcross(t *testing.T) {
 	})
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "10.0.0.1", Port: 5060, Hosts: []string{"trunk.example.com"}}
-	got := s.peerDialCandidates(context.Background(), p)
+	got := drainCandidates(t, s, p)
 	// The 10.0.0.1 wire target appears once even though the hostname also
 	// resolves to it; the hostname's second A record keeps the domain URI.
 	assert.Equal(t, []dialCandidate{
@@ -102,7 +116,7 @@ func TestPeerDialCandidates_HostsEntryWithEmbeddedPort(t *testing.T) {
 	})
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "10.0.0.1", Port: 5060, Hosts: []string{"10.0.0.2:5070", "alt.example.com:5090"}}
-	got := s.peerDialCandidates(context.Background(), p)
+	got := drainCandidates(t, s, p)
 	assert.Equal(t, []dialCandidate{
 		{uriHost: "10.0.0.1:5060"},
 		{uriHost: "10.0.0.2:5070"},
@@ -215,6 +229,29 @@ func TestServerDial_HostnamePeerKeepsDomainInRequestURI(t *testing.T) {
 		"sip:15551230100@trunk.example.com:5060",
 	}, targets, "Request-URI must keep the domain on every attempt")
 	assert.Equal(t, []string{"10.0.0.1:5060", "10.0.0.2:5060"}, dests)
+}
+
+func TestServerDial_PrimaryDialedWithoutResolvingFallbackHostnames(t *testing.T) {
+	// codex-review regression: candidates must resolve lazily. A hung or dead
+	// DNS server for a FALLBACK hostname must never delay dialing the
+	// already-known literal primary.
+	orig := lookupHostFn
+	lookupHostFn = func(context.Context, string) ([]string, error) {
+		t.Fatal("fallback hostname resolved before the primary was dialed")
+		return nil, nil
+	}
+	t.Cleanup(func() { lookupHostFn = orig })
+
+	s := failoverTestServer(t, ServerConfig{
+		Peers: []PeerConfig{{Name: "trunk", Host: "10.0.0.1", Port: 5060,
+			Hosts: []string{"backup.example.com"}}},
+	})
+	s.dialOnceFn = func(ctx context.Context, target, dest, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+		return testutil.NewMockDialog(), nil // primary succeeds immediately
+	}
+
+	_, err := s.Dial(context.Background(), "trunk", "15551230100", "")
+	require.NoError(t, err)
 }
 
 func TestServerDial_FailsOverOn503(t *testing.T) {

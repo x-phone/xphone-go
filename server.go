@@ -234,21 +234,38 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 	defer dialCancel()
 
 	failover := s.cfg.OutboundFailover
-	var candidates []dialCandidate
+	// Candidates are produced LAZILY (hostnames resolved only when their turn
+	// comes) so a fallback entry's dead DNS can never delay the primary.
+	var nextCandidate func() (dialCandidate, bool)
+	var moreCandidates func() bool
 	if failover.Disabled {
 		// Legacy single-shot target, no DNS expansion and no destination
 		// override — exactly the pre-failover request.
-		candidates = []dialCandidate{{uriHost: s.resolvePeerAddr(peerCfg)}}
+		used := false
+		nextCandidate = func() (dialCandidate, bool) {
+			if used {
+				return dialCandidate{}, false
+			}
+			used = true
+			return dialCandidate{uriHost: s.resolvePeerAddr(peerCfg)}, true
+		}
+		moreCandidates = func() bool { return false }
 	} else {
-		candidates = s.peerDialCandidates(dialCtx, peerCfg)
-		if len(candidates) == 0 {
-			// No usable host at all — preserve the historical single-shot
-			// path (and its error) rather than inventing a new failure mode.
-			candidates = []dialCandidate{{uriHost: s.resolvePeerAddr(peerCfg)}}
+		iter := s.newDialCandidateIter(peerCfg)
+		first := true
+		nextCandidate = func() (dialCandidate, bool) {
+			c, ok := iter.next(dialCtx)
+			if !ok && first {
+				// No usable host at all — preserve the historical
+				// single-shot path (and its error) rather than inventing a
+				// new failure mode.
+				first = false
+				return dialCandidate{uriHost: s.resolvePeerAddr(peerCfg)}, true
+			}
+			first = false
+			return c, ok
 		}
-		if failover.MaxAttempts > 0 && failover.MaxAttempts < len(candidates) {
-			candidates = candidates[:failover.MaxAttempts]
-		}
+		moreCandidates = iter.hasMore
 	}
 
 	// Resolve per-peer RTP address and codecs.
@@ -260,10 +277,14 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 
 	var responses []sipResponseEntry
 	var lastErr error
-	for i, cand := range candidates {
+	for attempt := 1; ; attempt++ {
+		cand, ok := nextCandidate()
+		if !ok {
+			break
+		}
 		target := fmt.Sprintf("sip:%s@%s", to, cand.uriHost)
 		s.logger.Info("server dialing", "peer", peer, "to", to, "from", from,
-			"target", target, "dest", cand.dest, "attempt", i+1, "candidates", len(candidates))
+			"target", target, "dest", cand.dest, "attempt", attempt)
 
 		// Per-hop silence guard: only armed when there is a fallback to go to.
 		// The first SIP response of any kind (even 100 Trying) disarms it —
@@ -276,7 +297,8 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 		// early. Candidate lists are tiny, so stacked defers are fine.
 		defer hopCancel(nil)
 		var silenceTimer *time.Timer
-		if i < len(candidates)-1 && failover.PerHopTimeout > 0 {
+		lastPermitted := failover.MaxAttempts > 0 && attempt >= failover.MaxAttempts
+		if moreCandidates() && !lastPermitted && failover.PerHopTimeout > 0 {
 			// Armed only while a fallback remains: the last candidate answers
 			// to the caller's own timeout, not the per-hop silence guard.
 			// The cancel cause matters: on a completely silent hop, sipgo's
@@ -318,7 +340,10 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 		if !retryableDialError(err) {
 			break
 		}
-		if i < len(candidates)-1 {
+		if failover.MaxAttempts > 0 && attempt >= failover.MaxAttempts {
+			break
+		}
+		if moreCandidates() {
 			s.logger.Warn("server dial failover", "peer", peer, "failed_target", target,
 				"error", err, "responses_this_hop", len(responses)-hopStart)
 		}

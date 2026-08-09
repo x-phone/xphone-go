@@ -283,7 +283,7 @@ func (p *phone) connectWithTransport(tr sipTransport) error {
 	tr.OnIncoming(p.handleIncoming)
 	tr.OnMessage(p.handleMessage)
 
-	return p.runRegistration()
+	return p.runRegistration(context.Background())
 }
 
 // newWiredRegistryLocked creates a registry wired to the phone's buffered
@@ -323,15 +323,16 @@ func (p *phone) newWiredRegistryLocked(tr sipTransport) *registry {
 // runRegistration drives the REGISTER flow on the already-attached transport,
 // sets Registered/RegistrationFailed, and on success starts MWI and the
 // subscription manager (#101: shared by Connect, Register, and the
-// connectWithTransport test hook).
-func (p *phone) runRegistration() error {
+// connectWithTransport test hook). ctx bounds the initial registration
+// attempt (the refresh loop runs on the registry's own lifecycle context).
+func (p *phone) runRegistration(ctx context.Context) error {
 	p.mu.Lock()
 	reg := p.reg
 	tr := p.tr
 	p.mu.Unlock()
 
 	// Perform registration (consumes the pre-queued 200 OK in tests).
-	err := reg.Start(context.Background())
+	err := reg.Start(ctx)
 
 	p.mu.Lock()
 	if err == nil {
@@ -483,7 +484,7 @@ func (p *phone) Connect(ctx context.Context) error {
 		return err
 	}
 
-	if err := p.runRegistration(); err != nil {
+	if err := p.runRegistration(ctx); err != nil {
 		// Historical Connect semantics: registration failure tears the
 		// transport down. (Register() keeps it — that is its point.)
 		p.mu.Lock()
@@ -522,12 +523,25 @@ func (p *phone) Prepare(ctx context.Context) error {
 	err := p.prepareTransport(func() bool { return p.preparing })
 
 	p.mu.Lock()
+	aborted := !p.preparing // Disconnect() canceled us mid-flight
 	p.preparing = false
 	if err != nil {
 		p.tr = nil
 		p.reg = nil
 		p.mu.Unlock()
 		return err
+	}
+	if aborted {
+		// The cancel landed after prepareTransport's stillValid check but
+		// before we could publish: honor it — tear down and stay Disconnected.
+		tr := p.tr
+		p.tr = nil
+		p.reg = nil
+		p.mu.Unlock()
+		if tr != nil {
+			tr.Close()
+		}
+		return ErrInvalidState
 	}
 	p.state = PhoneStatePrepared // published only now, transport attached
 	p.mu.Unlock()
@@ -563,7 +577,7 @@ func (p *phone) Register(ctx context.Context) error {
 		p.state = PhoneStateRegistering
 		p.mu.Unlock()
 	}
-	return p.runRegistration()
+	return p.runRegistration(ctx)
 }
 
 // Unregister sends the un-REGISTER (Expires: 0) and stops the registration
@@ -618,6 +632,14 @@ func (p *phone) Unregister(ctx context.Context) error {
 func (p *phone) Disconnect() error {
 	p.mu.Lock()
 	if p.state == PhoneStateDisconnected {
+		if p.preparing {
+			// Cancel an in-flight standalone Prepare(): its stillValid
+			// check (or the aborted re-check on its tail) will observe the
+			// cleared flag and tear down whatever it built.
+			p.preparing = false
+			p.mu.Unlock()
+			return nil
+		}
 		p.mu.Unlock()
 		return ErrNotConnected
 	}

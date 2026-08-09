@@ -2,6 +2,8 @@ package xphone
 
 import (
 	"context"
+	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -266,6 +268,71 @@ func TestSendMessage_RejectedDuringTransitionalStates(t *testing.T) {
 	}
 	p.mu.Lock()
 	p.state = PhoneStatePrepared
+	p.mu.Unlock()
+}
+
+func TestRegister_HonorsContext(t *testing.T) {
+	// codex-review regression: Register(ctx) must be cancelable. A silent
+	// registrar (socket that never answers) must not hold Register hostage
+	// to the full retry schedule when the caller's deadline expires.
+	silent, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { silent.Close() })
+	host, portStr, _ := net.SplitHostPort(silent.LocalAddr().String())
+	port, _ := strconv.Atoi(portStr)
+
+	cfg := Config{
+		Username: "1001", Password: "test",
+		Host: host, Port: port, Transport: "udp",
+		RegisterExpiry: 60 * time.Second, RegisterRetry: 10 * time.Second, RegisterMaxRetry: 5,
+	}
+	applyDefaults(&cfg)
+	p := newPhone(cfg)
+	t.Cleanup(func() { p.Disconnect() })
+	require.NoError(t, p.Prepare(context.Background()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = p.Register(ctx)
+	require.Error(t, err, "silent registrar must fail registration")
+	assert.Less(t, time.Since(start), 5*time.Second,
+		"Register must return at the caller's deadline, not after the retry schedule")
+	assert.Equal(t, PhoneStateRegistrationFailed, p.State())
+}
+
+func TestDisconnect_CancelsInFlightPrepare(t *testing.T) {
+	// codex-review regression: Disconnect() during an in-flight Prepare must
+	// cancel it — the phone must not end up Prepared with a live transport
+	// after shutdown was requested.
+	orig := stunMappedAddr
+	defer func() { stunMappedAddr = orig }()
+	stunEntered := make(chan struct{})
+	releaseStun := make(chan struct{})
+	stunMappedAddr = func(server string, timeout time.Duration) (string, int, error) {
+		close(stunEntered)
+		<-releaseStun
+		return "", 0, context.DeadlineExceeded
+	}
+
+	pbx := fakepbx.NewFakePBX(t)
+	cfg := pbxConfig(t, pbx)
+	cfg.StunServer = "stun.example.com:3478"
+	applyDefaults(&cfg)
+	p := newPhone(cfg)
+
+	prepDone := make(chan error, 1)
+	go func() { prepDone <- p.Prepare(context.Background()) }()
+	<-stunEntered
+
+	require.NoError(t, p.Disconnect(), "Disconnect must cancel the in-flight Prepare")
+	close(releaseStun)
+
+	err := <-prepDone
+	assert.ErrorIs(t, err, ErrInvalidState, "canceled Prepare must not succeed")
+	assert.Equal(t, PhoneStateDisconnected, p.State())
+	p.mu.Lock()
+	assert.Nil(t, p.tr, "no transport may survive a canceled Prepare")
 	p.mu.Unlock()
 }
 

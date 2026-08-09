@@ -89,7 +89,12 @@ const unregisterTimeout = 500 * time.Millisecond
 // registrar (RFC 3261 §10.2.2). It waits up to unregisterTimeout for a
 // response. Errors are logged but not returned — the caller should proceed
 // with shutdown regardless.
-func (r *registry) Unregister() {
+func (r *registry) Unregister() { r.UnregisterCtx(context.Background()) }
+
+// UnregisterCtx is Unregister bounded by the caller's context: the un-REGISTER
+// waits for min(ctx deadline, unregisterTimeout), so lifecycle shutdown can be
+// canceled promptly (#101).
+func (r *registry) UnregisterCtx(parent context.Context) {
 	r.mu.Lock()
 	if r.state != PhoneStateRegistered {
 		r.mu.Unlock()
@@ -98,7 +103,7 @@ func (r *registry) Unregister() {
 	tr := r.tr
 	r.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), unregisterTimeout)
+	ctx, cancel := context.WithTimeout(parent, unregisterTimeout)
 	defer cancel()
 
 	code, _, err := tr.SendRequest(ctx, "REGISTER", map[string]string{

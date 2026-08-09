@@ -48,6 +48,58 @@ func (p *MockPhone) Connect(_ context.Context) error {
 	return nil
 }
 
+// Prepare simulates transport setup without registration (#101).
+// Idempotent: a no-op unless the phone is Disconnected.
+func (p *MockPhone) Prepare(_ context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state == PhoneStateRegistering || p.state == PhoneStateUnregistering {
+		return ErrInvalidState // parity with phone.Prepare during in-flight setup
+	}
+	if p.state == PhoneStateDisconnected {
+		p.state = PhoneStatePrepared
+	}
+	return nil
+}
+
+// Register simulates the REGISTER flow, auto-preparing when needed (#101).
+func (p *MockPhone) Register(_ context.Context) error {
+	p.mu.Lock()
+	if p.state == PhoneStateRegistered {
+		p.mu.Unlock()
+		return nil
+	}
+	if p.state == PhoneStateRegistering || p.state == PhoneStateUnregistering {
+		p.mu.Unlock()
+		return ErrInvalidState
+	}
+	p.state = PhoneStateRegistered
+	fns := make([]func(), len(p.onRegisteredFns))
+	copy(fns, p.onRegisteredFns)
+	p.mu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
+	return nil
+}
+
+// Unregister simulates de-registration, returning to Prepared (#101).
+func (p *MockPhone) Unregister(_ context.Context) error {
+	p.mu.Lock()
+	if p.state != PhoneStateRegistered && p.state != PhoneStateRegistrationFailed {
+		p.mu.Unlock()
+		return ErrInvalidState
+	}
+	p.state = PhoneStatePrepared
+	fns := make([]func(), len(p.onUnregFns))
+	copy(fns, p.onUnregFns)
+	p.mu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
+	return nil
+}
+
 func (p *MockPhone) Disconnect() error {
 	p.mu.Lock()
 	if p.state == PhoneStateDisconnected {

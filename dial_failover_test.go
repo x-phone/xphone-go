@@ -84,6 +84,18 @@ func TestPeerDialCandidates_MixedLiteralAndHostnameDedupsAcross(t *testing.T) {
 	assert.Equal(t, []string{"10.0.0.1:5060", "10.0.0.9:5060"}, got)
 }
 
+func TestPeerDialCandidates_HostsEntryWithEmbeddedPort(t *testing.T) {
+	// agy-review regression: "10.0.0.2:5070" must keep its own port, not
+	// become the un-dialable "10.0.0.2:5070:5060".
+	stubLookup(t, map[string][]string{
+		"alt.example.com": {"198.51.100.7"},
+	})
+	s := newServer(ServerConfig{})
+	p := &PeerConfig{Host: "10.0.0.1", Port: 5060, Hosts: []string{"10.0.0.2:5070", "alt.example.com:5090"}}
+	got := s.peerDialCandidates(context.Background(), p)
+	assert.Equal(t, []string{"10.0.0.1:5060", "10.0.0.2:5070", "198.51.100.7:5090"}, got)
+}
+
 // --- retryableDialError ---
 
 func dialogResponseErr(code int) error {

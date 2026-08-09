@@ -52,7 +52,7 @@ func (s *server) peerDialCandidates(ctx context.Context, p *PeerConfig) []string
 		}
 	}
 
-	port := fmt.Sprintf("%d", p.Port)
+	defaultPort := fmt.Sprintf("%d", p.Port)
 	seenAddr := make(map[string]bool)
 	var out []string
 	addOut := func(hp string) {
@@ -62,13 +62,20 @@ func (s *server) peerDialCandidates(ctx context.Context, p *PeerConfig) []string
 		}
 	}
 	for _, h := range hosts {
-		if ip := net.ParseIP(h); ip != nil {
-			addOut(net.JoinHostPort(h, port))
+		// A Hosts entry may carry its own port ("10.0.0.2:5070"); split it off
+		// so we never produce host:port:port. Plain hosts and bare IPv6
+		// literals make SplitHostPort error, which leaves the defaults.
+		host, port := h, defaultPort
+		if sh, sp, err := net.SplitHostPort(h); err == nil {
+			host, port = sh, sp
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			addOut(net.JoinHostPort(host, port))
 			continue
 		}
-		addrs, err := lookupHostFn(ctx, h)
+		addrs, err := lookupHostFn(ctx, host)
 		if err != nil {
-			addOut(net.JoinHostPort(h, port))
+			addOut(net.JoinHostPort(host, port))
 			continue
 		}
 		expanded := false
@@ -79,7 +86,7 @@ func (s *server) peerDialCandidates(ctx context.Context, p *PeerConfig) []string
 			}
 		}
 		if !expanded {
-			addOut(net.JoinHostPort(h, port))
+			addOut(net.JoinHostPort(host, port))
 		}
 	}
 	return out

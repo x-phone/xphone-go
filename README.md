@@ -193,6 +193,21 @@ phone.OnIncoming(func(call xphone.Call) { call.Accept() })
 phone.Connect(ctx)
 ```
 
+**Lifecycle (new).** `Connect(ctx)` is `Prepare` + `Register`. When you need the
+two apart — pre-warming the socket, distinguishing a transport-bind failure
+from a registrar rejection, or reusing the transport across registrations —
+drive them directly:
+
+```go
+phone.Prepare(ctx)     // bind transport, STUN, resolve advertised address — no REGISTER
+phone.Register(ctx)    // drive REGISTER; on failure the transport stays up, just retry
+phone.Unregister(ctx)  // de-register but keep the transport (active calls untouched) → Prepared
+```
+
+For registrar-less peers (IP-authed trunks, P2P, static routes), add
+`xphone.WithRegistrarless()` and `Dial`/`SendMessage` work straight from
+`Prepared` with no REGISTER ever sent.
+
 ### Server mode (SIP trunk)
 
 Accepts and places calls directly with trusted SIP peers — no registration required. Use this when trunk providers send INVITEs to your public IP, or when a PBX routes calls to your application:

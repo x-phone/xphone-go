@@ -297,6 +297,12 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 		// early. Candidate lists are tiny, so stacked defers are fine.
 		defer hopCancel(nil)
 		var silenceTimer *time.Timer
+		// hopMu + hopResponded close the race where a provisional lands at
+		// the same instant PerHopTimeout fires: Stop() alone can return false
+		// with the timer callback already running, which would then cancel a
+		// hop that DID respond. The callback re-checks under the lock.
+		var hopMu sync.Mutex
+		hopResponded := false
 		lastPermitted := failover.MaxAttempts > 0 && attempt >= failover.MaxAttempts
 		if moreCandidates() && !lastPermitted && failover.PerHopTimeout > 0 {
 			// Armed only while a fallback remains: the last candidate answers
@@ -307,11 +313,18 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 			// canceled with WaitAnswerForceCancelErr, its documented escape
 			// hatch for exactly this abandon-the-transaction case.
 			silenceTimer = time.AfterFunc(failover.PerHopTimeout, func() {
-				hopCancel(sipgo.WaitAnswerForceCancelErr)
+				hopMu.Lock()
+				defer hopMu.Unlock()
+				if !hopResponded {
+					hopCancel(sipgo.WaitAnswerForceCancelErr)
+				}
 			})
 		}
 		hopStart := len(responses)
 		dlg, err := s.dialOnceFn(hopCtx, target, cand.dest, from, rtpAddr, peerCodecs, dialOpts, func(code int, reason string) {
+			hopMu.Lock()
+			hopResponded = true
+			hopMu.Unlock()
 			if silenceTimer != nil {
 				silenceTimer.Stop()
 			}

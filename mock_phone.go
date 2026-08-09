@@ -53,6 +53,9 @@ func (p *MockPhone) Connect(_ context.Context) error {
 func (p *MockPhone) Prepare(_ context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.state == PhoneStateRegistering || p.state == PhoneStateUnregistering {
+		return ErrInvalidState // parity with phone.Prepare during in-flight setup
+	}
 	if p.state == PhoneStateDisconnected {
 		p.state = PhoneStatePrepared
 	}

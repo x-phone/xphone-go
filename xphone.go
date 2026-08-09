@@ -429,7 +429,16 @@ var stunMappedAddr = stun.MappedAddr
 // creation, dialog-handler wiring, server start, and transport attachment.
 // stillValid is evaluated under p.mu after the STUN round-trip — if a racing
 // Disconnect() invalidated the operation, setup aborts with ErrInvalidState.
-func (p *phone) prepareTransport(stillValid func() bool) error {
+func (p *phone) prepareTransport(ctx context.Context, stillValid func() bool) error {
+	// invalidated returns the context error when cancellation is the cause,
+	// so callers see context.Canceled/DeadlineExceeded rather than an opaque
+	// ErrInvalidState.
+	invalidated := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return ErrInvalidState
+	}
 	p.mu.Lock()
 	stunServer := p.cfg.StunServer
 	rtpAddress := p.cfg.RTPAddress
@@ -455,9 +464,9 @@ func (p *phone) prepareTransport(stillValid func() bool) error {
 
 	p.mu.Lock()
 	if !stillValid() {
-		// Disconnect() raced us while STUN was in flight; abort cleanly.
+		// Disconnect() raced us, or ctx was canceled, while STUN was in flight.
 		p.mu.Unlock()
-		return ErrInvalidState
+		return invalidated()
 	}
 	if stunIP != "" {
 		p.localIP = stunIP
@@ -488,11 +497,11 @@ func (p *phone) prepareTransport(stillValid func() bool) error {
 
 	p.mu.Lock()
 	if !stillValid() {
-		// Superseded while we were building the transport — do not clobber
-		// whatever the current attempt (or Disconnect) has established.
+		// Superseded (or ctx canceled) while we were building the transport —
+		// do not clobber whatever the current attempt has established.
 		p.mu.Unlock()
 		tr.Close()
-		return ErrInvalidState
+		return invalidated()
 	}
 	p.tr = tr
 	p.dialFn = tr.dialWithOpts // assigned only under the guard: a stale attempt must not point dialFn at its closed UA
@@ -530,7 +539,7 @@ func (p *phone) Connect(ctx context.Context) error {
 	stillValid := func() bool {
 		return ctx.Err() == nil && p.lifecycleGen == gen && p.state == PhoneStateRegistering
 	}
-	if err := p.prepareTransport(stillValid); err != nil {
+	if err := p.prepareTransport(ctx, stillValid); err != nil {
 		p.teardownAfterPrepareError(gen, PhoneStateRegistering)
 		return err
 	}
@@ -600,7 +609,7 @@ func (p *phone) Prepare(ctx context.Context) error {
 
 	// ctx participates in validity: a canceled caller aborts at the next
 	// checkpoint (post-STUN, pre-attach) instead of committing a transport.
-	err := p.prepareTransport(func() bool {
+	err := p.prepareTransport(ctx, func() bool {
 		return ctx.Err() == nil && p.lifecycleGen == gen && p.preparing
 	})
 
@@ -630,6 +639,9 @@ func (p *phone) Prepare(ctx context.Context) error {
 // "transport OK, registrar said no" and can simply call Register() again.
 // Returns nil immediately when already registered.
 func (p *phone) Register(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	p.mu.Lock()
 	switch p.state {
 	case PhoneStateRegistered:
@@ -646,7 +658,7 @@ func (p *phone) Register(ctx context.Context) error {
 		stillValid := func() bool {
 			return ctx.Err() == nil && p.lifecycleGen == gen && p.state == PhoneStateRegistering
 		}
-		if err := p.prepareTransport(stillValid); err != nil {
+		if err := p.prepareTransport(ctx, stillValid); err != nil {
 			p.teardownAfterPrepareError(gen, PhoneStateRegistering)
 			return err
 		}

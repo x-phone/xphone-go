@@ -475,11 +475,6 @@ func (p *phone) prepareTransport(stillValid func() bool) error {
 		return err
 	}
 
-	// Set dialFn to use sipgo's dialog API before connecting.
-	p.mu.Lock()
-	p.dialFn = tr.dialWithOpts
-	p.mu.Unlock()
-
 	// Wire inbound INVITE, BYE, and NOTIFY handlers for sipgo path.
 	tr.mu.Lock()
 	tr.onDialogInvite = p.handleDialogInvite
@@ -500,6 +495,7 @@ func (p *phone) prepareTransport(stillValid func() bool) error {
 		return ErrInvalidState
 	}
 	p.tr = tr
+	p.dialFn = tr.dialWithOpts // assigned only under the guard: a stale attempt must not point dialFn at its closed UA
 	p.reg = p.newWiredRegistryLocked(tr)
 	p.mu.Unlock()
 
@@ -531,7 +527,9 @@ func (p *phone) Connect(ctx context.Context) error {
 	gen := p.lifecycleGen
 	p.mu.Unlock()
 
-	stillValid := func() bool { return p.lifecycleGen == gen && p.state == PhoneStateRegistering }
+	stillValid := func() bool {
+		return ctx.Err() == nil && p.lifecycleGen == gen && p.state == PhoneStateRegistering
+	}
 	if err := p.prepareTransport(stillValid); err != nil {
 		p.teardownAfterPrepareError(gen, PhoneStateRegistering)
 		return err
@@ -567,6 +565,9 @@ func (p *phone) Connect(ctx context.Context) error {
 // WithRegistrarless() outbound Dial/SendMessage work immediately. Idempotent:
 // calling it when the transport is already up is a no-op.
 func (p *phone) Prepare(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	p.mu.Lock()
 	if p.preparing {
 		// Another Prepare is in flight. Returning nil here would let the
@@ -597,7 +598,11 @@ func (p *phone) Prepare(ctx context.Context) error {
 	gen := p.lifecycleGen
 	p.mu.Unlock()
 
-	err := p.prepareTransport(func() bool { return p.lifecycleGen == gen && p.preparing })
+	// ctx participates in validity: a canceled caller aborts at the next
+	// checkpoint (post-STUN, pre-attach) instead of committing a transport.
+	err := p.prepareTransport(func() bool {
+		return ctx.Err() == nil && p.lifecycleGen == gen && p.preparing
+	})
 
 	p.mu.Lock()
 	if p.lifecycleGen != gen {
@@ -638,7 +643,9 @@ func (p *phone) Register(ctx context.Context) error {
 		p.lifecycleGen++
 		gen := p.lifecycleGen
 		p.mu.Unlock()
-		stillValid := func() bool { return p.lifecycleGen == gen && p.state == PhoneStateRegistering }
+		stillValid := func() bool {
+			return ctx.Err() == nil && p.lifecycleGen == gen && p.state == PhoneStateRegistering
+		}
 		if err := p.prepareTransport(stillValid); err != nil {
 			p.teardownAfterPrepareError(gen, PhoneStateRegistering)
 			return err

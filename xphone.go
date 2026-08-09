@@ -527,7 +527,14 @@ func (p *phone) Connect(ctx context.Context) error {
 	if err := p.runRegistration(ctx, gen); err != nil {
 		// Historical Connect semantics: registration failure tears the
 		// transport down. (Register() keeps it — that is its point.)
+		// Generation-guarded: if we were superseded, the phone belongs to
+		// the newer attempt (or Disconnect already cleaned up) — touch
+		// nothing.
 		p.mu.Lock()
+		if p.lifecycleGen != gen {
+			p.mu.Unlock()
+			return err
+		}
 		tr := p.tr
 		p.tr = nil
 		p.reg = nil
@@ -670,7 +677,8 @@ func (p *phone) Unregister(ctx context.Context) error {
 	}
 
 	p.mu.Lock()
-	if p.state == PhoneStateUnregistering {
+	completed := p.state == PhoneStateUnregistering
+	if completed {
 		// Only publish Prepared if a racing Disconnect() hasn't torn the
 		// transport down in the meantime — otherwise we would advertise a
 		// prepared phone with no transport.
@@ -678,6 +686,11 @@ func (p *phone) Unregister(ctx context.Context) error {
 	}
 	p.mu.Unlock()
 
+	if !completed {
+		// A racing Disconnect() owns the teardown — it already fired the
+		// OnUnregistered callbacks; firing them again would double-notify.
+		return nil
+	}
 	p.logger.Info("phone unregistered, transport kept")
 	for _, fn := range unregFns {
 		go fn()

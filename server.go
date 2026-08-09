@@ -80,6 +80,11 @@ type server struct {
 	onCallDTMFFns  []func(Call, string)
 	onErrorFns     []func(error)
 	onOptionsFn    func() int
+
+	// dialOnceFn sends a single INVITE to a single target.
+	// Production: s.dialOnce, set in newServer.
+	// Tests: stubbed so the failover loop in Dial is testable without a network.
+	dialOnceFn func(ctx context.Context, target string, from string, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(code int, reason string)) (dialog, error)
 }
 
 // NewServer creates a new Server with the given configuration.
@@ -99,7 +104,7 @@ func newServer(cfg ServerConfig) *server {
 			logger.Warn("xphone: PeerConfig.RTPAddress ignored, not an IPv4 literal", "peer", peer.Name, "value", peer.RTPAddress)
 		}
 	}
-	return &server{
+	s := &server{
 		cfg:           cfg,
 		logger:        logger,
 		codecPrefs:    codecPrefsToInts(cfg.CodecPrefs),
@@ -108,6 +113,8 @@ func newServer(cfg ServerConfig) *server {
 		calls:         make(map[string]*call),
 		callCreatedAt: make(map[string]time.Time),
 	}
+	s.dialOnceFn = s.dialOnce
+	return s
 }
 
 // Listen starts the SIP listener and blocks until ctx is cancelled or
@@ -224,8 +231,19 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 	}
 	defer dialCancel()
 
-	peerAddr := s.resolvePeerAddr(peerCfg)
-	target := fmt.Sprintf("sip:%s@%s", to, peerAddr)
+	candidates := s.peerDialCandidates(peerCfg)
+	if len(candidates) == 0 {
+		// No usable host at all — preserve the historical single-shot path
+		// (and its error) rather than inventing a new failure mode.
+		candidates = []string{s.resolvePeerAddr(peerCfg)}
+	}
+	failover := s.cfg.OutboundFailover
+	if failover.Disabled {
+		candidates = candidates[:1]
+	}
+	if failover.MaxAttempts > 0 && failover.MaxAttempts < len(candidates) {
+		candidates = candidates[:failover.MaxAttempts]
+	}
 
 	// Resolve per-peer RTP address and codecs.
 	rtpAddr := s.resolveRTPAddressForPeer(peerCfg)
@@ -234,18 +252,57 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 		peerCodecs = codecPrefsToInts(peerCfg.Codecs)
 	}
 
-	s.logger.Info("server dialing", "peer", peer, "to", to, "from", from, "target", target)
-
 	var responses []sipResponseEntry
+	var lastErr error
+	for i, addr := range candidates {
+		target := fmt.Sprintf("sip:%s@%s", to, addr)
+		s.logger.Info("server dialing", "peer", peer, "to", to, "from", from,
+			"target", target, "attempt", i+1, "candidates", len(candidates))
 
-	dlg, err := s.dialOnce(dialCtx, target, from, rtpAddr, peerCodecs, dialOpts, func(code int, reason string) {
-		responses = append(responses, sipResponseEntry{code, reason})
-	})
-	if err != nil {
-		return nil, err
+		// Per-hop silence guard: only armed when there is a fallback to go to.
+		// The first SIP response of any kind (even 100 Trying) disarms it —
+		// a responsive hop is never cut off mid-ring.
+		hopCtx, hopCancel := context.WithCancel(dialCtx)
+		// Deferred (not called inline on success): the established dialog's
+		// wait context descends from hopCtx, and today it lives exactly until
+		// Dial returns (dialCancel is deferred). The per-hop defer preserves
+		// that lifetime; the explicit hopCancel below releases failed hops
+		// early. Candidate lists are tiny, so stacked defers are fine.
+		defer hopCancel()
+		var silenceTimer *time.Timer
+		if len(candidates) > 1 && failover.PerHopTimeout > 0 {
+			silenceTimer = time.AfterFunc(failover.PerHopTimeout, hopCancel)
+		}
+		hopStart := len(responses)
+		dlg, err := s.dialOnceFn(hopCtx, target, from, rtpAddr, peerCodecs, dialOpts, func(code int, reason string) {
+			if silenceTimer != nil {
+				silenceTimer.Stop()
+			}
+			responses = append(responses, sipResponseEntry{code, reason})
+		})
+		if silenceTimer != nil {
+			silenceTimer.Stop()
+		}
+		if err == nil {
+			// Replay only THIS hop's responses into the call — a failed
+			// hop's 5xx must not corrupt the successful call's state.
+			return s.setupOutboundCall(dlg, responses[hopStart:], opts...)
+		}
+		hopCancel()
+		lastErr = err
+		if dialCtx.Err() != nil {
+			// Overall dial timeout or caller cancellation — not a hop failure.
+			break
+		}
+		if !retryableDialError(err) {
+			break
+		}
+		if i < len(candidates)-1 {
+			s.logger.Warn("server dial failover", "peer", peer, "failed_target", target,
+				"error", err, "responses_this_hop", len(responses)-hopStart)
+		}
 	}
-
-	return s.setupOutboundCall(dlg, responses, opts...)
+	return nil, lastErr
 }
 
 // DialURI initiates an outbound call to an arbitrary SIP URI.
@@ -835,7 +892,8 @@ func (s *server) dialOnce(ctx context.Context, target string, from string, rtpAd
 	// Build SDP offer.
 	rtpConn, err := listenRTPPort(s.cfg.RTPPortMin, s.cfg.RTPPortMax)
 	if err != nil {
-		return nil, fmt.Errorf("xphone: server allocate RTP port: %w", err)
+		// dialSetupError: local failure, no alternate peer address can fix it.
+		return nil, &dialSetupError{fmt.Errorf("xphone: server allocate RTP port: %w", err)}
 	}
 	rtpPort := rtpConn.LocalAddr().(*net.UDPAddr).Port
 	codecPT := peerCodecs
@@ -852,7 +910,8 @@ func (s *server) dialOnce(ctx context.Context, target string, from string, rtpAd
 		key, err := srtp.GenerateKeyingMaterial()
 		if err != nil {
 			rtpConn.Close()
-			return nil, fmt.Errorf("xphone: server generate SRTP key: %w", err)
+			// dialSetupError: local failure, retrying another address is futile.
+			return nil, &dialSetupError{fmt.Errorf("xphone: server generate SRTP key: %w", err)}
 		}
 		srtpLocalKey = key
 		sdpOffer = sdp.BuildOfferSRTP(rtpAddr, rtpPort, codecPT, sdp.DirSendRecv, key)

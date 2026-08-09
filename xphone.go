@@ -69,8 +69,13 @@ type phone struct {
 	state       PhoneState
 	preparing   bool               // standalone Prepare() in flight; Prepared is only published after transport attachment (#101)
 	regCancel   context.CancelFunc // cancels an in-flight initial REGISTER so Disconnect() unblocks Register/Connect (#101)
-	incomingFns []func(Call)
-	calls       map[string]*call // active calls keyed by SIP Call-ID
+	// lifecycleGen identifies the current lifecycle attempt. Every
+	// Connect/Prepare/Register start and every Disconnect bumps it; in-flight
+	// setup validates its captured value before mutating shared state, so a
+	// stale attempt can never clobber its replacement (#101).
+	lifecycleGen uint64
+	incomingFns  []func(Call)
+	calls        map[string]*call // active calls keyed by SIP Call-ID
 
 	// dialFn establishes an outbound SIP dialog and returns a dialog interface.
 	// Production: set by Connect() to use sipgo's dialog API.
@@ -279,15 +284,17 @@ func (p *phone) connectWithTransport(tr sipTransport) error {
 	}
 	p.reg = p.newWiredRegistryLocked(tr)
 	// runRegistration publishes its result only from the Registering marker
-	// (guarding against racing Disconnect); set it like every other caller.
+	// of the current lifecycle attempt; establish both like every caller.
 	p.state = PhoneStateRegistering
+	p.lifecycleGen++
+	gen := p.lifecycleGen
 	p.mu.Unlock()
 
 	// Wire up incoming INVITE and MESSAGE handling on the transport.
 	tr.OnIncoming(p.handleIncoming)
 	tr.OnMessage(p.handleMessage)
 
-	return p.runRegistration(context.Background())
+	return p.runRegistration(context.Background(), gen)
 }
 
 // newWiredRegistryLocked creates a registry wired to the phone's buffered
@@ -329,10 +336,15 @@ func (p *phone) newWiredRegistryLocked(tr sipTransport) *registry {
 // subscription manager (#101: shared by Connect, Register, and the
 // connectWithTransport test hook). ctx bounds the initial registration
 // attempt (the refresh loop runs on the registry's own lifecycle context).
-func (p *phone) runRegistration(ctx context.Context) error {
+func (p *phone) runRegistration(ctx context.Context, gen uint64) error {
 	regCtx, cancelReg := context.WithCancel(ctx)
 	defer cancelReg()
 	p.mu.Lock()
+	if p.lifecycleGen != gen {
+		// Superseded before we even started.
+		p.mu.Unlock()
+		return ErrInvalidState
+	}
 	reg := p.reg
 	tr := p.tr
 	p.regCancel = cancelReg // lets Disconnect() unblock a parked REGISTER
@@ -342,20 +354,17 @@ func (p *phone) runRegistration(ctx context.Context) error {
 	err := reg.Start(regCtx)
 
 	p.mu.Lock()
-	p.regCancel = nil
-	p.mu.Unlock()
-
-	p.mu.Lock()
-	if p.state != PhoneStateRegistering {
-		// A racing Disconnect() tore the phone down while REGISTER was in
-		// flight — don't resurrect a lifecycle state over a cleared
-		// transport. Surface the registration error if there was one.
+	if p.lifecycleGen != gen || p.state != PhoneStateRegistering {
+		// A racing Disconnect() tore the phone down — or a newer attempt
+		// owns the phone now. Either way this result is stale: don't touch
+		// state or regCancel. Surface the registration error if there was one.
 		p.mu.Unlock()
 		if err != nil {
 			return err
 		}
 		return ErrInvalidState
 	}
+	p.regCancel = nil
 	if err == nil {
 		p.state = PhoneStateRegistered
 	} else {
@@ -470,6 +479,13 @@ func (p *phone) prepareTransport(stillValid func() bool) error {
 	tr.startServer()
 
 	p.mu.Lock()
+	if !stillValid() {
+		// Superseded while we were building the transport — do not clobber
+		// whatever the current attempt (or Disconnect) has established.
+		p.mu.Unlock()
+		tr.Close()
+		return ErrInvalidState
+	}
 	p.tr = tr
 	p.reg = p.newWiredRegistryLocked(tr)
 	p.mu.Unlock()
@@ -481,13 +497,13 @@ func (p *phone) prepareTransport(stillValid func() bool) error {
 
 // teardownAfterPrepareError resets state after a failed prepareTransport,
 // but only if a racing Disconnect() hasn't already moved the state on.
-func (p *phone) teardownAfterPrepareError(inProgress PhoneState) {
+func (p *phone) teardownAfterPrepareError(gen uint64, inProgress PhoneState) {
 	p.mu.Lock()
-	if p.state == inProgress {
+	if p.lifecycleGen == gen && p.state == inProgress {
 		p.state = PhoneStateDisconnected
+		p.tr = nil
+		p.reg = nil
 	}
-	p.tr = nil
-	p.reg = nil
 	p.mu.Unlock()
 }
 
@@ -498,14 +514,17 @@ func (p *phone) Connect(ctx context.Context) error {
 		return ErrAlreadyConnected
 	}
 	p.state = PhoneStateRegistering
+	p.lifecycleGen++
+	gen := p.lifecycleGen
 	p.mu.Unlock()
 
-	if err := p.prepareTransport(func() bool { return p.state == PhoneStateRegistering }); err != nil {
-		p.teardownAfterPrepareError(PhoneStateRegistering)
+	stillValid := func() bool { return p.lifecycleGen == gen && p.state == PhoneStateRegistering }
+	if err := p.prepareTransport(stillValid); err != nil {
+		p.teardownAfterPrepareError(gen, PhoneStateRegistering)
 		return err
 	}
 
-	if err := p.runRegistration(ctx); err != nil {
+	if err := p.runRegistration(ctx, gen); err != nil {
 		// Historical Connect semantics: registration failure tears the
 		// transport down. (Register() keeps it — that is its point.)
 		p.mu.Lock()
@@ -544,32 +563,28 @@ func (p *phone) Prepare(ctx context.Context) error {
 	// The unexported preparing flag is the in-progress marker: the phone
 	// keeps reporting Disconnected until the transport is fully attached, so
 	// no gate (registrarless Dial, SendMessage) can ever observe Prepared
-	// with a half-initialized phone.
+	// with a half-initialized phone. The generation ties this attempt's
+	// mutations to itself: once superseded, it touches nothing.
 	p.preparing = true
+	p.lifecycleGen++
+	gen := p.lifecycleGen
 	p.mu.Unlock()
 
-	err := p.prepareTransport(func() bool { return p.preparing })
+	err := p.prepareTransport(func() bool { return p.lifecycleGen == gen && p.preparing })
 
 	p.mu.Lock()
-	aborted := !p.preparing // Disconnect() canceled us mid-flight
+	if p.lifecycleGen != gen {
+		// Superseded by Disconnect() (which tore down anything we attached)
+		// or by a newer attempt that owns the phone now — touch nothing.
+		p.mu.Unlock()
+		return ErrInvalidState
+	}
 	p.preparing = false
 	if err != nil {
 		p.tr = nil
 		p.reg = nil
 		p.mu.Unlock()
 		return err
-	}
-	if aborted {
-		// The cancel landed after prepareTransport's stillValid check but
-		// before we could publish: honor it — tear down and stay Disconnected.
-		tr := p.tr
-		p.tr = nil
-		p.reg = nil
-		p.mu.Unlock()
-		if tr != nil {
-			tr.Close()
-		}
-		return ErrInvalidState
 	}
 	p.state = PhoneStatePrepared // published only now, transport attached
 	p.mu.Unlock()
@@ -593,19 +608,25 @@ func (p *phone) Register(ctx context.Context) error {
 		return ErrInvalidState
 	case PhoneStateDisconnected:
 		p.state = PhoneStateRegistering
+		p.lifecycleGen++
+		gen := p.lifecycleGen
 		p.mu.Unlock()
-		if err := p.prepareTransport(func() bool { return p.state == PhoneStateRegistering }); err != nil {
-			p.teardownAfterPrepareError(PhoneStateRegistering)
+		stillValid := func() bool { return p.lifecycleGen == gen && p.state == PhoneStateRegistering }
+		if err := p.prepareTransport(stillValid); err != nil {
+			p.teardownAfterPrepareError(gen, PhoneStateRegistering)
 			return err
 		}
+		return p.runRegistration(ctx, gen)
 	default: // PhoneStatePrepared, PhoneStateRegistrationFailed
 		if p.reg == nil {
 			p.reg = p.newWiredRegistryLocked(p.tr)
 		}
 		p.state = PhoneStateRegistering
+		p.lifecycleGen++
+		gen := p.lifecycleGen
 		p.mu.Unlock()
+		return p.runRegistration(ctx, gen)
 	}
-	return p.runRegistration(ctx)
 }
 
 // Unregister sends the un-REGISTER (Expires: 0) and stops the registration
@@ -661,20 +682,28 @@ func (p *phone) Disconnect() error {
 	p.mu.Lock()
 	if p.state == PhoneStateDisconnected {
 		if p.preparing {
-			// Cancel an in-flight standalone Prepare(): its stillValid
-			// check (or the aborted re-check on its tail) will observe the
-			// cleared flag and tear down whatever it built.
+			// Cancel an in-flight standalone Prepare(): the generation bump
+			// invalidates it (it will touch nothing on its way out), and we
+			// tear down anything it already attached.
 			p.preparing = false
+			p.lifecycleGen++
+			tr := p.tr
+			p.tr = nil
+			p.reg = nil
 			p.mu.Unlock()
+			if tr != nil {
+				tr.Close()
+			}
 			return nil
 		}
 		p.mu.Unlock()
 		return ErrNotConnected
 	}
+	p.lifecycleGen++ // invalidate any in-flight lifecycle attempt
 	if p.regCancel != nil {
 		// Unblock an in-flight Register/Connect parked on a slow or silent
-		// registrar; runRegistration's still-Registering guard then keeps
-		// this Disconnected state authoritative.
+		// registrar; the generation bump keeps this Disconnected state
+		// authoritative over the stale result.
 		p.regCancel()
 		p.regCancel = nil
 	}

@@ -9,6 +9,9 @@
 ### Features
 - `ErrDTMFNotNegotiated` exported for callers that want to detect the un-negotiated RTP DTMF case explicitly.
 
+### Documentation
+- `WithDisplayName`/`DisplayName` doc comments use a neutral example device name.
+
 ## v0.6.6
 
 ### Bug fixes

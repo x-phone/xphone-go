@@ -606,12 +606,32 @@ func (c *call) Headers() map[string][]string {
 // Shared slice — callers must not modify.
 var defaultCodecPrefs = []int{8, 0, 9, 101, 111}
 
-// resolveCodecPrefs returns the call's codec prefs if set, otherwise the defaults.
+// resolveCodecPrefs returns the call's codec prefs if set, otherwise the
+// defaults. When the call's DTMF mode sends digits as RFC 4733 RTP
+// (DtmfRfc4733 or DtmfBoth), telephone-event (101) is guaranteed present in
+// the result: custom CodecPrefs that omit it would otherwise silently drop
+// telephone-event from the SDP offer while SendDTMF keeps transmitting
+// packets the far end never negotiated — "digits don't work on this one
+// carrier" hell. Answers are unaffected unless the remote offered 101, since
+// the SDP answer builders intersect with the remote offer. Explicitly
+// selecting DtmfSipInfo leaves the prefs untouched. Never mutates the
+// underlying slices.
 func (c *call) resolveCodecPrefs() []int {
+	prefs := defaultCodecPrefs
 	if len(c.codecPrefs) > 0 {
-		return c.codecPrefs
+		prefs = c.codecPrefs
 	}
-	return defaultCodecPrefs
+	if c.dtmfMode == DtmfSipInfo {
+		return prefs
+	}
+	for _, pt := range prefs {
+		if pt == DTMFPayloadType {
+			return prefs
+		}
+	}
+	out := make([]int, len(prefs), len(prefs)+1)
+	copy(out, prefs)
+	return append(out, DTMFPayloadType)
 }
 
 // remoteAddrFromSession extracts the remote RTP endpoint (IP:port) from a parsed SDP session.

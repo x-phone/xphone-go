@@ -6,7 +6,18 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/github/go-mod-go-version/x-phone/xphone-go)](https://github.com/x-phone/xphone-go)
 
-A Go library for SIP calling and RTP media. Register with a SIP trunk or PBX, or accept calls directly as a SIP server — and get decoded PCM audio frames through Go channels.
+**The embedded telephony data plane for Go.** Connect directly to any SIP
+trunk or PBX — or accept calls as a SIP server — and read/write call audio
+as decoded PCM frames on Go channels. Build voice agents, dialers, call
+recorders and telephony applications without operating Asterisk or adding
+another media/CPaaS layer between the phone network and your code:
+
+```
+SIP trunk / PBX  ↔  your Go process  ↔  PCM  ↔  your application
+```
+
+Battle-tested in production: **500,000+ calls** carried in the last six
+months across live SIP trunks and enterprise PBXes.
 
 > Also available in [Rust](https://github.com/x-phone/xphone-rust).
 

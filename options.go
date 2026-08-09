@@ -126,6 +126,11 @@ const (
 	CodecG722 Codec = 9
 	CodecG729 Codec = 18
 	CodecOpus Codec = 111
+	// CodecTelephoneEvent is RFC 4733 DTMF (payload type 101). Including it
+	// in CodecPrefs is optional: whenever the DTMF mode sends RTP digits
+	// (DtmfRfc4733/DtmfBoth, the default), it is added to offers
+	// automatically. Listed here so explicit prefs can position it.
+	CodecTelephoneEvent Codec = 101
 )
 
 // VideoCodec represents a video codec.

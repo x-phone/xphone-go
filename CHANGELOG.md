@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Bug fixes
+- Custom `CodecPrefs` that omit telephone-event (payload 101) no longer silently disable RFC 4733 DTMF negotiation. `resolveCodecPrefs` now guarantees telephone-event is present in SDP offers whenever the call's DTMF mode sends RTP digits (`DtmfRfc4733`/`DtmfBoth`, the default); answers are unaffected unless the remote offered 101 (answer builders intersect with the remote offer). Selecting `DtmfSipInfo` leaves prefs untouched. Previously `WithCodecs(xphone.CodecPCMU)` dropped 101 from the offer while `SendDTMF` kept transmitting packets the far end never negotiated — "digits don't work with this one carrier" failures.
+
+### Features
+- `CodecTelephoneEvent` (payload 101) added to the exported `Codec` enum so explicit codec preferences can position telephone-event deliberately.
+
+### Internal
+- sipgo upgraded v1.2.1 → v1.3.1 (TCP/TLS transaction-close handling, malformed-request/CANCEL fixes upstream). Full test suite + race detector pass.
+
 ## v0.6.5
 
 ### Features

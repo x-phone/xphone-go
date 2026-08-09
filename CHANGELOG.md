@@ -10,6 +10,8 @@
 
 ### Internal
 - sipgo upgraded v1.2.1 → v1.3.1 (TCP/TLS transaction-close handling, malformed-request/CANCEL fixes upstream). Full test suite + race detector pass.
+### Documentation
+- README: "Capabilities at a glance" matrix and a "B2BUA building blocks" section documenting the production leg-control APIs (`SendReInvite`, `SuspendMediaTimeout`/`RestoreMediaTimeout`, per-call `SetDtmfMode`) that previously existed only in the changelog, including the interface-assertion pattern for reaching them pre-1.0.
 
 ## v0.6.5
 

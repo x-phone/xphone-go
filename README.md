@@ -23,13 +23,28 @@ months across live SIP trunks and enterprise PBXes.
 
 ## Table of Contents
 
-- [Status](#status--beta) | [Scope and Limitations](#scope-and-limitations) | [Tested Against](#tested-against) | [Use Cases](#use-cases)
+- [Capabilities at a Glance](#capabilities-at-a-glance) | [Status](#status--beta) | [Scope and Limitations](#scope-and-limitations) | [Tested Against](#tested-against) | [Use Cases](#use-cases)
 - [Quick Start](#quick-start) | [Connection Modes](#connection-modes) | [Working with Audio](#working-with-audio)
-- [Features](#features) | [Call States](#call-states) | [Call Control](#call-control) | [Media Pipeline](#media-pipeline)
+- [Features](#features) | [B2BUA Building Blocks](#b2bua-building-blocks) | [Call States](#call-states) | [Call Control](#call-control) | [Media Pipeline](#media-pipeline)
 - [Configuration](#configuration) | [RTP Port Range](#rtp-port-range) | [NAT Traversal](#nat-traversal) | [Opus Codec](#opus-codec)
 - [Testing](#testing) | [Example App](#example-app) | [Logging](#logging) | [Stack](#stack) | [Roadmap](#roadmap)
 
 ---
+
+## Capabilities at a glance
+
+| Area | Highlights | Status |
+|---|---|---|
+| **Calling** | register or serve, dial/answer, hold/resume, blind + attended transfer (REFER/Replaces), early media, session timers, 302 redirects | stable |
+| **Audio** | decoded PCM via Go channels, paced writer for bursty TTS, atomic source swap, jitter buffer | stable |
+| **Codecs** | PCMU/PCMA/G.722 built-in; Opus + G.729 via CGO tags | stable |
+| **DTMF** | RFC 4733 telephone-event + SIP INFO, per-call mode override | stable |
+| **Security** | SRTP/SRTCP (SDES), replay protection, key zeroization | stable |
+| **Network** | UDP/TCP/TLS signaling, STUN, TURN, ICE-Lite, RTCP reports, rport NAT | stable |
+| **B2BUA building blocks** | media redirect via re-INVITE, media-timeout suspend/restore, per-leg DTMF modes → [details](#b2bua-building-blocks) | production-proven, pre-1.0 API |
+| **Video** | H.264/VP8, mid-call upgrade, PLI/FIR keyframes | newer, less mileage |
+| **Messaging & presence** | SIP MESSAGE, SUBSCRIBE/NOTIFY, MWI, BLF, presence | newer, less mileage |
+| **Testing** | MockPhone/MockCall, [fakepbx](https://github.com/x-phone/fakepbx) in-process SIP server | stable |
 
 ## Status — Beta
 
@@ -375,6 +390,46 @@ func pcmToFloat32(frame []int16) []float32 {
 - MockPhone and MockCall — full interface mocks for unit testing
 
 ---
+
+## B2BUA building blocks
+
+An AI agent that answers one leg and dials another — bridging a caller to a
+human, or sitting between a customer and a PBX — is a B2BUA, and several
+production-driven APIs exist for exactly that:
+
+- **`SendReInvite(sdpOffer []byte) error`** — re-INVITE a leg with
+  caller-supplied SDP, e.g. pointing its media at the *other* leg's RTP
+  endpoint so the two talk directly while your process keeps signaling
+  control.
+- **`SuspendMediaTimeout()` / `RestoreMediaTimeout()`** — park the
+  RTP-inactivity watchdog while media is intentionally redirected away, and
+  restore it when media returns.
+- **`SetDtmfMode(mode DtmfMode)`** — per-leg DTMF override, for bridges
+  where one side speaks RFC 4733 and the other only understands SIP INFO.
+- Plus the general-purpose pieces above: attended transfer (REFER with
+  Replaces), `ReplaceAudioWriter` for hold music, `Server.DialURI` for
+  arbitrary targets, and per-call `Headers()` for correlation.
+
+These live on the concrete call (not yet the `Call` interface — an API
+decomposition is planned before 1.0), so reach them through an interface
+assertion:
+
+```go
+type legControl interface {
+    SendReInvite(sdpOffer []byte) error
+    SuspendMediaTimeout()
+    RestoreMediaTimeout()
+    SetDtmfMode(mode xphone.DtmfMode)
+}
+
+if leg, ok := call.(legControl); ok {
+    leg.SuspendMediaTimeout()
+    if err := leg.SendReInvite(otherLegSDP); err != nil { /* ... */ }
+}
+```
+
+See the [CHANGELOG](CHANGELOG.md) (v0.6.4–v0.6.5) for the full semantics
+and known limitations of each.
 
 ## Call States
 

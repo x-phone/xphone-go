@@ -100,11 +100,30 @@ func TestPeerDialCandidates_MixedLiteralAndHostnameDedupsAcross(t *testing.T) {
 	s := newServer(ServerConfig{})
 	p := &PeerConfig{Host: "10.0.0.1", Port: 5060, Hosts: []string{"trunk.example.com"}}
 	got := drainCandidates(t, s, p)
-	// The 10.0.0.1 wire target appears once even though the hostname also
-	// resolves to it; the hostname's second A record keeps the domain URI.
+	// The literal 10.0.0.1 and the hostname's A record for the same IP are
+	// BOTH kept: their Request-URIs differ (IP vs domain), and a domain URI
+	// can route to a different virtual host on the same wire address.
 	assert.Equal(t, []dialCandidate{
 		{uriHost: "10.0.0.1:5060"},
+		{uriHost: "trunk.example.com:5060", dest: "10.0.0.1:5060"},
 		{uriHost: "trunk.example.com:5060", dest: "10.0.0.9:5060"},
+	}, got)
+}
+
+func TestPeerDialCandidates_TwoDomainsSameIPBothKept(t *testing.T) {
+	// codex-review regression: two SIP domains behind the same load-balancer
+	// IP are different virtual hosts — after primary.example 503s, the
+	// backup.example URI must still get its attempt.
+	stubLookup(t, map[string][]string{
+		"primary.example.com": {"198.51.100.5"},
+		"backup.example.com":  {"198.51.100.5"},
+	})
+	s := newServer(ServerConfig{})
+	p := &PeerConfig{Host: "primary.example.com", Port: 5060, Hosts: []string{"backup.example.com"}}
+	got := drainCandidates(t, s, p)
+	assert.Equal(t, []dialCandidate{
+		{uriHost: "primary.example.com:5060", dest: "198.51.100.5:5060"},
+		{uriHost: "backup.example.com:5060", dest: "198.51.100.5:5060"},
 	}, got)
 }
 

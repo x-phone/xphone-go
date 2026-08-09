@@ -48,13 +48,13 @@ type dialCandidate struct {
 // varies per A record. A hostname that fails to resolve, or resolves to no
 // IPv4, yields one candidate with no destination override so sipgo's own
 // resolution can still try it — matching prior behavior. Candidates are
-// deduplicated on the effective wire address (dest when set, else uriHost):
-// an IP listed literally and reached again via a hostname's A record is the
-// same wire target.
+// deduplicated on the (Request-URI, wire address) pair: identical pairs are
+// pointless repeats, but the same IP reached under two different SIP domains
+// is two virtual hosts and both are tried.
 type dialCandidateIter struct {
 	entries  []hostPortEntry // config entries not yet resolved/emitted
 	queue    []dialCandidate // expanded candidates awaiting emission
-	seenWire map[string]bool
+	seenPair map[string]bool
 }
 
 type hostPortEntry struct{ host, port string }
@@ -62,7 +62,7 @@ type hostPortEntry struct{ host, port string }
 func (s *server) newDialCandidateIter(p *PeerConfig) *dialCandidateIter {
 	defaultPort := fmt.Sprintf("%d", p.Port)
 	seenRaw := make(map[string]bool)
-	it := &dialCandidateIter{seenWire: make(map[string]bool)}
+	it := &dialCandidateIter{seenPair: make(map[string]bool)}
 	add := func(h string) {
 		if h == "" || seenRaw[h] {
 			return
@@ -86,14 +86,14 @@ func (s *server) newDialCandidateIter(p *PeerConfig) *dialCandidateIter {
 	return it
 }
 
-// push queues a candidate unless its wire address was already used.
+// push queues a candidate unless the same (Request-URI, wire address) pair
+// was already produced. The URI is part of the key deliberately: two SIP
+// domains resolving to the same load-balancer IP are different virtual
+// hosts, and each deserves its own attempt.
 func (it *dialCandidateIter) push(c dialCandidate) {
-	wire := c.dest
-	if wire == "" {
-		wire = c.uriHost
-	}
-	if !it.seenWire[wire] {
-		it.seenWire[wire] = true
+	key := c.uriHost + "|" + c.dest
+	if !it.seenPair[key] {
+		it.seenPair[key] = true
 		it.queue = append(it.queue, c)
 	}
 }
@@ -137,10 +137,11 @@ func (it *dialCandidateIter) next(ctx context.Context) (dialCandidate, bool) {
 }
 
 // hasMore reports whether another candidate may follow. It can overestimate —
-// a pending hostname might resolve entirely to already-dialed wire addresses,
-// in which case a hop abandoned by the silence guard turns out to have been
-// the last one. That corner trades against never letting a fallback's dead
-// DNS block the primary; the guard's error is still surfaced to the caller.
+// a pending hostname might resolve entirely to already-produced (URI, dest)
+// pairs, in which case a hop abandoned by the silence guard turns out to have
+// been the last one. That corner trades against never letting a fallback's
+// dead DNS block the primary; the guard's error is still surfaced to the
+// caller.
 func (it *dialCandidateIter) hasMore() bool {
 	return len(it.queue) > 0 || len(it.entries) > 0
 }

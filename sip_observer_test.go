@@ -1,0 +1,180 @@
+package xphone
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/emiago/sipgo/sip"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// buildRequest assembles a SIP request with common headers for observer tests.
+func buildRequest(method sip.RequestMethod) *sip.Request {
+	req := sip.NewRequest(method, sip.Uri{Scheme: "sip", User: "bob", Host: "example.com"})
+	req.AppendHeader(&sip.FromHeader{Address: sip.Uri{Scheme: "sip", User: "alice", Host: "example.com"}, Params: sip.NewParams()})
+	req.AppendHeader(&sip.ToHeader{Address: sip.Uri{Scheme: "sip", User: "bob", Host: "example.com"}, Params: sip.NewParams()})
+	callID := sip.CallIDHeader("call-abc-123")
+	req.AppendHeader(&callID)
+	req.AppendHeader(&sip.CSeqHeader{SeqNo: 2, MethodName: method})
+	req.SetTransport("UDP")
+	return req
+}
+
+func TestBuildSIPMessage_Request(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	req := buildRequest(sip.INVITE)
+
+	m := buildSIPMessage(req, SIPOutbound, now)
+
+	assert.Equal(t, SIPOutbound, m.Direction)
+	assert.False(t, m.IsResponse)
+	assert.Equal(t, "INVITE", m.Method)
+	assert.Equal(t, 0, m.StatusCode)
+	assert.Equal(t, "", m.Reason)
+	assert.Equal(t, "call-abc-123", m.CallID)
+	assert.Equal(t, "2 INVITE", m.CSeq)
+	assert.Equal(t, "UDP", m.Transport)
+	assert.Equal(t, now, m.Timestamp)
+	assert.Contains(t, m.From, "alice")
+	assert.Contains(t, m.To, "bob")
+}
+
+func TestBuildSIPMessage_Response(t *testing.T) {
+	req := buildRequest(sip.INVITE)
+	res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+
+	m := buildSIPMessage(res, SIPInbound, time.Now())
+
+	assert.Equal(t, SIPInbound, m.Direction)
+	assert.True(t, m.IsResponse)
+	assert.Equal(t, 200, m.StatusCode)
+	assert.Equal(t, "OK", m.Reason)
+	// A response reports the method of its CSeq, not a request method.
+	assert.Equal(t, "INVITE", m.Method)
+	assert.Equal(t, "call-abc-123", m.CallID)
+}
+
+func TestBuildSIPMessage_RedactsCredentials(t *testing.T) {
+	req := buildRequest(sip.REGISTER)
+	// The digest response= in these headers is the secret we must never surface.
+	req.AppendHeader(sip.NewHeader("Authorization",
+		`Digest username="alice", realm="ex", nonce="abc", response="DEADBEEFcafe1234", uri="sip:ex"`))
+	req.AppendHeader(sip.NewHeader("Proxy-Authorization",
+		`Digest username="alice", response="SECRETdigest99"`))
+	// A challenge header is not a secret and must be preserved.
+	req.AppendHeader(sip.NewHeader("WWW-Authenticate", `Digest realm="ex", nonce="xyz"`))
+
+	m := buildSIPMessage(req, SIPInbound, time.Now())
+
+	assert.Equal(t, redactedValue, m.Headers["Authorization"])
+	assert.Equal(t, redactedValue, m.Headers["Proxy-Authorization"])
+	assert.NotContains(t, m.Headers["Authorization"], "DEADBEEF")
+	assert.NotContains(t, m.Headers["Proxy-Authorization"], "SECRETdigest99")
+	// Challenge (nonce/realm) left intact.
+	assert.Contains(t, m.Headers["WWW-Authenticate"], "nonce")
+}
+
+func TestBuildSIPMessage_RedactionIsCaseInsensitive(t *testing.T) {
+	req := buildRequest(sip.REGISTER)
+	req.AppendHeader(sip.NewHeader("AUTHORIZATION", `Digest response="topsecret"`))
+
+	m := buildSIPMessage(req, SIPInbound, time.Now())
+
+	assert.Equal(t, redactedValue, m.Headers["AUTHORIZATION"])
+	assert.NotContains(t, m.Headers["AUTHORIZATION"], "topsecret")
+}
+
+func TestBuildSIPMessage_JoinsRepeatedHeaders(t *testing.T) {
+	req := buildRequest(sip.INVITE)
+	req.AppendHeader(sip.NewHeader("Via", "SIP/2.0/UDP a.example.com"))
+	req.AppendHeader(sip.NewHeader("Via", "SIP/2.0/UDP b.example.com"))
+
+	m := buildSIPMessage(req, SIPInbound, time.Now())
+
+	assert.Contains(t, m.Headers["Via"], "a.example.com")
+	assert.Contains(t, m.Headers["Via"], "b.example.com")
+	assert.Contains(t, m.Headers["Via"], ", ")
+}
+
+func TestEmitSIP_NilObserverAndNilMessage(t *testing.T) {
+	// Neither a nil observer nor a nil message may panic.
+	assert.NotPanics(t, func() { emitSIP(nil, buildRequest(sip.INVITE), SIPInbound) })
+	assert.NotPanics(t, func() {
+		emitSIP(func(SIPMessage) { t.Fatal("observer must not fire for nil message") }, nil, SIPInbound)
+	})
+}
+
+func TestEmitSIP_DeliversWithObserverClock(t *testing.T) {
+	pinned := time.Unix(1_234_567_890, 0).UTC()
+	orig := observerNow
+	observerNow = func() time.Time { return pinned }
+	defer func() { observerNow = orig }()
+
+	var got SIPMessage
+	emitSIP(func(m SIPMessage) { got = m }, buildRequest(sip.BYE), SIPOutbound)
+
+	assert.Equal(t, "BYE", got.Method)
+	assert.Equal(t, SIPOutbound, got.Direction)
+	assert.Equal(t, pinned, got.Timestamp)
+}
+
+// --- outbound emission through dialogBase send helpers ---
+
+func TestDialogObserve_OutboundInDialogRequests(t *testing.T) {
+	var seen []SIPMessage
+	mock := &observerMockSession{}
+	d := &dialogBase{
+		sess:     mock,
+		invite:   buildRequest(sip.INVITE),
+		response: sip.NewResponseFromRequest(buildRequest(sip.INVITE), 200, "OK", nil),
+		observer: func(m SIPMessage) { seen = append(seen, m) },
+	}
+
+	require.NoError(t, d.SendRefer("sip:carol@example.com"))
+	require.NoError(t, d.SendInfoDTMF("5", 200))
+
+	// REFER and INFO, both outbound.
+	require.Len(t, seen, 2)
+	assert.Equal(t, "REFER", seen[0].Method)
+	assert.Equal(t, SIPOutbound, seen[0].Direction)
+	assert.Equal(t, "INFO", seen[1].Method)
+	assert.Equal(t, SIPOutbound, seen[1].Direction)
+}
+
+func TestDialogObserve_ReInviteEmitsInviteThenAck(t *testing.T) {
+	var methods []string
+	mock := &observerMockSession{ok: true}
+	d := &dialogBase{
+		sess:     mock,
+		invite:   buildRequest(sip.INVITE),
+		response: sip.NewResponseFromRequest(buildRequest(sip.INVITE), 200, "OK", nil),
+		observer: func(m SIPMessage) { methods = append(methods, m.Method) },
+	}
+
+	require.NoError(t, d.SendReInvite([]byte("v=0\r\n")))
+
+	assert.Equal(t, []string{"INVITE", "ACK"}, methods)
+}
+
+func TestDialogObserve_NilObserverNoPanic(t *testing.T) {
+	d := &dialogBase{
+		sess:   &observerMockSession{},
+		invite: buildRequest(sip.INVITE),
+	}
+	assert.NotPanics(t, func() { _ = d.SendRefer("sip:x@y") })
+}
+
+// observerMockSession is a dialogSession that records nothing but returns a
+// controllable success/failure, so the send helpers reach their observe calls.
+type observerMockSession struct {
+	ok bool
+}
+
+func (m *observerMockSession) Bye(ctx context.Context) error { return nil }
+func (m *observerMockSession) Do(ctx context.Context, req *sip.Request) (*sip.Response, error) {
+	// re-INVITE requires a 2xx to proceed to the ACK; other requests ignore it.
+	return sip.NewResponseFromRequest(req, 200, "OK", nil), nil
+}
+func (m *observerMockSession) WriteRequest(req *sip.Request) error { return nil }

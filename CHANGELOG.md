@@ -8,6 +8,7 @@
 
 ### Features
 - `ErrDTMFNotNegotiated` exported for callers that want to detect the un-negotiated RTP DTMF case explicitly.
+- `WithSIPObserver` (and the `SIPObserver` field on `Config`/`ServerConfig`) registers a callback that receives a structured, redacted copy of SIP messages the stack sends and receives — for debugging panels, monitoring dashboards, and signaling visibility (#93). Inbound is captured in full at the transport layer; outbound covers the in-dialog requests xphone-go constructs (re-INVITE, ACK, REFER, INFO/DTMF). Digest credentials (`Authorization`/`Proxy-Authorization`) are masked before delivery. The callback runs synchronously on the transport goroutine and must not block.
 
 ### Documentation
 - `WithDisplayName`/`DisplayName` doc comments use a neutral example device name.

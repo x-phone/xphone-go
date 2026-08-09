@@ -35,6 +35,12 @@ type dialogBase struct {
 	invite   *sip.Request  // immutable after construction
 	response *sip.Response // immutable after construction
 	onNotify func(int)
+	observer SIPObserver // optional; receives outbound in-dialog requests we build
+}
+
+// observe delivers an outbound message we constructed to the observer, if any.
+func (d *dialogBase) observe(msg sip.Message) {
+	emitSIP(d.observer, msg, SIPOutbound)
 }
 
 // remoteTarget returns the URI for in-dialog requests (re-INVITE, REFER, INFO).
@@ -68,6 +74,7 @@ func (d *dialogBase) SendReInvite(sdpBody []byte) error {
 		req.AppendHeader(sip.NewHeader("Content-Type", contentTypeSDP))
 	}
 	req.SetBody(sdpBody)
+	d.observe(req)
 	res, err := d.sess.Do(ctx, req)
 	if err != nil {
 		return err
@@ -79,6 +86,7 @@ func (d *dialogBase) SendReInvite(sdpBody []byte) error {
 	// Do() terminates the client transaction on return, but the ACK for a
 	// 2xx INVITE is sent directly by the TU, not via a transaction.
 	ack := sip.NewRequest(sip.ACK, d.remoteTarget())
+	d.observe(ack)
 	if err := d.sess.WriteRequest(ack); err != nil {
 		return fmt.Errorf("send ACK: %w", err)
 	}
@@ -90,6 +98,7 @@ func (d *dialogBase) SendRefer(target string) error {
 	defer cancel()
 	req := sip.NewRequest(sip.REFER, d.remoteTarget())
 	req.AppendHeader(sip.NewHeader("Refer-To", target))
+	d.observe(req)
 	_, err := d.sess.Do(ctx, req)
 	return err
 }
@@ -104,6 +113,7 @@ func (d *dialogBase) SendInfoDTMF(digit string, duration int) error {
 	req := sip.NewRequest(sip.INFO, d.remoteTarget())
 	req.AppendHeader(sip.NewHeader("Content-Type", contentTypeDTMFRelay))
 	req.SetBody([]byte(body))
+	d.observe(req)
 	_, err = d.sess.Do(ctx, req)
 	return err
 }

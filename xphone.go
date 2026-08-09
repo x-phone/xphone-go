@@ -346,6 +346,10 @@ func (p *phone) connectWithTransport(tr sipTransport) error {
 	return nil
 }
 
+// stunMappedAddr resolves the NAT-mapped address via STUN. Indirected so
+// tests can stub the network round-trip (#106).
+var stunMappedAddr = stun.MappedAddr
+
 func (p *phone) Connect(ctx context.Context) error {
 	p.mu.Lock()
 	if p.state != PhoneStateDisconnected {
@@ -353,19 +357,36 @@ func (p *phone) Connect(ctx context.Context) error {
 		return ErrAlreadyConnected
 	}
 	p.state = PhoneStateRegistering
+	stunServer := p.cfg.StunServer
+	rtpAddress := p.cfg.RTPAddress
+	fallbackIP := p.localIP
+	p.mu.Unlock()
 
 	// STUN discovery: if configured, try to discover our NAT-mapped IP.
 	// On success, override the localIP used for Contact headers and SDP.
 	// On failure, log a warning and keep the existing localIPFor() result.
 	// Skipped when a valid cfg.RTPAddress is set — explicit override wins.
-	if p.cfg.StunServer != "" && effectiveRTPAddress(p.cfg.RTPAddress) == "" {
-		ip, _, err := stun.MappedAddr(p.cfg.StunServer, stun.DefaultTimeout)
+	// Runs WITHOUT p.mu held: this is a ~1s network round-trip, and holding
+	// the lock here blocked State()/Dial()/Disconnect() for the duration (#106).
+	var stunIP string
+	if stunServer != "" && effectiveRTPAddress(rtpAddress) == "" {
+		ip, _, err := stunMappedAddr(stunServer, stun.DefaultTimeout)
 		if err != nil {
-			p.logger.Warn("STUN discovery failed, using local IP", "err", err, "fallback", p.localIP)
+			p.logger.Warn("STUN discovery failed, using local IP", "err", err, "fallback", fallbackIP)
 		} else {
 			p.logger.Info("STUN mapped address discovered", "ip", ip)
-			p.localIP = ip
+			stunIP = ip
 		}
+	}
+
+	p.mu.Lock()
+	if p.state != PhoneStateRegistering {
+		// Disconnect() raced us while STUN was in flight; abort cleanly.
+		p.mu.Unlock()
+		return ErrInvalidState
+	}
+	if stunIP != "" {
+		p.localIP = stunIP
 	}
 
 	contactIP := p.resolveContactIP()

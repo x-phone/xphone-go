@@ -72,8 +72,8 @@ func TestBuildSIPMessage_RedactsCredentials(t *testing.T) {
 	assert.Equal(t, redactedValue, m.Headers["Proxy-Authorization"])
 	assert.NotContains(t, m.Headers["Authorization"], "DEADBEEF")
 	assert.NotContains(t, m.Headers["Proxy-Authorization"], "SECRETdigest99")
-	// Challenge (nonce/realm) left intact.
-	assert.Contains(t, m.Headers["WWW-Authenticate"], "nonce")
+	// Challenge (nonce/realm) left intact. Key is canonicalized.
+	assert.Contains(t, m.Headers["Www-Authenticate"], "nonce")
 }
 
 func TestBuildSIPMessage_RedactionIsCaseInsensitive(t *testing.T) {
@@ -82,8 +82,23 @@ func TestBuildSIPMessage_RedactionIsCaseInsensitive(t *testing.T) {
 
 	m := buildSIPMessage(req, SIPInbound, time.Now())
 
-	assert.Equal(t, redactedValue, m.Headers["AUTHORIZATION"])
-	assert.NotContains(t, m.Headers["AUTHORIZATION"], "topsecret")
+	// Stored under the canonical key regardless of the wire casing.
+	assert.Equal(t, redactedValue, m.Headers["Authorization"])
+	assert.NotContains(t, m.Headers["Authorization"], "topsecret")
+}
+
+func TestBuildSIPMessage_CanonicalizesHeaderKeys(t *testing.T) {
+	req := buildRequest(sip.INVITE)
+	// A remote may send lowercased header names (RFC 3261 §7.3.1). They must
+	// still redact and be reachable under the canonical key.
+	req.AppendHeader(sip.NewHeader("authorization", `Digest response="lowersecret"`))
+	req.AppendHeader(sip.NewHeader("user-agent", "Weird/1.0"))
+
+	m := buildSIPMessage(req, SIPInbound, time.Now())
+
+	assert.Equal(t, redactedValue, m.Headers["Authorization"], "lowercased authorization must redact under canonical key")
+	assert.NotContains(t, m.Headers["Authorization"], "lowersecret")
+	assert.Equal(t, "Weird/1.0", m.Headers["User-Agent"])
 }
 
 func TestBuildSIPMessage_JoinsRepeatedHeaders(t *testing.T) {

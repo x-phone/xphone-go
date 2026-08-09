@@ -1,6 +1,7 @@
 package xphone
 
 import (
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -35,7 +36,7 @@ type SIPMessage struct {
 	CSeq       string            // CSeq (e.g. "1 INVITE")
 	Transport  string            // udp/tcp/tls/ws/wss
 	Timestamp  time.Time         // observation time
-	Headers    map[string]string // all headers, values comma-joined when repeated; credentials redacted
+	Headers    map[string]string // header keys canonicalized (RFC 3261 §7.3.1), values comma-joined when repeated; credentials redacted
 }
 
 // SIPObserver receives a structured copy of SIP messages flowing through the
@@ -50,6 +51,11 @@ type SIPMessage struct {
 // are not surfaced as outbound events; their effect is still visible through
 // the inbound responses they elicit. sipgo v1.3.1 exposes no transport-level
 // write hook, so faithful outbound capture is bounded to our own send sites.
+//
+// Outbound events reflect send attempts: the message is snapshotted after
+// sipgo has populated its dialog headers, and is delivered even if the
+// underlying transport write returns an error — a debugger wants failed
+// attempts to remain visible, not hidden.
 //
 // The observer is called synchronously on the transport/TU goroutine. It MUST
 // NOT block or panic; offload anything expensive (I/O, WebSocket fan-out) to a
@@ -114,7 +120,9 @@ func buildSIPMessage(msg sip.Message, dir SIPDirection, now time.Time) SIPMessag
 
 	if hl, ok := msg.(headerLister); ok {
 		for _, h := range hl.Headers() {
-			name := h.Name()
+			// SIP header names are case-insensitive (RFC 3261 §7.3.1);
+			// canonicalize so callers can look them up by a stable key.
+			name := textproto.CanonicalMIMEHeaderKey(h.Name())
 			val := h.Value()
 			if credentialHeaders[strings.ToLower(name)] {
 				val = redactedValue

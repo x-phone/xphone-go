@@ -67,6 +67,7 @@ type phone struct {
 	interfaceIP string // real bind interface IP — fallback for SIP Contact when cfg.NAT is set with an RTPAddress override, so rport + REGISTER keepalive can drive NAT learning.
 	codecPrefs  []int  // cached codecPrefsToInts(cfg.CodecPrefs), set at construction
 	state       PhoneState
+	preparing   bool // standalone Prepare() in flight; Prepared is only published after transport attachment (#101)
 	incomingFns []func(Call)
 	calls       map[string]*call // active calls keyed by SIP Call-ID
 
@@ -382,9 +383,9 @@ var stunMappedAddr = stun.MappedAddr
 // prepareTransport performs the network-side setup shared by Prepare(),
 // Register(), and Connect(): STUN discovery (unlocked, #106), sipgo UA
 // creation, dialog-handler wiring, server start, and transport attachment.
-// inProgress is the state the phone must still hold after the STUN round-trip
-// — if a racing Disconnect() changed it, setup aborts with ErrInvalidState.
-func (p *phone) prepareTransport(inProgress PhoneState) error {
+// stillValid is evaluated under p.mu after the STUN round-trip — if a racing
+// Disconnect() invalidated the operation, setup aborts with ErrInvalidState.
+func (p *phone) prepareTransport(stillValid func() bool) error {
 	p.mu.Lock()
 	stunServer := p.cfg.StunServer
 	rtpAddress := p.cfg.RTPAddress
@@ -409,7 +410,7 @@ func (p *phone) prepareTransport(inProgress PhoneState) error {
 	}
 
 	p.mu.Lock()
-	if p.state != inProgress {
+	if !stillValid() {
 		// Disconnect() raced us while STUN was in flight; abort cleanly.
 		p.mu.Unlock()
 		return ErrInvalidState
@@ -477,7 +478,7 @@ func (p *phone) Connect(ctx context.Context) error {
 	p.state = PhoneStateRegistering
 	p.mu.Unlock()
 
-	if err := p.prepareTransport(PhoneStateRegistering); err != nil {
+	if err := p.prepareTransport(func() bool { return p.state == PhoneStateRegistering }); err != nil {
 		p.teardownAfterPrepareError(PhoneStateRegistering)
 		return err
 	}
@@ -506,20 +507,30 @@ func (p *phone) Connect(ctx context.Context) error {
 // calling it when the transport is already up is a no-op.
 func (p *phone) Prepare(ctx context.Context) error {
 	p.mu.Lock()
-	if p.state != PhoneStateDisconnected {
-		// Transport already up (or being set up) — idempotent no-op.
+	if p.state != PhoneStateDisconnected || p.preparing {
+		// Transport already up (or setup in flight) — idempotent no-op.
 		p.mu.Unlock()
 		return nil
 	}
-	// PhoneStatePrepared doubles as the in-progress marker for the STUN race
-	// check, mirroring how Connect uses PhoneStateRegistering.
-	p.state = PhoneStatePrepared
+	// The unexported preparing flag is the in-progress marker: the phone
+	// keeps reporting Disconnected until the transport is fully attached, so
+	// no gate (registrarless Dial, SendMessage) can ever observe Prepared
+	// with a half-initialized phone.
+	p.preparing = true
 	p.mu.Unlock()
 
-	if err := p.prepareTransport(PhoneStatePrepared); err != nil {
-		p.teardownAfterPrepareError(PhoneStatePrepared)
+	err := p.prepareTransport(func() bool { return p.preparing })
+
+	p.mu.Lock()
+	p.preparing = false
+	if err != nil {
+		p.tr = nil
+		p.reg = nil
+		p.mu.Unlock()
 		return err
 	}
+	p.state = PhoneStatePrepared // published only now, transport attached
+	p.mu.Unlock()
 	p.logger.Info("phone prepared")
 	return nil
 }
@@ -541,7 +552,7 @@ func (p *phone) Register(ctx context.Context) error {
 	case PhoneStateDisconnected:
 		p.state = PhoneStateRegistering
 		p.mu.Unlock()
-		if err := p.prepareTransport(PhoneStateRegistering); err != nil {
+		if err := p.prepareTransport(func() bool { return p.state == PhoneStateRegistering }); err != nil {
 			p.teardownAfterPrepareError(PhoneStateRegistering)
 			return err
 		}
@@ -589,7 +600,12 @@ func (p *phone) Unregister(ctx context.Context) error {
 	}
 
 	p.mu.Lock()
-	p.state = PhoneStatePrepared
+	if p.state == PhoneStateUnregistering {
+		// Only publish Prepared if a racing Disconnect() hasn't torn the
+		// transport down in the meantime — otherwise we would advertise a
+		// prepared phone with no transport.
+		p.state = PhoneStatePrepared
+	}
 	p.mu.Unlock()
 
 	p.logger.Info("phone unregistered, transport kept")
@@ -1117,9 +1133,13 @@ func (p *phone) SendMessageWithType(ctx context.Context, target string, contentT
 	if tr == nil {
 		return ErrNotConnected
 	}
-	// From Prepared/RegistrationFailed the transport is up but there is no
-	// registration; sending requires the explicit registrarless opt-in (#101).
-	if (state == PhoneStatePrepared || state == PhoneStateRegistrationFailed) && !registrarless {
+	// Positive gate, mirroring Dial (#101): Registered, or — with the
+	// explicit registrarless opt-in — a prepared-but-unregistered transport.
+	// Transitional states (Registering/Unregistering) are rejected.
+	switch {
+	case state == PhoneStateRegistered:
+	case registrarless && (state == PhoneStatePrepared || state == PhoneStateRegistrationFailed):
+	default:
 		return ErrNotRegistered
 	}
 	code, reason, err := tr.SendMessage(ctx, target, contentType, body, nil)

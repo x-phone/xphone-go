@@ -209,6 +209,66 @@ func TestConnect_StillEqualsPrepareAndRegister(t *testing.T) {
 	p.mu.Unlock()
 }
 
+func TestPrepare_InFlightIsInvisibleToGates(t *testing.T) {
+	// codex-review regression: Prepared must only be published AFTER the
+	// transport is attached. While Prepare is parked inside STUN, the phone
+	// reports Disconnected and registrarless Dial is rejected — never a
+	// nil-dialFn panic.
+	orig := stunMappedAddr
+	defer func() { stunMappedAddr = orig }()
+	stunEntered := make(chan struct{})
+	releaseStun := make(chan struct{})
+	stunMappedAddr = func(server string, timeout time.Duration) (string, int, error) {
+		close(stunEntered)
+		<-releaseStun
+		return "", 0, context.DeadlineExceeded // fall back to local IP
+	}
+
+	pbx := fakepbx.NewFakePBX(t)
+	cfg := pbxConfig(t, pbx)
+	cfg.Password = ""
+	cfg.Registrarless = true
+	cfg.StunServer = "stun.example.com:3478"
+	applyDefaults(&cfg)
+	p := newPhone(cfg)
+	t.Cleanup(func() { p.Disconnect() })
+
+	prepDone := make(chan error, 1)
+	go func() { prepDone <- p.Prepare(context.Background()) }()
+	<-stunEntered // Prepare is parked inside STUN
+
+	assert.Equal(t, PhoneStateDisconnected, p.State(),
+		"in-flight Prepare must not publish Prepared")
+	_, err := p.Dial(context.Background(), "9999")
+	assert.ErrorIs(t, err, ErrNotRegistered,
+		"registrarless Dial mid-Prepare must be rejected, not panic")
+	// Concurrent Prepare is a no-op, not a second transport setup.
+	require.NoError(t, p.Prepare(context.Background()))
+
+	close(releaseStun)
+	require.NoError(t, <-prepDone)
+	assert.Equal(t, PhoneStatePrepared, p.State())
+}
+
+func TestSendMessage_RejectedDuringTransitionalStates(t *testing.T) {
+	// codex-review regression: with the transport attached but the state in
+	// Registering/Unregistering, MESSAGE must be rejected without the
+	// registrarless opt-in.
+	pbx := fakepbx.NewFakePBX(t, fakepbx.WithAuth("1001", "test"))
+	p := preparedPhone(t, pbxConfig(t, pbx))
+
+	for _, transitional := range []PhoneState{PhoneStateRegistering, PhoneStateUnregistering} {
+		p.mu.Lock()
+		p.state = transitional
+		p.mu.Unlock()
+		err := p.SendMessage(context.Background(), "9999", "hello")
+		assert.ErrorIs(t, err, ErrNotRegistered, "state=%v", transitional)
+	}
+	p.mu.Lock()
+	p.state = PhoneStatePrepared
+	p.mu.Unlock()
+}
+
 // --- MockPhone lifecycle parity ---
 
 func TestMockPhone_LifecycleSplit(t *testing.T) {

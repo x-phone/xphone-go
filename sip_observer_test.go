@@ -141,21 +141,33 @@ func TestDialogObserve_OutboundInDialogRequests(t *testing.T) {
 	assert.Equal(t, SIPOutbound, seen[0].Direction)
 	assert.Equal(t, "INFO", seen[1].Method)
 	assert.Equal(t, SIPOutbound, seen[1].Direction)
+	// The snapshot must be taken AFTER sipgo populates the dialog headers,
+	// so every observed outbound request carries the correlating Call-ID/CSeq.
+	for _, m := range seen {
+		assert.Equal(t, "dialog-call-id-xyz", m.CallID, "%s observed before dialog headers populated", m.Method)
+		assert.NotEmpty(t, m.CSeq, "%s missing CSeq", m.Method)
+	}
 }
 
 func TestDialogObserve_ReInviteEmitsInviteThenAck(t *testing.T) {
-	var methods []string
+	var seen []SIPMessage
 	mock := &observerMockSession{ok: true}
 	d := &dialogBase{
 		sess:     mock,
 		invite:   buildRequest(sip.INVITE),
 		response: sip.NewResponseFromRequest(buildRequest(sip.INVITE), 200, "OK", nil),
-		observer: func(m SIPMessage) { methods = append(methods, m.Method) },
+		observer: func(m SIPMessage) { seen = append(seen, m) },
 	}
 
 	require.NoError(t, d.SendReInvite([]byte("v=0\r\n")))
 
-	assert.Equal(t, []string{"INVITE", "ACK"}, methods)
+	require.Len(t, seen, 2)
+	assert.Equal(t, "INVITE", seen[0].Method)
+	assert.Equal(t, "ACK", seen[1].Method)
+	// Both must carry the dialog Call-ID (populated by the send, snapshotted after).
+	for _, m := range seen {
+		assert.Equal(t, "dialog-call-id-xyz", m.CallID, "%s observed before headers populated", m.Method)
+	}
 }
 
 func TestDialogObserve_NilObserverNoPanic(t *testing.T) {
@@ -166,15 +178,37 @@ func TestDialogObserve_NilObserverNoPanic(t *testing.T) {
 	assert.NotPanics(t, func() { _ = d.SendRefer("sip:x@y") })
 }
 
-// observerMockSession is a dialogSession that records nothing but returns a
-// controllable success/failure, so the send helpers reach their observe calls.
+// observerMockSession is a dialogSession that mimics sipgo's in-place header
+// population (buildReq): Do/WriteRequest stamp the dialog's From/To/Call-ID/
+// CSeq onto the passed request *before* returning. This models the real
+// library so the observer tests can prove the snapshot is taken after the
+// identifiers exist — guarding the "observed before headers populated" bug.
 type observerMockSession struct {
 	ok bool
 }
 
+func (m *observerMockSession) stampDialogHeaders(req *sip.Request) {
+	if req.From() == nil {
+		req.AppendHeader(&sip.FromHeader{Address: sip.Uri{Scheme: "sip", User: "alice", Host: "example.com"}, Params: sip.NewParams()})
+	}
+	if req.To() == nil {
+		req.AppendHeader(&sip.ToHeader{Address: sip.Uri{Scheme: "sip", User: "bob", Host: "example.com"}, Params: sip.NewParams()})
+	}
+	if req.CallID() == nil {
+		cid := sip.CallIDHeader("dialog-call-id-xyz")
+		req.AppendHeader(&cid)
+	}
+	if req.CSeq() == nil {
+		req.AppendHeader(&sip.CSeqHeader{SeqNo: 3, MethodName: req.Method})
+	}
+}
+
 func (m *observerMockSession) Bye(ctx context.Context) error { return nil }
 func (m *observerMockSession) Do(ctx context.Context, req *sip.Request) (*sip.Response, error) {
-	// re-INVITE requires a 2xx to proceed to the ACK; other requests ignore it.
+	m.stampDialogHeaders(req)
 	return sip.NewResponseFromRequest(req, 200, "OK", nil), nil
 }
-func (m *observerMockSession) WriteRequest(req *sip.Request) error { return nil }
+func (m *observerMockSession) WriteRequest(req *sip.Request) error {
+	m.stampDialogHeaders(req)
+	return nil
+}

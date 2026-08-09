@@ -74,8 +74,11 @@ func (d *dialogBase) SendReInvite(sdpBody []byte) error {
 		req.AppendHeader(sip.NewHeader("Content-Type", contentTypeSDP))
 	}
 	req.SetBody(sdpBody)
-	d.observe(req)
 	res, err := d.sess.Do(ctx, req)
+	// Observe after Do: sipgo populates the dialog headers (From/To/Call-ID/
+	// CSeq/Via) in place inside Do, so snapshotting earlier would miss the
+	// identifiers needed to correlate the message to its call.
+	d.observe(req)
 	if err != nil {
 		return err
 	}
@@ -86,9 +89,10 @@ func (d *dialogBase) SendReInvite(sdpBody []byte) error {
 	// Do() terminates the client transaction on return, but the ACK for a
 	// 2xx INVITE is sent directly by the TU, not via a transaction.
 	ack := sip.NewRequest(sip.ACK, d.remoteTarget())
-	d.observe(ack)
-	if err := d.sess.WriteRequest(ack); err != nil {
-		return fmt.Errorf("send ACK: %w", err)
+	ackErr := d.sess.WriteRequest(ack)
+	d.observe(ack) // populated in place by WriteRequest
+	if ackErr != nil {
+		return fmt.Errorf("send ACK: %w", ackErr)
 	}
 	return nil
 }
@@ -98,8 +102,8 @@ func (d *dialogBase) SendRefer(target string) error {
 	defer cancel()
 	req := sip.NewRequest(sip.REFER, d.remoteTarget())
 	req.AppendHeader(sip.NewHeader("Refer-To", target))
-	d.observe(req)
 	_, err := d.sess.Do(ctx, req)
+	d.observe(req) // populated in place by Do
 	return err
 }
 
@@ -113,8 +117,8 @@ func (d *dialogBase) SendInfoDTMF(digit string, duration int) error {
 	req := sip.NewRequest(sip.INFO, d.remoteTarget())
 	req.AppendHeader(sip.NewHeader("Content-Type", contentTypeDTMFRelay))
 	req.SetBody([]byte(body))
-	d.observe(req)
 	_, err = d.sess.Do(ctx, req)
+	d.observe(req) // populated in place by Do
 	return err
 }
 

@@ -244,8 +244,8 @@ func TestPrepare_InFlightIsInvisibleToGates(t *testing.T) {
 	_, err := p.Dial(context.Background(), "9999")
 	assert.ErrorIs(t, err, ErrNotRegistered,
 		"registrarless Dial mid-Prepare must be rejected, not panic")
-	// Concurrent Prepare is a no-op, not a second transport setup.
-	require.NoError(t, p.Prepare(context.Background()))
+	// Concurrent Prepare is rejected explicitly, not silently "successful".
+	assert.ErrorIs(t, p.Prepare(context.Background()), ErrInvalidState)
 
 	close(releaseStun)
 	require.NoError(t, <-prepDone)
@@ -334,6 +334,38 @@ func TestDisconnect_CancelsInFlightPrepare(t *testing.T) {
 	p.mu.Lock()
 	assert.Nil(t, p.tr, "no transport may survive a canceled Prepare")
 	p.mu.Unlock()
+}
+
+func TestDisconnect_DuringRegisterKeepsDisconnected(t *testing.T) {
+	// codex-review regression: Disconnect while REGISTER is in flight must
+	// win — runRegistration must not resurrect Registered/RegistrationFailed
+	// over the torn-down phone.
+	silent, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { silent.Close() })
+	host, portStr, _ := net.SplitHostPort(silent.LocalAddr().String())
+	port, _ := strconv.Atoi(portStr)
+
+	cfg := Config{
+		Username: "1001", Password: "test",
+		Host: host, Port: port, Transport: "udp",
+		RegisterExpiry: 60 * time.Second, RegisterRetry: 200 * time.Millisecond, RegisterMaxRetry: 2,
+	}
+	applyDefaults(&cfg)
+	p := newPhone(cfg)
+	require.NoError(t, p.Prepare(context.Background()))
+
+	regDone := make(chan error, 1)
+	go func() { regDone <- p.Register(context.Background()) }()
+
+	// Let Register park against the silent registrar, then tear down.
+	time.Sleep(150 * time.Millisecond)
+	require.NoError(t, p.Disconnect())
+
+	err = <-regDone
+	require.Error(t, err, "canceled registration must not report success")
+	assert.Equal(t, PhoneStateDisconnected, p.State(),
+		"Disconnect must win over the in-flight registration result")
 }
 
 // --- MockPhone lifecycle parity ---

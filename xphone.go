@@ -67,7 +67,8 @@ type phone struct {
 	interfaceIP string // real bind interface IP — fallback for SIP Contact when cfg.NAT is set with an RTPAddress override, so rport + REGISTER keepalive can drive NAT learning.
 	codecPrefs  []int  // cached codecPrefsToInts(cfg.CodecPrefs), set at construction
 	state       PhoneState
-	preparing   bool // standalone Prepare() in flight; Prepared is only published after transport attachment (#101)
+	preparing   bool               // standalone Prepare() in flight; Prepared is only published after transport attachment (#101)
+	regCancel   context.CancelFunc // cancels an in-flight initial REGISTER so Disconnect() unblocks Register/Connect (#101)
 	incomingFns []func(Call)
 	calls       map[string]*call // active calls keyed by SIP Call-ID
 
@@ -277,6 +278,9 @@ func (p *phone) connectWithTransport(tr sipTransport) error {
 		p.dialFn = p.transportDial
 	}
 	p.reg = p.newWiredRegistryLocked(tr)
+	// runRegistration publishes its result only from the Registering marker
+	// (guarding against racing Disconnect); set it like every other caller.
+	p.state = PhoneStateRegistering
 	p.mu.Unlock()
 
 	// Wire up incoming INVITE and MESSAGE handling on the transport.
@@ -326,15 +330,32 @@ func (p *phone) newWiredRegistryLocked(tr sipTransport) *registry {
 // connectWithTransport test hook). ctx bounds the initial registration
 // attempt (the refresh loop runs on the registry's own lifecycle context).
 func (p *phone) runRegistration(ctx context.Context) error {
+	regCtx, cancelReg := context.WithCancel(ctx)
+	defer cancelReg()
 	p.mu.Lock()
 	reg := p.reg
 	tr := p.tr
+	p.regCancel = cancelReg // lets Disconnect() unblock a parked REGISTER
 	p.mu.Unlock()
 
 	// Perform registration (consumes the pre-queued 200 OK in tests).
-	err := reg.Start(ctx)
+	err := reg.Start(regCtx)
 
 	p.mu.Lock()
+	p.regCancel = nil
+	p.mu.Unlock()
+
+	p.mu.Lock()
+	if p.state != PhoneStateRegistering {
+		// A racing Disconnect() tore the phone down while REGISTER was in
+		// flight — don't resurrect a lifecycle state over a cleared
+		// transport. Surface the registration error if there was one.
+		p.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		return ErrInvalidState
+	}
 	if err == nil {
 		p.state = PhoneStateRegistered
 	} else {
@@ -508,8 +529,15 @@ func (p *phone) Connect(ctx context.Context) error {
 // calling it when the transport is already up is a no-op.
 func (p *phone) Prepare(ctx context.Context) error {
 	p.mu.Lock()
-	if p.state != PhoneStateDisconnected || p.preparing {
-		// Transport already up (or setup in flight) — idempotent no-op.
+	if p.preparing {
+		// Another Prepare is in flight. Returning nil here would let the
+		// caller believe the phone is ready while the first attempt may
+		// still fail — be explicit instead.
+		p.mu.Unlock()
+		return ErrInvalidState
+	}
+	if p.state != PhoneStateDisconnected {
+		// Transport already up — idempotent no-op.
 		p.mu.Unlock()
 		return nil
 	}
@@ -642,6 +670,13 @@ func (p *phone) Disconnect() error {
 		}
 		p.mu.Unlock()
 		return ErrNotConnected
+	}
+	if p.regCancel != nil {
+		// Unblock an in-flight Register/Connect parked on a slow or silent
+		// registrar; runRegistration's still-Registering guard then keeps
+		// this Disconnected state authoritative.
+		p.regCancel()
+		p.regCancel = nil
 	}
 	reg := p.reg
 	tr := p.tr

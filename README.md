@@ -40,7 +40,7 @@ months across live SIP trunks and enterprise PBXes.
 | **Codecs** | PCMU/PCMA/G.722 built-in; Opus + G.729 via CGO tags | stable |
 | **DTMF** | RFC 4733 telephone-event + SIP INFO, per-call mode override | stable |
 | **Security** | SRTP/SRTCP (SDES), replay protection, key zeroization | stable |
-| **Network** | UDP/TCP/TLS signaling, STUN, TURN, ICE-Lite, RTCP reports, rport NAT | stable |
+| **Network** | UDP/TCP/TLS signaling, STUN, TURN, ICE-Lite, RTCP reports, rport NAT, outbound multi-IP failover (new) | stable |
 | **B2BUA building blocks** | media redirect via re-INVITE, media-timeout suspend/restore, per-leg DTMF modes → [details](#b2bua-building-blocks) | production-proven, pre-1.0 API |
 | **Video** | H.264/VP8, mid-call upgrade, PLI/FIR keyframes | newer, less mileage |
 | **Messaging & presence** | SIP MESSAGE, SUBSCRIBE/NOTIFY, MWI, BLF, presence | newer, less mileage |
@@ -213,6 +213,16 @@ server.Listen(ctx)
 ```
 
 Peers are authenticated by IP/CIDR or SIP digest auth. Per-peer codec and RTP address overrides are supported.
+
+Outbound `Dial` fails over across a peer's addresses (new): `Host` plus the
+non-CIDR `Hosts` entries, with hostnames expanded to all their IPv4 A records
+— the Request-URI keeps your configured domain; only the transport next-hop
+walks the records. A dead or silent address is abandoned after
+`OutboundFailover.PerHopTimeout` (default 5s, disarmed by any provisional
+response) and the next one is tried; 408/5xx answers also fail over, while
+busy/decline/auth answers end the dial. Set
+`OutboundFailover: xphone.OutboundFailoverConfig{Disabled: true}` for the
+old single-attempt behavior.
 
 For zero-downtime deploys, use `ServerConfig.Listener` with a pre-bound socket (e.g., with `SO_REUSEPORT`):
 

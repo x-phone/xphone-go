@@ -567,6 +567,13 @@ type ServerConfig struct {
 	DtmfMode DtmfMode
 	// Peers is the list of trusted SIP peers that can send/receive calls.
 	Peers []PeerConfig
+	// OutboundFailover controls multi-target failover for Server.Dial when a
+	// peer has more than one reachable address (PeerConfig.Host plus the
+	// non-CIDR entries of PeerConfig.Hosts, with hostnames expanded to all
+	// their IPv4 A records). On a transport failure, a silent hop, or a
+	// 408/5xx final response, Dial moves to the next candidate. See
+	// OutboundFailoverConfig. The zero value enables failover with defaults.
+	OutboundFailover OutboundFailoverConfig
 	// SIPObserver, when set, receives a structured copy of SIP messages the
 	// server sends and receives. See the SIPObserver type for coverage and
 	// threading guarantees.
@@ -607,10 +614,37 @@ type PeerAuthConfig struct {
 // normalizePeerHost splits an embedded port from PeerConfig.Host.
 func normalizePeerHost(p *PeerConfig) { extractHostPort(&p.Host, &p.Port) }
 
+// OutboundFailoverConfig tunes multi-target failover for Server.Dial (#113).
+//
+// Failover only activates when the peer yields more than one dial candidate;
+// single-address peers behave exactly as before. A candidate is abandoned and
+// the next one tried when the INVITE fails at the transport level, when the
+// candidate stays completely silent for PerHopTimeout, or when it answers
+// with 408 or a 5xx final response. Any other final response (busy, decline,
+// auth failure, 6xx) ends the dial — the peer is alive and has spoken.
+type OutboundFailoverConfig struct {
+	// Disabled reverts Server.Dial to single-attempt behavior: only the
+	// first candidate is tried, matching releases before this feature.
+	Disabled bool
+	// PerHopTimeout bounds how long a candidate may remain completely silent
+	// (no SIP response of any kind) before Dial abandons it for the next
+	// candidate. A candidate that has sent any response — even 100 Trying —
+	// is never cut off by this timer; ringing may take arbitrarily long.
+	// Applies only to candidates that still have a fallback behind them: the
+	// last candidate answers to the caller's context and WithDialTimeout,
+	// never to this guard. Default: 5s.
+	PerHopTimeout time.Duration
+	// MaxAttempts caps how many candidates are tried. 0 means all of them.
+	MaxAttempts int
+}
+
 // applyServerDefaults fills zero-value ServerConfig fields with sensible defaults.
 func applyServerDefaults(cfg *ServerConfig) {
 	if cfg.Listen == "" {
 		cfg.Listen = "0.0.0.0:5060"
+	}
+	if cfg.OutboundFailover.PerHopTimeout == 0 {
+		cfg.OutboundFailover.PerHopTimeout = 5 * time.Second
 	}
 	if cfg.MediaTimeout == 0 {
 		cfg.MediaTimeout = 30 * time.Second

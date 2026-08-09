@@ -3,7 +3,7 @@ module github.com/x-phone/xphone-go
 go 1.23.0
 
 require (
-	github.com/emiago/sipgo v1.3.1
+	github.com/emiago/sipgo v1.4.3
 	github.com/gotranspile/g722 v0.0.0-20240123003956-384a1bb16a19
 	github.com/pion/rtp v1.10.1
 	github.com/stretchr/testify v1.11.1

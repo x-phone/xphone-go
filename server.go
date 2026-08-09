@@ -231,18 +231,22 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 	}
 	defer dialCancel()
 
-	candidates := s.peerDialCandidates(dialCtx, peerCfg)
-	if len(candidates) == 0 {
-		// No usable host at all — preserve the historical single-shot path
-		// (and its error) rather than inventing a new failure mode.
-		candidates = []string{s.resolvePeerAddr(peerCfg)}
-	}
 	failover := s.cfg.OutboundFailover
+	var candidates []string
 	if failover.Disabled {
-		candidates = candidates[:1]
-	}
-	if failover.MaxAttempts > 0 && failover.MaxAttempts < len(candidates) {
-		candidates = candidates[:failover.MaxAttempts]
+		// Legacy single-shot target, no DNS expansion: a hostname stays a
+		// hostname in the Request-URI (TLS SNI / domain routing intact).
+		candidates = []string{s.resolvePeerAddr(peerCfg)}
+	} else {
+		candidates = s.peerDialCandidates(dialCtx, peerCfg)
+		if len(candidates) == 0 {
+			// No usable host at all — preserve the historical single-shot
+			// path (and its error) rather than inventing a new failure mode.
+			candidates = []string{s.resolvePeerAddr(peerCfg)}
+		}
+		if failover.MaxAttempts > 0 && failover.MaxAttempts < len(candidates) {
+			candidates = candidates[:failover.MaxAttempts]
+		}
 	}
 
 	// Resolve per-peer RTP address and codecs.

@@ -218,6 +218,34 @@ func TestServerDial_DisabledUsesSingleCandidate(t *testing.T) {
 	assert.Equal(t, 1, attempts, "Disabled must preserve single-attempt behavior")
 }
 
+func TestServerDial_DisabledKeepsHostnameVerbatim(t *testing.T) {
+	// codex-review regression: Disabled must dial the legacy target — the
+	// hostname itself, unexpanded — so TLS SNI and domain routing behave
+	// exactly as before the failover feature.
+	lookupCalled := false
+	orig := lookupHostFn
+	lookupHostFn = func(context.Context, string) ([]string, error) {
+		lookupCalled = true
+		return []string{"198.51.100.1"}, nil
+	}
+	t.Cleanup(func() { lookupHostFn = orig })
+
+	s := failoverTestServer(t, ServerConfig{
+		OutboundFailover: OutboundFailoverConfig{Disabled: true},
+		Peers:            []PeerConfig{{Name: "trunk", Host: "sip.example.com", Port: 5060}},
+	})
+	var target string
+	s.dialOnceFn = func(ctx context.Context, tgt, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+		target = tgt
+		return testutil.NewMockDialog(), nil
+	}
+
+	_, err := s.Dial(context.Background(), "trunk", "15551230100", "")
+	require.NoError(t, err)
+	assert.Equal(t, "sip:15551230100@sip.example.com:5060", target)
+	assert.False(t, lookupCalled, "Disabled must not pay for DNS expansion")
+}
+
 func TestServerDial_MaxAttemptsCapsCandidates(t *testing.T) {
 	s := failoverTestServer(t, ServerConfig{OutboundFailover: OutboundFailoverConfig{MaxAttempts: 2}})
 	var attempts int

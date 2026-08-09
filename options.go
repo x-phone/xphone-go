@@ -99,7 +99,7 @@ type Config struct {
 	VoicemailURI string
 
 	// DisplayName is included in SIP Contact headers.
-	// Helps PBXes identify the device (e.g., "VoiceApp/1.0").
+	// Helps PBXes identify the device (e.g., "MyApp/1.0").
 	DisplayName string
 
 	Logger *slog.Logger
@@ -500,7 +500,7 @@ func WithVoicemailURI(uri string) PhoneOption {
 }
 
 // WithDisplayName sets the display name for SIP Contact headers.
-// Helps PBXes identify the device (e.g., "VoiceApp/1.0").
+// Helps PBXes identify the device (e.g., "MyApp/1.0").
 func WithDisplayName(name string) PhoneOption {
 	return func(c *Config) {
 		c.DisplayName = name

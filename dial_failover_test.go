@@ -282,6 +282,32 @@ func TestServerDial_ResponsiveHopDisarmsSilenceTimer(t *testing.T) {
 	assert.Equal(t, 1, attempts)
 }
 
+func TestServerDial_LastCandidateNotCutOffBySilenceTimer(t *testing.T) {
+	// codex-review regression: the silence guard exists to move on to a
+	// fallback. The final candidate has none — it must be governed by the
+	// caller's timeout, not abandoned at PerHopTimeout.
+	s := failoverTestServer(t, ServerConfig{OutboundFailover: OutboundFailoverConfig{PerHopTimeout: 30 * time.Millisecond}})
+	var attempts int
+	s.dialOnceFn = func(ctx context.Context, target, from, rtpAddr string, peerCodecs []int, opts DialOptions, onResponse func(int, string)) (dialog, error) {
+		attempts++
+		if attempts < 3 {
+			<-ctx.Done() // hops 1 and 2: silent, abandoned by the guard
+			return nil, ctx.Err()
+		}
+		// Hop 3 (last): silent well past PerHopTimeout, then answers.
+		select {
+		case <-time.After(90 * time.Millisecond):
+			return testutil.NewMockDialog(), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	_, err := s.Dial(context.Background(), "trunk", "15551230100", "")
+	require.NoError(t, err, "last candidate must not be killed by the per-hop silence guard")
+	assert.Equal(t, 3, attempts)
+}
+
 func TestServerDial_OverallTimeoutStopsFailover(t *testing.T) {
 	s := failoverTestServer(t, ServerConfig{OutboundFailover: OutboundFailoverConfig{PerHopTimeout: time.Minute}})
 	var attempts int

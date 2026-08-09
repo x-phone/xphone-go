@@ -630,7 +630,9 @@ type OutboundFailoverConfig struct {
 	// (no SIP response of any kind) before Dial abandons it for the next
 	// candidate. A candidate that has sent any response — even 100 Trying —
 	// is never cut off by this timer; ringing may take arbitrarily long.
-	// Applies only when there are multiple candidates. Default: 5s.
+	// Applies only to candidates that still have a fallback behind them: the
+	// last candidate answers to the caller's context and WithDialTimeout,
+	// never to this guard. Default: 5s.
 	PerHopTimeout time.Duration
 	// MaxAttempts caps how many candidates are tried. 0 means all of them.
 	MaxAttempts int

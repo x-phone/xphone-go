@@ -270,7 +270,9 @@ func (s *server) Dial(ctx context.Context, peer string, to string, from string, 
 		// early. Candidate lists are tiny, so stacked defers are fine.
 		defer hopCancel()
 		var silenceTimer *time.Timer
-		if len(candidates) > 1 && failover.PerHopTimeout > 0 {
+		if i < len(candidates)-1 && failover.PerHopTimeout > 0 {
+			// Armed only while a fallback remains: the last candidate answers
+			// to the caller's own timeout, not the per-hop silence guard.
 			silenceTimer = time.AfterFunc(failover.PerHopTimeout, hopCancel)
 		}
 		hopStart := len(responses)

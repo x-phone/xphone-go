@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.7.0
+
 ### Bug fixes
 - `SendDTMF` no longer transmits RFC 4733 RTP the remote never negotiated. Audio-codec negotiation now records whether telephone-event (101) was accepted; in `DtmfRfc4733` mode `SendDTMF` returns the new `ErrDTMFNotNegotiated` instead of writing packets into the void, and in `DtmfBoth` mode it falls back to SIP INFO — making the name honest (real redundancy against middleboxes that strip RTP DTMF). (#103, #104)
 - `Phone.Connect()` no longer holds the phone mutex across STUN discovery. STUN is a ~1s network round-trip; holding the lock blocked concurrent `State()`/`Dial()`/`Disconnect()`/callback calls for its duration. The round-trip now runs unlocked with a re-check for a racing `Disconnect()` on completion. (#106)
